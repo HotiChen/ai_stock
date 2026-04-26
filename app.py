@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -864,6 +866,45 @@ def _send_chat(user_input: str, positions: list[dict], ai_log: dict | None):
 _GOAL_PATH    = "data/strategy_goal.json"
 _ENTRIES_PATH = "data/strategy_entries.jsonl"
 _RESEARCH_DB  = "data/research.db"
+_PID_FILE     = "data/executor.pid"
+
+
+def _executor_running() -> bool:
+    pid_path = Path(_PID_FILE)
+    if not pid_path.exists():
+        return False
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)   # 0 = just check, doesn't actually send signal
+        return True
+    except (ProcessLookupError, PermissionError, ValueError):
+        pid_path.unlink(missing_ok=True)
+        return False
+
+
+def _start_executor() -> None:
+    if _executor_running():
+        return
+    Path("data").mkdir(exist_ok=True)
+    script = Path(__file__).parent / "run_executor.py"
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=open("data/executor.log", "a"),
+        stderr=subprocess.STDOUT,
+    )
+    Path(_PID_FILE).write_text(str(proc.pid))
+
+
+def _stop_executor() -> None:
+    pid_path = Path(_PID_FILE)
+    if not pid_path.exists():
+        return
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 15)   # SIGTERM
+    except Exception:
+        pass
+    pid_path.unlink(missing_ok=True)
 
 
 def _render_strategy_tracker():
@@ -965,15 +1006,22 @@ def _render_strategy_tracker():
         records = load_execution_records(active_exec.execution_id, _RESEARCH_DB)
         today_records = [r for r in records if r.recorded_at.date() == today]
         e1, e2, e3, e4 = st.columns(4)
+        running = _executor_running()
         e1.metric("執行中計劃", plan_label)
         e2.metric("今日操作", f"{len(today_records)} 筆")
         e3.metric("模擬累積損益", f"{status.total_simulated_pnl:+,.0f} 元" if status else "—")
-        e4.metric("執行 ID", active_exec.execution_id)
-        if st.button("⏹️ 停止執行計劃", use_container_width=True):
+        e4.metric("背景程式", "🟢 運行中" if running else "🔴 已停止")
+        sb1, sb2 = st.columns(2)
+        if sb1.button("⏹️ 停止執行計劃", use_container_width=True):
             from strategy_executor import stop_execution as _stop
             _stop(active_exec.execution_id, _RESEARCH_DB)
+            _stop_executor()
             st.session_state.pop("_active_exec_id", None)
             st.success("計劃已停止")
+            st.rerun()
+        if not running and sb2.button("▶️ 重新啟動背景程式", use_container_width=True):
+            _start_executor()
+            st.success("背景程式已重新啟動")
             st.rerun()
         if today_records:
             with st.expander(f"📋 今日執行記錄（{len(today_records)} 筆）"):
@@ -1073,7 +1121,8 @@ def _render_strategy_tracker():
                     _init_db(_RESEARCH_DB)
                     exec_id = _start_exec(plan_set, plan.plan_type, _RESEARCH_DB)
                     st.session_state["_active_exec_id"] = exec_id
-                    st.success(f"計劃已啟動！ID: {exec_id}　請在終端機執行 `python3 run_executor.py` 開始 10 分鐘循環。")
+                    _start_executor()
+                    st.success(f"✅ 計劃已啟動，每 10 分鐘自動分析！ID: {exec_id}")
                     st.rerun()
 
     st.divider()
