@@ -8,6 +8,30 @@ from pathlib import Path
 from typing import Optional
 
 _DDL = """
+CREATE TABLE IF NOT EXISTS sim_positions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id  TEXT NOT NULL,
+    code          TEXT NOT NULL,
+    name          TEXT,
+    quantity      INTEGER,
+    avg_cost      REAL,
+    current_price REAL,
+    opened_at     TEXT,
+    status        TEXT DEFAULT 'open'
+);
+
+CREATE TABLE IF NOT EXISTS sim_realized (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id  TEXT NOT NULL,
+    code          TEXT NOT NULL,
+    name          TEXT,
+    quantity      INTEGER,
+    avg_cost      REAL,
+    sell_price    REAL,
+    realized_pnl  REAL,
+    closed_at     TEXT
+);
+
 CREATE TABLE IF NOT EXISTS market_context (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     recorded_at  TEXT NOT NULL,

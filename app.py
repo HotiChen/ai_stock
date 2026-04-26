@@ -46,6 +46,14 @@ from strategy_planner import (
     PlanSet,
     generate_strategy_plans,
 )
+from sim_engine import (
+    compare_plans,
+    generate_sim_report,
+    open_position,
+    close_position,
+    update_unrealized,
+    get_portfolio,
+)
 from strategy_tracker import (
     DailyEntry,
     StrategyGoal,
@@ -1031,6 +1039,36 @@ def _render_strategy_tracker():
                                 f"**{rec.action.upper()} {rec.code} {rec.name}** "
                                 f"{rec.quantity}張 @{rec.price:.0f}　{rec.reason[:50]}")
 
+    # ── 三計劃比較報告 ────────────────────────────────────────────
+    exec_map = st.session_state.get("_exec_map", {})
+    if len(exec_map) > 1:
+        st.divider()
+        st.markdown("#### 📊 三套計劃模擬比較報告")
+        total_pnl_used = sum(e.pnl for e in entries)
+        init_cap = goal.initial_capital
+        reports = compare_plans(exec_map, init_cap, _RESEARCH_DB)
+        medal = ["🥇", "🥈", "🥉"]
+        rep_cols = st.columns(len(reports))
+        for i, (col, report) in enumerate(zip(rep_cols, reports)):
+            plan_label = {"aggressive": "🔥 衝刺版", "balanced": "⚖️ 均衡版",
+                          "conservative": "🛡️ 保守版"}.get(report.plan_type, report.plan_type)
+            pnl_color = "#ef5350" if report.total_pnl > 0 else "#26a69a"
+            with col:
+                st.markdown(
+                    f"<div style='background:#1e1e2e;padding:14px;border-radius:10px;text-align:center'>"
+                    f"<div style='font-size:20px'>{medal[i]}</div>"
+                    f"<div style='font-size:15px;font-weight:bold'>{plan_label}</div>"
+                    f"<div style='font-size:22px;color:{pnl_color};margin:8px 0'>"
+                    f"{report.return_pct:+.2f}%</div>"
+                    f"<div style='color:#aaa;font-size:12px'>"
+                    f"損益 {report.total_pnl:+,.0f} 元<br>"
+                    f"已實現 {report.realized_pnl:+,.0f}<br>"
+                    f"未實現 {report.unrealized_pnl:+,.0f}<br>"
+                    f"勝率 {report.win_rate:.0f}%　{report.total_trades} 筆</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
     st.divider()
 
     # ── AI 策略計劃 ────────────────────────────────────────────────
@@ -1084,6 +1122,21 @@ def _render_strategy_tracker():
         plan_set: PlanSet = st.session_state["_plan_set"]
         st.caption(f"生成於 {plan_set.generated_at}")
 
+        # ── 三個一起跑模擬 ────────────────────────────────────────
+        if st.button("🎯 三個計劃全部跑模擬（同時比較）",
+                     use_container_width=True, type="primary"):
+            from research_db import init_db as _init_db
+            from strategy_executor import start_execution as _start_exec
+            _init_db(_RESEARCH_DB)
+            exec_map = {}
+            for pt in ("aggressive", "balanced", "conservative"):
+                eid = _start_exec(plan_set, pt, _RESEARCH_DB)
+                exec_map[pt] = eid
+            st.session_state["_exec_map"] = exec_map
+            _start_executor()
+            st.success("✅ 三套計劃已同時啟動模擬！每 10 分鐘更新。")
+            st.rerun()
+
         plan_cols = st.columns(3)
         plans = [
             ("🔥 衝刺版", plan_set.aggressive,   "#3a1a1a"),
@@ -1093,36 +1146,50 @@ def _render_strategy_tracker():
         for col, (label, plan, bg) in zip(plan_cols, plans):
             with col:
                 st.markdown(
-                    f"<div style='background:{bg};padding:14px;border-radius:10px;"
-                    f"min-height:120px'>"
-                    f"<div style='font-size:16px;font-weight:bold;margin-bottom:6px'>{label}</div>"
+                    f"<div style='background:{bg};padding:14px;border-radius:10px;'>"
+                    f"<div style='font-size:16px;font-weight:bold;margin-bottom:4px'>{label}</div>"
                     f"<div style='color:#ccc;font-size:13px'>{plan.description}</div>"
-                    f"<div style='color:#aaa;font-size:12px;margin-top:8px'>"
+                    f"<div style='color:#aaa;font-size:12px;margin-top:6px'>"
                     f"動用資金 {plan.capital_deployed_pct*100:.0f}%　"
                     f"預期報酬 {plan.expected_return_pct:+.1f}%</div>"
-                    f"<div style='color:#888;font-size:11px;margin-top:4px'>{plan.risk_note}</div>"
+                    f"<div style='color:#f66;font-size:11px;margin-top:4px'>⚠️ {plan.risk_note}</div>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
-                st.markdown("")
+                # 整體論述
+                if plan.thesis:
+                    with st.expander("📋 投資論述", expanded=True):
+                        st.markdown(plan.thesis)
+                        if plan.macro_context:
+                            st.caption(f"總體環境：{plan.macro_context}")
+
+                st.markdown("**選股：**")
                 for pick in plan.picks:
                     action_icon = "🟢" if pick.action == "buy" else "⬜"
-                    st.markdown(
-                        f"**{action_icon} {pick.code} {pick.name}**　{pick.quantity} 張　"
-                        f"持有 {pick.hold_days} 天　預期 {pick.expected_return_pct:+.1f}%\n\n"
-                        f"<small style='color:#aaa'>{pick.reason}　信心 {pick.confidence}/10</small>",
-                        unsafe_allow_html=True,
-                    )
+                    with st.expander(
+                        f"{action_icon} {pick.code} {pick.name}　"
+                        f"{pick.quantity}張　{pick.hold_days}天　"
+                        f"{pick.expected_return_pct:+.1f}%　信心{pick.confidence}/10"
+                    ):
+                        st.markdown(f"**核心理由：** {pick.reason}")
+                        if pick.key_catalysts:
+                            st.markdown("**催化劑：**")
+                            for cat in pick.key_catalysts:
+                                st.markdown(f"- {cat}")
+                        if pick.entry_logic:
+                            st.markdown(f"**進場：** {pick.entry_logic}")
+                        if pick.exit_logic:
+                            st.markdown(f"**出場：** {pick.exit_logic}")
                 st.markdown("")
-                if st.button(f"🚀 執行此計劃（模擬）",
-                             key=f"exec_{plan.plan_type}", use_container_width=True, type="primary"):
+                if st.button(f"▶️ 單獨執行此計劃",
+                             key=f"exec_{plan.plan_type}", use_container_width=True):
                     from research_db import init_db as _init_db
                     from strategy_executor import start_execution as _start_exec
                     _init_db(_RESEARCH_DB)
                     exec_id = _start_exec(plan_set, plan.plan_type, _RESEARCH_DB)
-                    st.session_state["_active_exec_id"] = exec_id
+                    st.session_state["_exec_map"] = {plan.plan_type: exec_id}
                     _start_executor()
-                    st.success(f"✅ 計劃已啟動，每 10 分鐘自動分析！ID: {exec_id}")
+                    st.success(f"✅ 已啟動！ID: {exec_id}")
                     st.rerun()
 
     st.divider()
