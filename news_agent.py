@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import json
+import re
+from datetime import datetime
+
+import feedparser
+import requests
+
+import config
+
+RSS_FEEDS = [
+    ("鉅亨網", "https://www.cnyes.com/rss/cat/tw_stock"),
+    ("Yahoo財經", "https://tw.stock.yahoo.com/rss"),
+    ("MoneyDJ", "https://www.moneydj.com/rss/news.aspx"),
+]
+
+
+def extract_json(text: str) -> dict:
+    """Extract first valid JSON object from text."""
+    match = re.search(r"\{.*?\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def call_ollama(model: str, prompt: str, timeout: int | None = None) -> str:
+    """Call Ollama generate API and return response text."""
+    resp = requests.post(
+        f"{config.OLLAMA_URL}/api/generate",
+        json={"model": model, "prompt": prompt, "stream": False},
+        timeout=timeout or config.OLLAMA_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json().get("response", "")
+
+
+def fetch_headlines(max_per_feed: int = 5) -> list[str]:
+    """Fetch latest headlines from Taiwan stock RSS feeds."""
+    headlines = []
+    for _name, url in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:max_per_feed]:
+                headlines.append(entry.title)
+        except Exception:
+            pass
+    return headlines
+
+
+def analyze_sentiment(headlines: list[str]) -> dict:
+    """Use NEWS_MODEL to classify market sentiment from headlines."""
+    if not headlines:
+        return {"sentiment": "neutral", "score": 5, "reason": "無新聞資料", "headlines_used": 0}
+
+    sample = headlines[:8]
+    prompt = f"""分析以下台股新聞標題的整體市場情緒。
+只用 JSON 回答，不要其他文字。
+
+新聞：
+{chr(10).join(f"- {h}" for h in sample)}
+
+回答格式（sentiment 只能填 positive/negative/neutral）：
+{{"sentiment": "positive", "score": 7, "reason": "一句話說明"}}"""
+
+    try:
+        raw = call_ollama(config.NEWS_MODEL, prompt)
+        result = extract_json(raw)
+        if "sentiment" in result and result["sentiment"] in ("positive", "negative", "neutral"):
+            result["headlines_used"] = len(sample)
+            return result
+    except Exception:
+        pass
+
+    return {"sentiment": "neutral", "score": 5, "reason": "分析失敗，預設中性", "headlines_used": 0}
+
+
+def get_news_context() -> dict:
+    """Full pipeline: fetch → analyze → return context dict."""
+    headlines = fetch_headlines()
+    sentiment = analyze_sentiment(headlines)
+    sentiment["fetched_at"] = datetime.now().isoformat()
+    sentiment["headlines"] = headlines[:5]
+    return sentiment

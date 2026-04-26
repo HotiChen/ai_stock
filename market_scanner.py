@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+from market_scan import batch_fetch_snapshots
+from stock_research import (
+    StockFundamentals,
+    analyze_stock_ai,
+    fetch_stock_fundamentals,
+    fetch_stock_news,
+)
+
+log = logging.getLogger(__name__)
+
+
+# ── Data models ───────────────────────────────────────────────────────────────
+
+@dataclass
+class ScanCriteria:
+    min_volume:  int   = 5_000    # 最低成交量（張）
+    min_price:   float = 10.0     # 最低股價（避免地雷股）
+    max_price:   float = 5_000.0  # 最高股價（避免流動性差）
+    top_n:       int   = 20       # 進入深度分析的候選數
+
+
+@dataclass
+class ScanResult:
+    code:         str
+    name:         str
+    close:        float
+    change_rate:  float
+    total_volume: int
+    analysis:     dict | None     # None = 深度分析未執行或失敗
+
+
+# ── Scoring & screening ───────────────────────────────────────────────────────
+
+def score_snapshot(snap: dict) -> float:
+    """Composite score = abs(change_rate) × log1p(volume). Higher = more interesting."""
+    import math
+    volume = snap.get("total_volume", 0)
+    change = abs(snap.get("change_rate", 0.0))
+    return change * math.log1p(max(volume, 0))
+
+
+def screen_candidates(snapshots: dict[str, dict], criteria: ScanCriteria) -> list[dict]:
+    """Filter snapshots by criteria, return top_n sorted by score."""
+    rows = []
+    for code, snap in snapshots.items():
+        volume = snap.get("total_volume", 0)
+        price = snap.get("close", 0.0)
+        if volume < criteria.min_volume:
+            continue
+        if price < criteria.min_price or price > criteria.max_price:
+            continue
+        row = dict(snap)
+        row["code"] = code
+        rows.append(row)
+
+    rows.sort(key=score_snapshot, reverse=True)
+    return rows[: criteria.top_n]
+
+
+# ── API helpers ───────────────────────────────────────────────────────────────
+
+def get_all_stock_codes(api) -> list[str]:
+    """Return all unique stock codes from TSE + OTC + OES exchanges."""
+    codes: list[str] = []
+    for exchange in ("TSE", "OTC", "OES"):
+        try:
+            for c in getattr(api.Contracts.Stocks, exchange, []):
+                codes.append(c.code)
+        except Exception:
+            pass
+    seen: set[str] = set()
+    unique = []
+    for c in codes:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
+
+
+# ── Deep analysis ─────────────────────────────────────────────────────────────
+
+def run_deep_analysis(
+    candidates: list[dict],
+    indicators_map: dict[str, dict],
+    progress_cb=None,
+) -> list[ScanResult]:
+    """Run news + fundamentals + AI for each candidate.
+
+    progress_cb(current, total, code) is called after each stock if provided.
+    """
+    results: list[ScanResult] = []
+    total = len(candidates)
+
+    for i, snap in enumerate(candidates):
+        code = snap.get("code", "")
+        name = snap.get("name", code)
+
+        try:
+            news         = fetch_stock_news(code, name)
+            fundamentals = fetch_stock_fundamentals(code)
+            indicators   = indicators_map.get(code, {})
+            analysis     = analyze_stock_ai(code, name, news, fundamentals, indicators)
+        except Exception as e:
+            log.warning(f"深度分析失敗 {code}: {e}")
+            analysis = None
+
+        results.append(ScanResult(
+            code=code,
+            name=name,
+            close=snap.get("close", 0.0),
+            change_rate=snap.get("change_rate", 0.0),
+            total_volume=snap.get("total_volume", 0),
+            analysis=analysis,
+        ))
+
+        if progress_cb:
+            progress_cb(i + 1, total, code)
+
+    return results
+
+
+# ── Full pipeline ─────────────────────────────────────────────────────────────
+
+def run_full_market_scan(
+    api,
+    name_map: dict[str, str],
+    criteria: ScanCriteria | None = None,
+    progress_cb=None,
+) -> list[ScanResult]:
+    """
+    Full pipeline:
+    1. Get all stock codes from Shioaji
+    2. Batch fetch snapshots (fast)
+    3. Screen to top candidates
+    4. Run deep analysis (news + fundamentals + AI)
+    """
+    if criteria is None:
+        criteria = ScanCriteria()
+
+    log.info("取得所有股票代碼...")
+    all_codes = get_all_stock_codes(api)
+    log.info(f"共 {len(all_codes)} 支股票")
+
+    log.info("批次抓取快照...")
+    snapshots = batch_fetch_snapshots(api, all_codes)
+    for code, snap in snapshots.items():
+        snap["name"] = name_map.get(code, code)
+    log.info(f"取得 {len(snapshots)} 支快照")
+
+    candidates = screen_candidates(snapshots, criteria)
+    log.info(f"篩選後候選：{len(candidates)} 支 → 進行深度分析")
+
+    return run_deep_analysis(candidates, indicators_map={}, progress_cb=progress_cb)
