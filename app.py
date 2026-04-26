@@ -863,6 +863,7 @@ def _send_chat(user_input: str, positions: list[dict], ai_log: dict | None):
 
 _GOAL_PATH    = "data/strategy_goal.json"
 _ENTRIES_PATH = "data/strategy_entries.jsonl"
+_RESEARCH_DB  = "data/research.db"
 
 
 def _render_strategy_tracker():
@@ -952,6 +953,36 @@ def _render_strategy_tracker():
 
     st.progress(min(progress.completion_pct / 100, 1.0))
 
+    # ── 執行狀態 ──────────────────────────────────────────────────
+    from research_db import init_db as _init_db, load_active_execution as _load_exec
+    from strategy_executor import get_execution_status as _get_status, load_execution_records
+    _init_db(_RESEARCH_DB)
+    active_exec = _load_exec(_RESEARCH_DB)
+    if active_exec:
+        status = _get_status(active_exec.execution_id, _RESEARCH_DB)
+        plan_label = {"aggressive": "🔥 衝刺版", "balanced": "⚖️ 均衡版",
+                      "conservative": "🛡️ 保守版"}.get(active_exec.plan_type, active_exec.plan_type)
+        records = load_execution_records(active_exec.execution_id, _RESEARCH_DB)
+        today_records = [r for r in records if r.recorded_at.date() == today]
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("執行中計劃", plan_label)
+        e2.metric("今日操作", f"{len(today_records)} 筆")
+        e3.metric("模擬累積損益", f"{status.total_simulated_pnl:+,.0f} 元" if status else "—")
+        e4.metric("執行 ID", active_exec.execution_id)
+        if st.button("⏹️ 停止執行計劃", use_container_width=True):
+            from strategy_executor import stop_execution as _stop
+            _stop(active_exec.execution_id, _RESEARCH_DB)
+            st.session_state.pop("_active_exec_id", None)
+            st.success("計劃已停止")
+            st.rerun()
+        if today_records:
+            with st.expander(f"📋 今日執行記錄（{len(today_records)} 筆）"):
+                for rec in today_records:
+                    icon = "🟢" if rec.action == "buy" else "🔴" if rec.action == "sell" else "⬜"
+                    st.markdown(f"{icon} `{rec.recorded_at.strftime('%H:%M')}` "
+                                f"**{rec.action.upper()} {rec.code} {rec.name}** "
+                                f"{rec.quantity}張 @{rec.price:.0f}　{rec.reason[:50]}")
+
     st.divider()
 
     # ── AI 策略計劃 ────────────────────────────────────────────────
@@ -1034,6 +1065,16 @@ def _render_strategy_tracker():
                         f"<small style='color:#aaa'>{pick.reason}　信心 {pick.confidence}/10</small>",
                         unsafe_allow_html=True,
                     )
+                st.markdown("")
+                if st.button(f"🚀 執行此計劃（模擬）",
+                             key=f"exec_{plan.plan_type}", use_container_width=True, type="primary"):
+                    from research_db import init_db as _init_db
+                    from strategy_executor import start_execution as _start_exec
+                    _init_db(_RESEARCH_DB)
+                    exec_id = _start_exec(plan_set, plan.plan_type, _RESEARCH_DB)
+                    st.session_state["_active_exec_id"] = exec_id
+                    st.success(f"計劃已啟動！ID: {exec_id}　請在終端機執行 `python3 run_executor.py` 開始 10 分鐘循環。")
+                    st.rerun()
 
     st.divider()
 

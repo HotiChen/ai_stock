@@ -1,0 +1,281 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
+from typing import Optional
+
+_DDL = """
+CREATE TABLE IF NOT EXISTS market_context (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at  TEXT NOT NULL,
+    sp500_change REAL,
+    nasdaq_change REAL,
+    sox_change   REAL,
+    vix          REAL,
+    sentiment    TEXT,
+    news_json    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS stock_analysis (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    analyzed_at  TEXT NOT NULL,
+    code         TEXT NOT NULL,
+    name         TEXT,
+    signal       TEXT,
+    confidence   INTEGER,
+    summary      TEXT,
+    factors_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS plan_executions (
+    execution_id TEXT PRIMARY KEY,
+    created_at   TEXT NOT NULL,
+    plan_type    TEXT NOT NULL,
+    plan_json    TEXT NOT NULL,
+    status       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_records (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id  TEXT NOT NULL,
+    recorded_at   TEXT NOT NULL,
+    code          TEXT,
+    name          TEXT,
+    action        TEXT,
+    quantity      INTEGER,
+    price         REAL,
+    simulated_pnl REAL,
+    reason        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS daily_summaries (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id  TEXT NOT NULL,
+    date          TEXT NOT NULL,
+    total_pnl     REAL,
+    target_met    INTEGER,
+    review        TEXT,
+    next_day_plan TEXT
+);
+"""
+
+
+# ── Row types ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class MarketContextRow:
+    recorded_at:    datetime
+    sp500_change:   float
+    nasdaq_change:  float
+    sox_change:     float
+    vix:            float
+    sentiment:      str
+    news_headlines: list[str]
+
+
+@dataclass
+class StockAnalysisRow:
+    analyzed_at: datetime
+    code:        str
+    name:        str
+    signal:      str
+    confidence:  int
+    summary:     str
+    factors:     dict
+
+
+@dataclass
+class PlanExecutionRow:
+    execution_id: str
+    created_at:   datetime
+    plan_type:    str
+    plan_json:    dict
+    status:       str
+
+
+@dataclass
+class ExecutionRecordRow:
+    execution_id:  str
+    recorded_at:   datetime
+    code:          str
+    name:          str
+    action:        str
+    quantity:      int
+    price:         float
+    simulated_pnl: float
+    reason:        str
+
+
+@dataclass
+class DailySummaryRow:
+    execution_id:  str
+    date:          date
+    total_pnl:     float
+    target_met:    bool
+    review:        str
+    next_day_plan: str
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _conn(path: str) -> sqlite3.Connection:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(path)
+
+
+def init_db(path: str) -> None:
+    with _conn(path) as con:
+        con.executescript(_DDL)
+
+
+# ── MarketContext ─────────────────────────────────────────────────────────────
+
+def save_market_context(ctx: MarketContextRow, path: str) -> None:
+    with _conn(path) as con:
+        con.execute(
+            "INSERT INTO market_context (recorded_at,sp500_change,nasdaq_change,sox_change,vix,sentiment,news_json) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (ctx.recorded_at.isoformat(), ctx.sp500_change, ctx.nasdaq_change,
+             ctx.sox_change, ctx.vix, ctx.sentiment, json.dumps(ctx.news_headlines, ensure_ascii=False)),
+        )
+
+
+def load_latest_market_context(path: str) -> Optional[MarketContextRow]:
+    with _conn(path) as con:
+        row = con.execute(
+            "SELECT recorded_at,sp500_change,nasdaq_change,sox_change,vix,sentiment,news_json "
+            "FROM market_context ORDER BY recorded_at DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    return MarketContextRow(
+        recorded_at=datetime.fromisoformat(row[0]),
+        sp500_change=row[1], nasdaq_change=row[2],
+        sox_change=row[3], vix=row[4], sentiment=row[5],
+        news_headlines=json.loads(row[6]),
+    )
+
+
+# ── StockAnalysis ─────────────────────────────────────────────────────────────
+
+def save_stock_analysis(row: StockAnalysisRow, path: str) -> None:
+    with _conn(path) as con:
+        con.execute(
+            "INSERT INTO stock_analysis (analyzed_at,code,name,signal,confidence,summary,factors_json) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (row.analyzed_at.isoformat(), row.code, row.name, row.signal,
+             row.confidence, row.summary, json.dumps(row.factors, ensure_ascii=False)),
+        )
+
+
+def load_stock_analysis(code: str, path: str) -> Optional[StockAnalysisRow]:
+    with _conn(path) as con:
+        r = con.execute(
+            "SELECT analyzed_at,code,name,signal,confidence,summary,factors_json "
+            "FROM stock_analysis WHERE code=? ORDER BY analyzed_at DESC LIMIT 1",
+            (code,),
+        ).fetchone()
+    if not r:
+        return None
+    return StockAnalysisRow(
+        analyzed_at=datetime.fromisoformat(r[0]),
+        code=r[1], name=r[2], signal=r[3],
+        confidence=r[4], summary=r[5],
+        factors=json.loads(r[6]),
+    )
+
+
+# ── PlanExecution ─────────────────────────────────────────────────────────────
+
+def save_plan_execution(row: PlanExecutionRow, path: str) -> None:
+    with _conn(path) as con:
+        con.execute(
+            "INSERT OR REPLACE INTO plan_executions (execution_id,created_at,plan_type,plan_json,status) "
+            "VALUES (?,?,?,?,?)",
+            (row.execution_id, row.created_at.isoformat(), row.plan_type,
+             json.dumps(row.plan_json, ensure_ascii=False), row.status),
+        )
+
+
+def load_active_execution(path: str) -> Optional[PlanExecutionRow]:
+    with _conn(path) as con:
+        r = con.execute(
+            "SELECT execution_id,created_at,plan_type,plan_json,status "
+            "FROM plan_executions WHERE status='active' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    if not r:
+        return None
+    return PlanExecutionRow(
+        execution_id=r[0], created_at=datetime.fromisoformat(r[1]),
+        plan_type=r[2], plan_json=json.loads(r[3]), status=r[4],
+    )
+
+
+def stop_execution(execution_id: str, path: str) -> None:
+    with _conn(path) as con:
+        con.execute(
+            "UPDATE plan_executions SET status='stopped' WHERE execution_id=?",
+            (execution_id,),
+        )
+
+
+# ── ExecutionRecord ───────────────────────────────────────────────────────────
+
+def save_execution_record(row: ExecutionRecordRow, path: str) -> None:
+    with _conn(path) as con:
+        con.execute(
+            "INSERT INTO execution_records "
+            "(execution_id,recorded_at,code,name,action,quantity,price,simulated_pnl,reason) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (row.execution_id, row.recorded_at.isoformat(), row.code, row.name,
+             row.action, row.quantity, row.price, row.simulated_pnl, row.reason),
+        )
+
+
+def load_execution_records(execution_id: str, path: str) -> list[ExecutionRecordRow]:
+    with _conn(path) as con:
+        rows = con.execute(
+            "SELECT execution_id,recorded_at,code,name,action,quantity,price,simulated_pnl,reason "
+            "FROM execution_records WHERE execution_id=? ORDER BY recorded_at",
+            (execution_id,),
+        ).fetchall()
+    return [
+        ExecutionRecordRow(
+            execution_id=r[0], recorded_at=datetime.fromisoformat(r[1]),
+            code=r[2], name=r[3], action=r[4], quantity=r[5],
+            price=r[6], simulated_pnl=r[7], reason=r[8],
+        )
+        for r in rows
+    ]
+
+
+# ── DailySummary ──────────────────────────────────────────────────────────────
+
+def save_daily_summary(row: DailySummaryRow, path: str) -> None:
+    with _conn(path) as con:
+        con.execute(
+            "INSERT INTO daily_summaries (execution_id,date,total_pnl,target_met,review,next_day_plan) "
+            "VALUES (?,?,?,?,?,?)",
+            (row.execution_id, row.date.isoformat(), row.total_pnl,
+             1 if row.target_met else 0, row.review, row.next_day_plan),
+        )
+
+
+def load_daily_summaries(execution_id: str, path: str) -> list[DailySummaryRow]:
+    with _conn(path) as con:
+        rows = con.execute(
+            "SELECT execution_id,date,total_pnl,target_met,review,next_day_plan "
+            "FROM daily_summaries WHERE execution_id=? ORDER BY date",
+            (execution_id,),
+        ).fetchall()
+    return [
+        DailySummaryRow(
+            execution_id=r[0], date=date.fromisoformat(r[1]),
+            total_pnl=r[2], target_met=bool(r[3]),
+            review=r[4], next_day_plan=r[5],
+        )
+        for r in rows
+    ]
