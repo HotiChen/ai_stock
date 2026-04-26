@@ -40,6 +40,10 @@ from chat_agent import (
     get_quick_prompts,
 )
 from trades import TradeAction, TradeRecord, calc_total_pnl, calc_win_rate, load_trades, save_trade
+from strategy_planner import (
+    PlanSet,
+    generate_strategy_plans,
+)
 from strategy_tracker import (
     DailyEntry,
     StrategyGoal,
@@ -947,6 +951,89 @@ def _render_strategy_tracker():
               delta=on_track_icon)
 
     st.progress(min(progress.completion_pct / 100, 1.0))
+
+    st.divider()
+
+    # ── AI 策略計劃 ────────────────────────────────────────────────
+    st.markdown("#### 🤖 AI 投資計劃生成")
+    st.caption("AI 會分析候選股票後，生成衝刺版 / 均衡版 / 保守版三套計劃")
+
+    col_gen, col_clear = st.columns([3, 1])
+    if col_gen.button("🚀 生成三套投資計劃", use_container_width=True, type="primary"):
+        # 從 ai_log 或 watchlist 取候選股票
+        candidates: list[dict] = []
+        log_path = Path("data/ai_log.jsonl")
+        if log_path.exists():
+            with log_path.open(encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        e = json.loads(line)
+                        d = e.get("decision", {})
+                        if d.get("stock_code"):
+                            candidates.append({
+                                "code":        d["stock_code"],
+                                "name":        d.get("stock_code"),
+                                "close":       0.0,
+                                "change_rate": 0.0,
+                                "analysis":    d.get("reason", ""),
+                            })
+                    except Exception:
+                        pass
+        # 去重，最多 10 支
+        seen: set[str] = set()
+        deduped = []
+        for c in reversed(candidates):
+            if c["code"] not in seen:
+                seen.add(c["code"])
+                deduped.append(c)
+            if len(deduped) >= 10:
+                break
+
+        with st.spinner("AI 分析中，約需 30–60 秒..."):
+            plan_set = generate_strategy_plans(goal, current_value, deduped)
+        if plan_set is None:
+            st.error("生成失敗，請確認 Ollama 正在運行")
+        else:
+            st.session_state["_plan_set"] = plan_set
+            st.rerun()
+
+    if col_clear.button("🗑️ 清除", use_container_width=True):
+        st.session_state.pop("_plan_set", None)
+        st.rerun()
+
+    if "_plan_set" in st.session_state:
+        plan_set: PlanSet = st.session_state["_plan_set"]
+        st.caption(f"生成於 {plan_set.generated_at}")
+
+        plan_cols = st.columns(3)
+        plans = [
+            ("🔥 衝刺版", plan_set.aggressive,   "#3a1a1a"),
+            ("⚖️ 均衡版", plan_set.balanced,     "#1a1a3a"),
+            ("🛡️ 保守版", plan_set.conservative, "#1a3a2a"),
+        ]
+        for col, (label, plan, bg) in zip(plan_cols, plans):
+            with col:
+                st.markdown(
+                    f"<div style='background:{bg};padding:14px;border-radius:10px;"
+                    f"min-height:120px'>"
+                    f"<div style='font-size:16px;font-weight:bold;margin-bottom:6px'>{label}</div>"
+                    f"<div style='color:#ccc;font-size:13px'>{plan.description}</div>"
+                    f"<div style='color:#aaa;font-size:12px;margin-top:8px'>"
+                    f"動用資金 {plan.capital_deployed_pct*100:.0f}%　"
+                    f"預期報酬 {plan.expected_return_pct:+.1f}%</div>"
+                    f"<div style='color:#888;font-size:11px;margin-top:4px'>{plan.risk_note}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown("")
+                for pick in plan.picks:
+                    action_icon = "🟢" if pick.action == "buy" else "⬜"
+                    st.markdown(
+                        f"**{action_icon} {pick.code} {pick.name}**　{pick.quantity} 張　"
+                        f"持有 {pick.hold_days} 天　預期 {pick.expected_return_pct:+.1f}%\n\n"
+                        f"<small style='color:#aaa'>{pick.reason}　信心 {pick.confidence}/10</small>",
+                        unsafe_allow_html=True,
+                    )
 
     st.divider()
 
