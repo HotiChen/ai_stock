@@ -172,7 +172,7 @@ class TestParseDeepResponse:
 # ── run_deep_analysis ─────────────────────────────────────────────────────────
 
 class TestRunDeepAnalysis:
-    @patch("deep_analyzer.call_ollama")
+    @patch("deep_analyzer.call_haiku")
     @patch("deep_analyzer.get_price_trend_summary", return_value="20日均線向上")
     def test_returns_deep_analysis(self, mock_trend, mock_ollama):
         mock_ollama.return_value = SAMPLE_RESPONSE
@@ -184,16 +184,16 @@ class TestRunDeepAnalysis:
         assert isinstance(result, DeepAnalysis)
         assert result.code == "2330"
 
-    @patch("deep_analyzer.call_ollama", side_effect=Exception("timeout"))
+    @patch("deep_analyzer.call_haiku", side_effect=Exception("timeout"))
     @patch("deep_analyzer.get_price_trend_summary", return_value="")
     def test_failure_returns_hold(self, mock_trend, mock_ollama):
         result = run_deep_analysis("2330", "台積電", [], "", "", "")
         assert result.signal == "hold"
 
-    @patch("deep_analyzer.call_ollama")
+    @patch("deep_analyzer.call_haiku")
     @patch("deep_analyzer.get_price_trend_summary", return_value="下降")
     def test_prompt_includes_stock_info(self, mock_trend, mock_ollama):
         mock_ollama.return_value = SAMPLE_RESPONSE
         run_deep_analysis("2454", "聯發科", ["新聞"], "PE 15", "空頭", "AI")
-        prompt = mock_ollama.call_args[0][1]
+        prompt = mock_ollama.call_args[0][0]
         assert "2454" in prompt or "聯發科" in prompt

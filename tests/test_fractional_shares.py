@@ -144,14 +144,14 @@ SINGLE_PLAN_JSON = """{
 }"""
 
 class TestGeneratePlan:
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_returns_strategy_plan(self, mock_ollama):
         mock_ollama.return_value = SINGLE_PLAN_JSON
         result = generate_plan("aggressive", make_goal(), 30_000.0, CANDIDATES)
         assert isinstance(result, StrategyPlan)
         assert result.plan_type == "aggressive"
 
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_fractional_pick_parsed(self, mock_ollama):
         mock_ollama.return_value = SINGLE_PLAN_JSON
         result = generate_plan("aggressive", make_goal(), 30_000.0, CANDIDATES)
@@ -160,14 +160,14 @@ class TestGeneratePlan:
             assert tsmc_pick.is_fractional is True
             assert tsmc_pick.shares == 35
 
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_uses_correct_plan_type_prompt(self, mock_ollama):
         mock_ollama.return_value = SINGLE_PLAN_JSON
         generate_plan("conservative", make_goal(), 30_000.0, CANDIDATES)
-        prompt = mock_ollama.call_args[0][1]
+        prompt = mock_ollama.call_args[0][0]
         assert any(w in prompt for w in ("保守", "穩健", "保本", "conservative"))
 
-    @patch("strategy_planner.call_ollama", side_effect=Exception("timeout"))
+    @patch("strategy_planner.call_sonnet", side_effect=Exception("timeout"))
     def test_failure_returns_none(self, mock_ollama):
         result = generate_plan("balanced", make_goal(), 30_000.0, CANDIDATES)
         assert result is None

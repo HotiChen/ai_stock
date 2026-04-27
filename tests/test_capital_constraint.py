@@ -171,7 +171,7 @@ CHEAP_SAMPLE_JSON = """{
 }"""
 
 class TestGenerateStrategyPlansCapital:
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_filters_unaffordable_before_sending(self, mock_ollama):
         mock_ollama.return_value = CHEAP_SAMPLE_JSON
         candidates = [
@@ -179,12 +179,12 @@ class TestGenerateStrategyPlansCapital:
             {"code": "3706", "name": "神達",   "close": 25.0,  "change_rate": 1.2, "analysis": "低價"},
         ]
         generate_strategy_plans(make_goal(capital=30_000.0), 30_000.0, candidates)
-        prompt = mock_ollama.call_args[0][1]
+        prompt = mock_ollama.call_args[0][0]
         # 台積電 should not be in prompt (can't afford), 神達 should be
         assert "3706" in prompt or "神達" in prompt
         assert "2330" not in prompt or "買不起" in prompt or "max_lots: 0" in prompt
 
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_quantity_in_plan_respects_max_lots(self, mock_ollama):
         mock_ollama.return_value = CHEAP_SAMPLE_JSON
         candidates = [{"code": "3706", "name": "神達", "close": 25.0,
@@ -195,7 +195,7 @@ class TestGenerateStrategyPlansCapital:
             max_lots = calc_max_lots(25.0, 30_000.0)
             assert pick.quantity <= max_lots
 
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_all_candidates_unaffordable_still_calls_ollama(self, mock_ollama):
         mock_ollama.return_value = CHEAP_SAMPLE_JSON
         candidates = [{"code": "2330", "name": "台積電", "close": 850.0,

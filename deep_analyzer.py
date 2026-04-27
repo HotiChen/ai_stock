@@ -8,7 +8,7 @@ from typing import Optional
 import yfinance as yf
 
 import config
-from news_agent import call_ollama
+from ai_client import call_haiku
 from technical_indicators import fetch_indicators, format_indicators_text
 
 
@@ -177,7 +177,7 @@ def run_deep_analysis(
                                fundamentals_text, market_summary, theme_info,
                                technical_text=tech_text)
     try:
-        raw = call_ollama(config.DECISION_MODEL, prompt, timeout=90)
+        raw = call_haiku(prompt)
         return parse_deep_response(code, name, raw)
     except Exception:
         from dataclasses import fields

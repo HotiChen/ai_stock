@@ -16,45 +16,40 @@ class TechnicalIndicators:
     ma5:          float
     ma20:         float
     ma60:         float
-    rsi:          float   # 0–100
-    kd_k:         float   # 0–100
-    kd_d:         float   # 0–100
+    rsi:          float
+    kd_k:         float
+    kd_d:         float
     bb_upper:     float
     bb_mid:       float
     bb_lower:     float
-    volume_ratio: float   # 今日量 / 5日均量
+    volume_ratio: float
 
     @property
     def is_multi_head(self) -> bool:
-        """MA5 > MA20 > MA60 多頭排列。"""
         return self.ma5 > self.ma20 > self.ma60
 
     @property
     def is_bb_overbought(self) -> bool:
-        """股價超出布林上軌（過熱）。"""
         return self.close > self.bb_upper
 
     @property
     def is_volume_breakout(self) -> bool:
-        """成交量 ≥ 5日均量 × 1.5（帶量突破）。"""
         return self.volume_ratio >= 1.5
 
 
 # ── Pure calculation functions ────────────────────────────────────────────────
 
 def calc_rsi(closes: np.ndarray, period: int = 14) -> float:
-    """計算 RSI。資料不足回傳 50.0。"""
     if len(closes) < period + 1:
         return 50.0
-    deltas = np.diff(closes)
-    gains  = np.where(deltas > 0, deltas, 0.0)
-    losses = np.where(deltas < 0, -deltas, 0.0)
+    deltas   = np.diff(closes)
+    gains    = np.where(deltas > 0, deltas, 0.0)
+    losses   = np.where(deltas < 0, -deltas, 0.0)
     avg_gain = gains[-period:].mean()
     avg_loss = losses[-period:].mean()
     if avg_loss == 0:
         return 100.0 if avg_gain > 0 else 50.0
-    rs = avg_gain / avg_loss
-    return float(100 - 100 / (1 + rs))
+    return float(100 - 100 / (1 + avg_gain / avg_loss))
 
 
 def calc_kd(
@@ -63,7 +58,6 @@ def calc_kd(
     closes: np.ndarray,
     period: int = 9,
 ) -> tuple[float, float]:
-    """計算 KD（Stochastic Oscillator）。資料不足回傳 (50.0, 50.0)。"""
     if len(closes) < period:
         return 50.0, 50.0
     k, d = 50.0, 50.0
@@ -71,10 +65,7 @@ def calc_kd(
         window_high = highs[i - period + 1 : i + 1].max()
         window_low  = lows[i  - period + 1 : i + 1].min()
         denom = window_high - window_low
-        if denom == 0:
-            rsv = 50.0
-        else:
-            rsv = (closes[i] - window_low) / denom * 100
+        rsv   = (closes[i] - window_low) / denom * 100 if denom != 0 else 50.0
         k = 2 / 3 * k + 1 / 3 * rsv
         d = 2 / 3 * d + 1 / 3 * k
     return float(k), float(d)
@@ -85,7 +76,6 @@ def calc_bollinger(
     period: int = 20,
     num_std: float = 2.0,
 ) -> tuple[float, float, float]:
-    """回傳 (upper, mid, lower)。資料不足三值相等。"""
     if len(closes) < period:
         v = float(closes[-1]) if len(closes) > 0 else 0.0
         return v, v, v
@@ -96,109 +86,208 @@ def calc_bollinger(
 
 
 def calc_volume_ratio(volumes: np.ndarray) -> float:
-    """今日成交量 ÷ 前 5 日均量。資料不足或均量為 0 回傳 1.0。"""
     if len(volumes) < 2:
         return 1.0
-    today   = float(volumes[-1])
-    avg5    = float(volumes[-6:-1].mean()) if len(volumes) >= 6 else float(volumes[:-1].mean())
-    if avg5 == 0:
-        return 1.0
-    return today / avg5
+    today = float(volumes[-1])
+    avg5  = float(volumes[-6:-1].mean()) if len(volumes) >= 6 else float(volumes[:-1].mean())
+    return today / avg5 if avg5 != 0 else 1.0
+
+
+def calc_macd(
+    closes: np.ndarray,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple[float, float]:
+    """回傳 (MACD_histogram_today, MACD_histogram_prev)。資料不足回傳 (0.0, 0.0)。"""
+    if len(closes) < slow + signal:
+        return 0.0, 0.0
+
+    def _ema(arr: np.ndarray, n: int) -> np.ndarray:
+        alpha  = 2 / (n + 1)
+        result = np.zeros(len(arr))
+        result[0] = arr[0]
+        for i in range(1, len(arr)):
+            result[i] = alpha * arr[i] + (1 - alpha) * result[i - 1]
+        return result
+
+    ema_fast   = _ema(closes, fast)
+    ema_slow   = _ema(closes, slow)
+    macd_line  = ema_fast - ema_slow
+    signal_line = _ema(macd_line, signal)
+    histogram  = macd_line - signal_line
+    return float(histogram[-1]), float(histogram[-2])
+
+
+def calc_atr(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    period: int = 14,
+) -> float:
+    """Average True Range。資料不足回傳 0.0。"""
+    if len(closes) < period + 1:
+        return 0.0
+    tr_list = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i]  - closes[i - 1]),
+        )
+        tr_list.append(tr)
+    tr_arr = np.array(tr_list)
+    return float(tr_arr[-period:].mean())
+
+
+# ── calculate_indicators: dict format for rules.py ────────────────────────────
+
+def _df_to_arrays(df) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """yfinance DataFrame（可能 MultiIndex）→ (closes, highs, lows, volumes)。"""
+    if hasattr(df.columns, "levels"):
+        df = df.copy()
+        df.columns = df.columns.get_level_values(0)
+    closes  = df["Close"].dropna().values.astype(float)
+    highs   = df["High"].dropna().values.astype(float)
+    lows    = df["Low"].dropna().values.astype(float)
+    volumes = df["Volume"].dropna().values.astype(float)
+    return closes, highs, lows, volumes
+
+
+def calculate_indicators(df) -> dict:
+    """
+    輸入 yfinance OHLCV DataFrame（至少 80 筆），
+    輸出完整指標 dict，直接供 rules.py 使用。
+    """
+    closes, highs, lows, volumes = _df_to_arrays(df)
+    if len(closes) < 80:
+        raise ValueError(f"資料不足，需要至少 80 筆，目前只有 {len(closes)} 筆")
+
+    price = float(closes[-1])
+    ma5   = float(closes[-5:].mean())
+    ma10  = float(closes[-10:].mean())
+    ma20  = float(closes[-20:].mean())
+    ma60  = float(closes[-60:].mean())
+
+    rsi          = calc_rsi(closes)
+    kd_k, kd_d  = calc_kd(highs, lows, closes)
+    # prev KD: recalc on closes[:-1]
+    if len(closes) > 1:
+        kd_k_p, kd_d_p = calc_kd(highs[:-1], lows[:-1], closes[:-1])
+    else:
+        kd_k_p, kd_d_p = 50.0, 50.0
+
+    macd_hist, macd_hist_prev = calc_macd(closes)
+    bb_upper, bb_mid, bb_lower = calc_bollinger(closes)
+    bb_pos  = (price - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) != 0 else 0.5
+    vol_r   = calc_volume_ratio(volumes)
+    atr     = calc_atr(highs, lows, closes)
+
+    resistance = float(highs[-20:].max())
+    support    = float(lows[-20:].min())
+
+    bullish = bool(price > ma5 > ma10 > ma20)
+    bearish = bool(price < ma5 < ma10 < ma20)
+
+    return {
+        "current_price":    round(price,  2),
+        "MA5":              round(ma5,   2),
+        "MA10":             round(ma10,  2),
+        "MA20":             round(ma20,  2),
+        "MA60":             round(ma60,  2),
+        "RSI":              round(rsi,   2),
+        "KD_K":             round(kd_k,  2),
+        "KD_D":             round(kd_d,  2),
+        "KD_K_prev":        round(kd_k_p, 2),
+        "KD_D_prev":        round(kd_d_p, 2),
+        "MACD_hist":        round(macd_hist,      4),
+        "MACD_hist_prev":   round(macd_hist_prev, 4),
+        "BB_upper":         round(bb_upper,  2),
+        "BB_lower":         round(bb_lower,  2),
+        "BB_position":      round(float(bb_pos), 2),
+        "volume_ratio":     round(float(vol_r),  2),
+        "resistance":       round(resistance, 2),
+        "support":          round(support,    2),
+        "ATR":              round(atr, 2),
+        "bullish_alignment": bullish,
+        "bearish_alignment": bearish,
+        "trailing_stop":    round(price * 0.93, 2),
+        "stop_loss_ma20":   round(ma20  * 0.99, 2),
+    }
 
 
 # ── Format for AI prompt ──────────────────────────────────────────────────────
 
-def format_indicators_text(ind: TechnicalIndicators) -> str:
+def format_indicators_text(ind) -> str:
+    """接受 TechnicalIndicators dataclass 或 calculate_indicators() 的 dict。"""
+    if isinstance(ind, dict):
+        close     = ind["current_price"]
+        ma5, ma20, ma60 = ind["MA5"], ind["MA20"], ind["MA60"]
+        rsi       = ind["RSI"]
+        kd_k, kd_d = ind["KD_K"], ind["KD_D"]
+        bb_upper  = ind["BB_upper"]
+        bb_lower  = ind["BB_lower"]
+        bb_mid    = (bb_upper + bb_lower) / 2
+        vol_r     = ind["volume_ratio"]
+        multi_head   = ind.get("bullish_alignment", ma5 > ma20 > ma60)
+        bb_overbought = close > bb_upper
+        vol_break = vol_r >= 1.5
+    else:
+        close, ma5, ma20, ma60 = ind.close, ind.ma5, ind.ma20, ind.ma60
+        rsi       = ind.rsi
+        kd_k, kd_d = ind.kd_k, ind.kd_d
+        bb_upper, bb_mid, bb_lower = ind.bb_upper, ind.bb_mid, ind.bb_lower
+        vol_r     = ind.volume_ratio
+        multi_head    = ind.is_multi_head
+        bb_overbought = ind.is_bb_overbought
+        vol_break     = ind.is_volume_breakout
+
     lines = []
 
-    # MA 多頭判斷
-    if ind.is_multi_head:
-        lines.append(f"均線：多頭排列 ✅（MA5={ind.ma5:.1f} > MA20={ind.ma20:.1f} > MA60={ind.ma60:.1f}）")
+    if multi_head:
+        lines.append(f"均線：多頭排列 ✅（MA5={ma5:.1f} > MA20={ma20:.1f} > MA60={ma60:.1f}）")
     else:
-        lines.append(f"均線：非多頭排列（MA5={ind.ma5:.1f}，MA20={ind.ma20:.1f}，MA60={ind.ma60:.1f}）")
+        lines.append(f"均線：非多頭排列（MA5={ma5:.1f}，MA20={ma20:.1f}，MA60={ma60:.1f}）")
 
-    # RSI
-    if ind.rsi >= 80:
-        rsi_note = "【超買，過熱】"
-    elif ind.rsi <= 30:
-        rsi_note = "【超賣，低檔反彈機會】"
-    elif ind.rsi <= 50:
-        rsi_note = "（偏弱）"
+    rsi_note = "【超買】" if rsi >= 80 else "【超賣，低檔反彈機會】" if rsi <= 30 else ("（偏弱）" if rsi <= 50 else "（偏強）")
+    lines.append(f"RSI：{rsi:.1f} {rsi_note}")
+
+    kd_note = "【K值高檔】" if kd_k > 80 else "【K值低檔超賣】" if kd_k < 20 else ""
+    kd_note += "（K>D 偏多）" if kd_k > kd_d else ""
+    lines.append(f"KD：K={kd_k:.1f}，D={kd_d:.1f} {kd_note}")
+
+    bb_width_pct = (bb_upper - bb_lower) / ((bb_upper + bb_lower) / 2) * 100
+    if bb_overbought:
+        bb_note = f"【股價 {close:.1f} 超出上軌 {bb_upper:.1f}，BBU 過熱，不追】"
+    elif close < bb_lower:
+        bb_note = f"【股價跌破下軌 {bb_lower:.1f}，超賣區】"
     else:
-        rsi_note = "（偏強）"
-    lines.append(f"RSI：{ind.rsi:.1f} {rsi_note}")
+        bb_note = f"（上軌 {bb_upper:.1f}／下軌 {bb_lower:.1f}）"
+    lines.append(f"布林通道：帶寬 {bb_width_pct:.1f}% {bb_note}")
 
-    # KD
-    kd_note = ""
-    if ind.kd_k > 80:
-        kd_note = "【K值高檔，注意過熱】"
-    elif ind.kd_k < 20:
-        kd_note = "【K值低檔，超賣區】"
-    if ind.kd_k > ind.kd_d:
-        kd_note += "（K>D，黃金交叉偏多）"
-    lines.append(f"KD：K={ind.kd_k:.1f}，D={ind.kd_d:.1f} {kd_note}")
-
-    # Bollinger Bands
-    bb_width_pct = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100 if ind.bb_mid else 0
-    if ind.is_bb_overbought:
-        bb_note = f"【股價 {ind.close:.1f} 超出上軌 {ind.bb_upper:.1f}，BBU 過熱，不追】"
-    elif ind.close < ind.bb_lower:
-        bb_note = f"【股價跌破下軌 {ind.bb_lower:.1f}，超賣區】"
+    if vol_break:
+        vol_note = f"【帶量突破，量比 {vol_r:.2f}x ≥ 1.5x】"
+    elif vol_r < 0.7:
+        vol_note = f"（量能萎縮，量比 {vol_r:.2f}x，縮量回測中）"
     else:
-        bb_note = f"（股價在布林通道內，上軌 {ind.bb_upper:.1f}／下軌 {ind.bb_lower:.1f}）"
-    lines.append(f"布林通道：中軌 {ind.bb_mid:.1f}，帶寬 {bb_width_pct:.1f}% {bb_note}")
-
-    # Volume ratio
-    if ind.is_volume_breakout:
-        vol_note = f"【帶量突破，量比 {ind.volume_ratio:.2f}x ≥ 1.5x，強勢信號】"
-    elif ind.volume_ratio < 0.7:
-        vol_note = f"（量能萎縮，量比 {ind.volume_ratio:.2f}x，縮量回測中）"
-    else:
-        vol_note = f"（量比 {ind.volume_ratio:.2f}x，正常）"
+        vol_note = f"（量比 {vol_r:.2f}x）"
     lines.append(f"成交量：{vol_note}")
 
     return "\n".join(lines)
 
 
-# ── Data fetcher ──────────────────────────────────────────────────────────────
+# ── Data fetcher（100 日）─────────────────────────────────────────────────────
 
-def fetch_indicators(code: str, days: int = 90) -> Optional[TechnicalIndicators]:
-    """從 yfinance 抓歷史資料並計算所有技術指標。失敗回傳 None。"""
+def fetch_indicators(code: str) -> Optional[dict]:
+    """
+    從 yfinance 抓 100 日歷史，計算所有指標。
+    回傳 calculate_indicators() 的 dict，失敗回傳 None。
+    """
     try:
-        ticker = f"{code}.TW"
-        df = yf.download(ticker, period=f"{days}d", interval="1d",
+        df = yf.download(f"{code}.TW", period="100d", interval="1d",
                          progress=False, auto_adjust=True)
-
-        # yfinance 可能回傳 MultiIndex columns
-        if hasattr(df.columns, "levels"):
-            df.columns = df.columns.get_level_values(0)
-
-        if df is None or len(df) < 30:
+        if df is None or len(df) < 80:
             return None
-
-        closes  = df["Close"].dropna().values.astype(float)
-        highs   = df["High"].dropna().values.astype(float)
-        lows    = df["Low"].dropna().values.astype(float)
-        volumes = df["Volume"].dropna().values.astype(float)
-
-        if len(closes) < 30:
-            return None
-
-        ma5   = float(closes[-5:].mean())
-        ma20  = float(closes[-20:].mean()) if len(closes) >= 20 else float(closes.mean())
-        ma60  = float(closes[-60:].mean()) if len(closes) >= 60 else float(closes.mean())
-
-        rsi           = calc_rsi(closes)
-        kd_k, kd_d   = calc_kd(highs, lows, closes)
-        bb_u, bb_m, bb_l = calc_bollinger(closes)
-        vol_ratio     = calc_volume_ratio(volumes)
-
-        return TechnicalIndicators(
-            code=code, close=float(closes[-1]),
-            ma5=ma5, ma20=ma20, ma60=ma60,
-            rsi=rsi, kd_k=kd_k, kd_d=kd_d,
-            bb_upper=bb_u, bb_mid=bb_m, bb_lower=bb_l,
-            volume_ratio=vol_ratio,
-        )
+        return calculate_indicators(df)
     except Exception:
         return None

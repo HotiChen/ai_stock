@@ -221,13 +221,13 @@ class TestParsePlanResponse:
 # ── generate_strategy_plans ───────────────────────────────────────────────────
 
 class TestGenerateStrategyPlans:
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_returns_planset(self, mock_ollama):
         mock_ollama.return_value = SAMPLE_JSON
         result = generate_strategy_plans(make_goal(), 30_000.0, SAMPLE_CANDIDATES)
         assert isinstance(result, PlanSet)
 
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_all_three_variants_present(self, mock_ollama):
         mock_ollama.return_value = SAMPLE_JSON
         result = generate_strategy_plans(make_goal(), 30_000.0, SAMPLE_CANDIDATES)
@@ -235,20 +235,20 @@ class TestGenerateStrategyPlans:
         assert result.balanced.plan_type == "balanced"
         assert result.conservative.plan_type == "conservative"
 
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_prompt_sent_to_ollama(self, mock_ollama):
         mock_ollama.return_value = SAMPLE_JSON
         generate_strategy_plans(make_goal(), 30_000.0, SAMPLE_CANDIDATES)
         assert mock_ollama.called
-        prompt = mock_ollama.call_args[0][1]
+        prompt = mock_ollama.call_args[0][0]
         assert "2330" in prompt or "台積電" in prompt
 
-    @patch("strategy_planner.call_ollama", side_effect=Exception("timeout"))
+    @patch("strategy_planner.call_sonnet", side_effect=Exception("timeout"))
     def test_ollama_failure_returns_none(self, mock_ollama):
         result = generate_strategy_plans(make_goal(), 30_000.0, SAMPLE_CANDIDATES)
         assert result is None
 
-    @patch("strategy_planner.call_ollama")
+    @patch("strategy_planner.call_sonnet")
     def test_empty_candidates_still_calls_ollama(self, mock_ollama):
         mock_ollama.return_value = SAMPLE_JSON
         result = generate_strategy_plans(make_goal(), 30_000.0, [])

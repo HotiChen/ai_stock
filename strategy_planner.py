@@ -7,7 +7,7 @@ from datetime import date
 from typing import Optional
 
 import config
-from news_agent import call_ollama
+from ai_client import call_haiku, call_sonnet
 from strategy_tracker import StrategyGoal
 
 
@@ -462,7 +462,7 @@ def generate_plan(
     """呼叫 AI 生成單一策略計劃。失敗回傳 None。"""
     prompt = build_plan_prompt(plan_type, goal, capital, candidates, market_summary)
     try:
-        raw  = call_ollama(config.DECISION_MODEL, prompt, timeout=120)
+        raw  = call_sonnet(prompt)
         data = _extract_json(raw)
         return _parse_one(data, plan_type)
     except Exception:
@@ -585,7 +585,7 @@ def generate_strategy_plans(
         all_with_lots.append({**c, "max_lots": max_lots})
     prompt = build_planner_prompt(goal, current_value, all_with_lots)
     try:
-        raw      = call_ollama(config.DECISION_MODEL, prompt, timeout=120)
+        raw      = call_sonnet(prompt)
         plan_set = parse_plan_response(raw)
         if plan_set is None:
             return None

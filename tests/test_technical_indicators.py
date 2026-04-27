@@ -269,44 +269,44 @@ class TestFetchIndicators:
         return df
 
     @patch("technical_indicators.yf.download")
-    def test_returns_technical_indicators(self, mock_dl):
-        mock_dl.return_value = self._make_df()
+    def test_returns_dict(self, mock_dl):
+        mock_dl.return_value = self._make_df(n=100)
         result = fetch_indicators("2330")
-        assert isinstance(result, TechnicalIndicators)
-        assert result.code == "2330"
+        assert isinstance(result, dict)
+        assert "current_price" in result
 
     @patch("technical_indicators.yf.download")
     def test_ma5_ma20_ma60_are_floats(self, mock_dl):
-        mock_dl.return_value = self._make_df()
+        mock_dl.return_value = self._make_df(n=100)
         result = fetch_indicators("2330")
-        assert isinstance(result.ma5,  float)
-        assert isinstance(result.ma20, float)
-        assert isinstance(result.ma60, float)
+        assert isinstance(result["MA5"],  float)
+        assert isinstance(result["MA20"], float)
+        assert isinstance(result["MA60"], float)
 
     @patch("technical_indicators.yf.download")
     def test_rsi_in_range(self, mock_dl):
-        mock_dl.return_value = self._make_df()
+        mock_dl.return_value = self._make_df(n=100)
         result = fetch_indicators("2330")
-        assert 0 <= result.rsi <= 100
+        assert 0 <= result["RSI"] <= 100
 
     @patch("technical_indicators.yf.download")
     def test_kd_in_range(self, mock_dl):
-        mock_dl.return_value = self._make_df()
+        mock_dl.return_value = self._make_df(n=100)
         result = fetch_indicators("2330")
-        assert 0 <= result.kd_k <= 100
-        assert 0 <= result.kd_d <= 100
+        assert 0 <= result["KD_K"] <= 100
+        assert 0 <= result["KD_D"] <= 100
 
     @patch("technical_indicators.yf.download")
     def test_bb_order(self, mock_dl):
-        mock_dl.return_value = self._make_df()
+        mock_dl.return_value = self._make_df(n=100)
         result = fetch_indicators("2330")
-        assert result.bb_upper > result.bb_mid > result.bb_lower
+        assert result["BB_upper"] > result["BB_lower"]
 
     @patch("technical_indicators.yf.download")
     def test_volume_ratio_positive(self, mock_dl):
-        mock_dl.return_value = self._make_df()
+        mock_dl.return_value = self._make_df(n=100)
         result = fetch_indicators("2330")
-        assert result.volume_ratio > 0
+        assert result["volume_ratio"] > 0
 
     @patch("technical_indicators.yf.download")
     def test_download_failure_returns_none(self, mock_dl):

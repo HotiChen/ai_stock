@@ -8,6 +8,15 @@ venv/
 # Env & secrets
 .env
 *.env
+*.pfx
+*.p12
+
+# Database
+*.db
+*.db-journal
+
+# Logs
+logs/
 
 # Data & logs
 data/
