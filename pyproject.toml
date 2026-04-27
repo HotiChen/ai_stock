@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-stock"
+version = "0.3.0"
+description = "Taiwan stock AI trading system (simulation mode)"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Broker API
+    "shioaji>=1.3.0",
+
+    # AI
+    "anthropic>=0.97.0",
+
+    # Market data
+    "yfinance>=0.2.40",
+    "feedparser>=6.0.0",
+
+    # Data
+    "numpy>=1.26.0",
+    "pandas>=2.0.0",
+
+    # Technical analysis
+    "ta>=0.11.0",
+
+    # HTTP & config
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+
+    # Dashboard
+    "streamlit>=1.35.0",
+    "streamlit-autorefresh>=1.0.1",
+    "plotly>=5.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0",
+]
+speed = [
+    "shioaji[speed]",
+]
+
+[project.scripts]
+ai-stock = "main:main"
+
+[tool.setuptools]
+py-modules = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests*", "antigravity*", "data*", "logs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

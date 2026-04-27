@@ -1,9 +1,19 @@
-shioaji>=1.1.0
-streamlit>=1.35.0
-pandas>=2.0.0
-plotly>=5.20.0
-ta>=0.11.0
-streamlit-autorefresh>=1.0.1
-python-dotenv>=1.0.0
+# Core — broker + AI + data
+shioaji>=1.3.0
+anthropic>=0.97.0
 yfinance>=0.2.40
 feedparser>=6.0.0
+
+# Data processing
+numpy>=1.26.0
+pandas>=2.0.0
+ta>=0.11.0
+
+# HTTP & config
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Dashboard
+streamlit>=1.35.0
+streamlit-autorefresh>=1.0.1
+plotly>=5.20.0
