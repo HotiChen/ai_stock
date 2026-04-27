@@ -9,6 +9,7 @@ import yfinance as yf
 
 import config
 from news_agent import call_ollama
+from technical_indicators import fetch_indicators, format_indicators_text
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -65,39 +66,45 @@ def build_deep_prompt(
     fundamentals_text: str,
     market_summary: str,
     theme_info: str,
+    technical_text: str = "",
 ) -> str:
     news_text = "\n".join(f"- {n}" for n in news[:5]) if news else "（無近期新聞）"
 
-    return f"""你是一位專業台股分析師，請從以下六個維度深度分析 {code} {name}，給出買賣建議。
+    return f"""你是一位專業台股分析師，請從以下維度深度分析 {code} {name}，給出買賣建議。
 
-=== 1. 歷史走勢 ===
+=== 1. 技術指標（量化數據）===
+{technical_text or price_trend or '無資料'}
+
+=== 2. 價格走勢摘要 ===
 {price_trend or '無資料'}
 
-=== 2. 個股新聞 ===
+=== 3. 個股新聞 ===
 {news_text}
 
-=== 3. 題材關聯 ===
+=== 4. 題材關聯 ===
 {theme_info or '無題材資訊'}
 
-=== 4. 美股市場影響 ===
+=== 5. 美股市場影響 ===
 {market_summary or '無美股資料'}
 
-=== 5. 台灣政策影響 ===
-（已包含在市場摘要中，請特別留意台灣相關政策新聞對此股的影響）
+=== 6. 台灣 / 美國政策影響 ===
+（請從市場摘要中提取，特別留意 Fed、關稅、台灣政府政策）
 
-=== 6. 美國政策影響 ===
-（已包含在市場摘要中，請特別留意 Fed、關稅等對此股的影響）
-
-=== 基本面 ===
+=== 7. 基本面 ===
 {fundamentals_text or '無基本面資料'}
 
-請綜合以上六個維度分析，只回答 JSON，不要其他文字：
+請綜合以上分析，特別注意：
+- 技術指標的多頭排列、帶量突破、BBU 過熱、KD/RSI 超買超賣信號
+- 不要追 BBU 上軌外的過熱股
+- 帶量突破（量比 ≥ 1.5x）是強勢信號
+
+只回答 JSON，不要其他文字：
 {{
   "signal": "buy/hold/sell",
   "confidence": 0到10,
   "summary": "兩到三句話的綜合分析",
   "factors": {{
-    "historical_trend": "走勢分析一句話",
+    "historical_trend": "技術面分析（含均線、KD、RSI、布林、量比）一句話",
     "news": "新聞面分析一句話",
     "theme": "題材面分析一句話",
     "us_market": "美股影響一句話",
@@ -164,8 +171,11 @@ def run_deep_analysis(
     theme_info: str,
 ) -> DeepAnalysis:
     price_trend = get_price_trend_summary(code)
+    indicators  = fetch_indicators(code)
+    tech_text   = format_indicators_text(indicators) if indicators else ""
     prompt = build_deep_prompt(code, name, price_trend, news,
-                               fundamentals_text, market_summary, theme_info)
+                               fundamentals_text, market_summary, theme_info,
+                               technical_text=tech_text)
     try:
         raw = call_ollama(config.DECISION_MODEL, prompt, timeout=90)
         return parse_deep_response(code, name, raw)
