@@ -36,9 +36,7 @@ from stock_research import (
 from chat_agent import (
     ChatMessage,
     build_trading_advisor_prompt,
-    call_ollama_chat,
-    extract_chat_reply,
-    format_messages_for_ollama,
+    call_anthropic_chat,
     get_quick_prompts,
 )
 from trades import TradeAction, TradeRecord, calc_total_pnl, calc_win_rate, load_trades, save_trade
@@ -850,20 +848,17 @@ def tab_alerts():
 # ── Tab 6: AI 決策 ────────────────────────────────────────────────────────────
 
 def _send_chat(user_input: str, positions: list[dict], ai_log: dict | None):
-    """Append user message, call Ollama, append assistant reply."""
+    """Append user message, call Anthropic Sonnet, append assistant reply."""
     msgs: list[ChatMessage] = st.session_state.chat_messages
 
-    # Build system prompt once at the start of each conversation
     if not msgs:
         sys_prompt = build_trading_advisor_prompt(positions=positions, ai_log=ai_log)
         msgs.append(ChatMessage(role="system", content=sys_prompt))
 
     msgs.append(ChatMessage(role="user", content=user_input))
 
-    ollama_msgs = format_messages_for_ollama(msgs)
     try:
-        resp = call_ollama_chat(ollama_msgs)
-        reply = extract_chat_reply(resp) or "（AI 未回應，請確認 Ollama 是否運行中）"
+        reply = call_anthropic_chat(msgs) or "（AI 未回應）"
     except Exception as e:
         reply = f"連線失敗：{e}"
 
@@ -1109,7 +1104,7 @@ def _render_strategy_tracker():
         with st.spinner("AI 分析中，約需 30–60 秒..."):
             plan_set = generate_strategy_plans(goal, current_value, deduped)
         if plan_set is None:
-            st.error("生成失敗，請確認 Ollama 正在運行")
+            st.error("生成失敗，請確認 ANTHROPIC_API_KEY 已設定")
         else:
             st.session_state["_plan_set"] = plan_set
             st.rerun()
@@ -1323,7 +1318,7 @@ def tab_ai():
             st.session_state.chat_messages = []
             st.rerun()
 
-        st.caption(f"模型：`{config.DECISION_MODEL}`　（Ollama 需在背景運行）")
+        st.caption("模型：`claude-sonnet-4-5`　（Anthropic API）")
 
         # 快速問題按鈕
         st.markdown("**快速提問：**")

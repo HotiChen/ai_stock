@@ -8,6 +8,7 @@ from typing import Literal
 import requests
 
 import config
+from ai_client import call_sonnet
 
 
 @dataclass
@@ -99,6 +100,30 @@ def call_ollama_chat(
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def call_anthropic_chat(messages: list[ChatMessage]) -> str:
+    """Send conversation to Anthropic Sonnet and return reply text."""
+    system_content = ""
+    api_messages = []
+    for m in messages:
+        if m.role == "system":
+            system_content = m.content
+        else:
+            api_messages.append({"role": m.role, "content": m.content})
+
+    if not api_messages:
+        return ""
+
+    prompt = ""
+    if system_content:
+        prompt = f"{system_content}\n\n"
+    for m in api_messages:
+        label = "用戶" if m["role"] == "user" else "助理"
+        prompt += f"[{label}]\n{m['content']}\n\n"
+    prompt += "[助理]\n"
+
+    return call_sonnet(prompt)
 
 
 def get_quick_prompts() -> list[dict]:
