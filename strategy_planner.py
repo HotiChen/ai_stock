@@ -38,6 +38,13 @@ class StockPick:
     key_catalysts:       list[str] = field(default_factory=list)  # 具體催化劑清單
     entry_logic:         str = ""   # 進場邏輯（技術面 + 基本面）
     exit_logic:          str = ""   # 出場邏輯（目標價 / 停損條件）
+    is_fractional:       bool = False  # 零股模式
+    shares:              int = 0       # 零股股數（is_fractional=True 時使用）
+
+    def total_cost(self, price: float) -> float:
+        if self.is_fractional:
+            return self.shares * price
+        return self.quantity * 1000 * price
 
 
 @dataclass
@@ -67,6 +74,13 @@ def calc_max_lots(price: float, capital: float) -> int:
     if price <= 0 or capital <= 0:
         return 0
     return int(capital // (price * 1000))
+
+
+def calc_max_shares(price: float, capital: float) -> int:
+    """零股模式：回傳以 capital 最多能買幾股（不限整張）。"""
+    if price <= 0 or capital <= 0:
+        return 0
+    return int(capital // price)
 
 
 def filter_affordable_candidates(
@@ -170,17 +184,306 @@ def build_planner_prompt(
 }}"""
 
 
+# ── Individual plan prompts (one per strategy type) ───────────────────────────
+
+_SELECTION_FRAMEWORK = """\
+你必須從五個維度評估每一支候選股票，每個維度都有分數，加總後才能決定是否選入。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+維度一｜宏觀 & 題材（Macro & Theme）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• 費城半導體指數（SOX）走勢：SOX 上漲 → 台股電子股加分；SOX 下跌 → 扣分
+• 美股龍頭聯動：NVDA / TSMC ADR 強勢 → 相關族群加分
+• 資金輪動方向：目前資金流入哪個產業？（半導體、航運、重電、金融…）選流入的，不選流出的
+• 政策題材：是否受惠政府預算（綠能/國防/生技）或季末作帳行情？
+
+維度二｜基本面（Fundamental）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• 月營收 YoY：連續 3 個月 > 10% 或創歷史新高 → 強力加分
+• 獲利三率（毛利率、營業利益率、淨利率）：三率同步上升 → 加分；衰退 → 扣分
+• ROE > 15%：公司有效運用資金的證明
+• 自由現金流為正：確保公司不是空燒錢
+（注意：短線操作時基本面為輔助篩選，排除地雷股用，不是主要評分）
+
+維度三｜技術面（Technical）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• 均線多頭排列：股價在 MA5 > MA20 > MA60 之上，且均線向上擴張 → 加分
+• KD/RSI 背離：股價創低但指標不創低 → 反轉信號，加分
+• 量價關係：
+  - 縮量回測均線（成交量萎縮 + 股價守住）→ 進場時機
+  - 帶量突破壓力（成交量 ≥ 前 5 日均量 × 1.5）→ 強烈加分
+• 位階：避開布林通道上軌（BBU）之外的過熱區；尋找「底部起漲」或「盤整結束」
+
+維度四｜籌碼面（Fund Flow）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• 投信連買 ≥ 3 天：中短期強勢波段力量，高度關注
+• 外資動向：持續買超權值股 → 市場偏多；外資大賣 → 市場警戒
+• 大戶持股比例（400張/1000張以上）：比例上升 → 籌碼集中，主力在吸貨
+• 融資餘額下降 + 股價上漲：散戶停損、主力吃貨的典型信號，強力加分
+
+維度五｜流動性 & 風險控制（Liquidity & Risk）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• 流動性門檻：日成交張數 > 1,000 張（賣不掉的不買）；股本 > 10 億（避免人為操控）
+• ATR 波動率：波動越大 → 進場位階需更保守，部位需更小
+• 止損規則：
+  - 移動止損（Trailing Stop）：從最高點回撤 7% 出場
+  - 硬止損（Hard Stop）：跌破 20MA 立即停損
+• 風險報酬比：預期獲利 ÷ 最大虧損 ≥ 2（虧 1 才要有機會賺 2）
+"""
+
+_STYLE_CONFIGS = {
+    "aggressive": {
+        "label": "衝刺版（aggressive）",
+        "style": "積極集中衝刺高報酬",
+        "instructions": (
+            "- 集中持股，選 1–2 支最有把握的\n"
+            "- 資金部署 80–100%\n"
+            "- 可接受較高波動，以高報酬為優先\n"
+            "- 若本金不夠整張，優先考慮零股（is_fractional=true）"
+        ),
+        "selection_criteria": (
+            "**衝刺版選股門檻（五維度加權）：**\n\n"
+            "【維度一：宏觀 & 題材】權重最高\n"
+            "- 必須處於資金流入的產業，不選資金在撤退的產業\n"
+            "- SOX 或 NVDA 強勢時，半導體/AI 族群優先\n"
+            "- 有明確短期催化劑（法說、財報、重大訂單、政策宣布）加 3 分\n\n"
+            "【維度二：基本面】只做排雷，不做主要評分\n"
+            "- 月營收衰退超過 20% 或三率連續下滑 → 直接排除\n"
+            "- 其餘基本面不作硬性門檻（短線以題材和籌碼為主）\n\n"
+            "【維度三：技術面】重點看突破信號\n"
+            "- 必須有帶量突破（成交量 ≥ 前 5 日均量 × 1.5）或均線多頭排列\n"
+            "- 位於布林通道上軌（BBU）外的過熱股不追，等回測再進\n"
+            "- KD 或 RSI 背離出現 → 強力加分\n\n"
+            "【維度四：籌碼面】核心評分依據\n"
+            "- 投信連買 ≥ 3 天 → 加 3 分\n"
+            "- 大戶 400 張以上持股比例上升 → 加 2 分\n"
+            "- 融資餘額下降 + 股價上漲（主力吃貨信號）→ 加 3 分\n"
+            "- 外資大量賣超 → 扣 2 分\n\n"
+            "【維度五：流動性 & 風險】基本門檻\n"
+            "- 日成交量 > 1,000 張（流動性不足不買）\n"
+            "- 股本 > 10 億（除非有極強題材）\n"
+            "- 止損設在進場價下方 7%（Trailing Stop），跌破 20MA 硬出\n"
+            "- 本金效率優先：計算零股 vs 整張哪個報酬率更高再決定\n\n"
+            "**最終決策：**\n"
+            "- 五維度總分最高的 1–2 支入選\n"
+            "- 信心分數 < 7 者直接排除（信心分數需反映以上五維度的綜合評估）"
+        ),
+        "keywords": "衝刺 積極 集中",
+    },
+    "balanced": {
+        "label": "均衡版（balanced）",
+        "style": "均衡分散穩健成長",
+        "instructions": (
+            "- 分散 2–3 支，來自不同產業\n"
+            "- 資金部署 50–70%\n"
+            "- 整張優先，零股作為補充或試倉\n"
+            "- 平衡風險，不過度集中單一個股"
+        ),
+        "selection_criteria": (
+            "**均衡版選股評分（五維度各佔權重，總分高者入選）：**\n\n"
+            "【維度一：宏觀 & 題材】20%\n"
+            "- 順應當前資金輪動方向，但不強求最熱題材\n"
+            "- SOX / 外資動向作為大盤多空過濾：大盤明顯空頭時縮手\n"
+            "- 受惠政策（綠能/國防/生技）或季末作帳行情 → +2 分\n\n"
+            "【維度二：基本面】30%（比衝刺版更重視）\n"
+            "- 月營收 YoY > 10%（連續 2 個月即可）→ +3 分\n"
+            "- 毛利率、營業利益率同步上升 → +2 分\n"
+            "- ROE > 15% → +2 分；自由現金流為正 → +1 分\n"
+            "- 月營收年減 > 10% → 直接排除\n\n"
+            "【維度三：技術面】25%\n"
+            "- 股價在 MA20 之上，均線多頭排列 → +3 分\n"
+            "- 縮量回測均線支撐（量縮守住）→ 最佳進場點，+3 分\n"
+            "- 帶量突破壓力 → +2 分\n"
+            "- 位於 BBU 外（過熱）→ 不追，等回測\n"
+            "- KD/RSI 背離 → +2 分\n\n"
+            "【維度四：籌碼面】15%\n"
+            "- 投信連買 ≥ 3 天 → +3 分\n"
+            "- 大戶持股比例上升 → +2 分\n"
+            "- 融資餘額下降 + 股價上漲 → +2 分\n\n"
+            "【維度五：流動性 & 風險】10%（硬門檻）\n"
+            "- 日成交量 > 1,000 張（不達標直接排除）\n"
+            "- 股本 > 10 億（不達標直接排除）\n"
+            "- 止損：跌破 20MA 硬出；最大虧損設 5%\n"
+            "- 風險報酬比 ≥ 1:2\n\n"
+            "**分散原則：**\n"
+            "- 不同產業各選一支（半導體 + 金融、科技 + 傳產…）\n"
+            "- 單支佔資金不超過 40%\n"
+            "- 整張優先；整張買不起才用零股，零股可做試倉用\n\n"
+            "**最終決策：**\n"
+            "- 加總五維度分數，選最高的 2–3 支，且必須來自不同產業\n"
+            "- 信心分數 < 6 者排除"
+        ),
+        "keywords": "均衡 分散 平衡",
+    },
+    "conservative": {
+        "label": "保守版（conservative）",
+        "style": "保守穩健保本優先",
+        "instructions": (
+            "- 只選確定性最高、風險最低的標的\n"
+            "- 資金部署 30–50%\n"
+            "- 保本優先，寧可少賺不要虧損\n"
+            "- 停損條件明確，不確定就空手"
+        ),
+        "selection_criteria": (
+            "**保守版選股門檻（五維度全部達標才能入選，有一項不過直接排除）：**\n\n"
+            "【維度一：宏觀 & 題材】必要條件\n"
+            "- 大盤趨勢必須偏多（SOX 未破季線、外資非大量撤退）\n"
+            "- 不追熱門題材的頂部；只選「趨勢已確立」的產業，不賭新題材\n"
+            "- 大盤疑慮未解或有重大地緣政治風險 → 空手不進場\n\n"
+            "【維度二：基本面】最嚴格門檻（必須全過）\n"
+            "- 月營收 YoY > 10%，連續 3 個月 → 必要條件\n"
+            "- 毛利率、營業利益率、淨利率三率同步上升或維持高水位 → 必要條件\n"
+            "- ROE > 15% → 必要條件\n"
+            "- 自由現金流為正 → 必要條件\n"
+            "- 任何一項不符合 → 直接排除（不論其他面向多好）\n\n"
+            "【維度三：技術面】只買「低風險進場點」\n"
+            "- 股價必須在 MA5 > MA20 > MA60 多頭排列之上 → 必要條件\n"
+            "- 必須是縮量回測均線的支撐點（不是高點追進）→ 最佳進場\n"
+            "- 帶量突破後的第一次縮量回測 → 可接受\n"
+            "- 布林通道上軌（BBU）外 → 絕對不追\n"
+            "- KD 或 RSI 背離 → 加分但非必要\n\n"
+            "【維度四：籌碼面】必須有法人支撐\n"
+            "- 投信連買 ≥ 3 天 或 外資持續買超 → 必要條件之一\n"
+            "- 大戶持股比例上升 → 加分\n"
+            "- 融資餘額持續增加（散戶在追）→ 警戒信號，謹慎\n"
+            "- 外資大量賣超 → 直接排除\n\n"
+            "【維度五：流動性 & 風險】最嚴格（全部硬門檻）\n"
+            "- 日成交張數 > 1,000 張 → 必要條件\n"
+            "- 股本 > 10 億 → 必要條件\n"
+            "- 波動率（ATR）：單日波動超過 5% 的高波動股 → 排除\n"
+            "- 止損：硬止損跌破 20MA 立即出；Trailing Stop 從最高點回撤 7%\n"
+            "- 風險報酬比 ≥ 1:2（最大虧損 3%，才進場）\n"
+            "- 先問「最壞情況下虧多少」，超過 3% 就不買\n\n"
+            "**零股試倉策略：**\n"
+            "- 對高確信度但整張太貴的股票，可先用零股試倉（買 10–30% 預計部位）\n"
+            "- 確認方向正確後再決定是否加碼\n\n"
+            "**最終決策：**\n"
+            "- 只選信心分數 ≥ 8 的標的（反映五維度全通過的高確定性）\n"
+            "- 寧可空手（picks 為空），也不買五維度有缺口的股票"
+        ),
+        "keywords": "保守 穩健 保本",
+    },
+}
+
+
+def build_plan_prompt(
+    plan_type: str,
+    goal: StrategyGoal,
+    capital: float,
+    candidates: list[dict],
+    market_summary: str = "",
+) -> str:
+    """生成單一策略類型的獨立 prompt。"""
+    cfg = _STYLE_CONFIGS.get(plan_type, _STYLE_CONFIGS["balanced"])
+    days_left  = (goal.end_date - date.today()).days
+    target_pnl = goal.target_value - capital
+
+    stocks_text = ""
+    for c in candidates:
+        price     = float(c.get("close", 0) or 0)
+        max_lots  = c.get("max_lots") if "max_lots" in c else calc_max_lots(price, capital)
+        max_sh    = calc_max_shares(price, capital)
+        lot_cost  = price * 1000
+        if max_lots > 0:
+            tag = f"最多可買 {max_lots} 張（整張）｜或最多 {max_sh} 股（零股）"
+        else:
+            tag = f"整張買不起（需 {lot_cost:,.0f} 元）｜零股最多 {max_sh} 股"
+        stocks_text += (
+            f"- {c['code']} {c.get('name', '')}　現價 {price:,.1f}　{tag}　"
+            f"漲跌 {c.get('change_rate', 0):+.1f}%　"
+            f"分析：{c.get('analysis') or '無分析'}\n"
+        )
+    if not stocks_text:
+        stocks_text = f"（無候選股）\n"
+
+    market_section = f"\n=== 總體環境 ===\n{market_summary}\n" if market_summary else ""
+
+    return f"""你是一位台股投資策略師，現在只需要生成【{cfg['label']}】這一套計劃。
+風格定位：{cfg['style']}
+
+=== 投資目標 ===
+初始本金：{goal.initial_capital:,.0f} 元
+目前資金：{capital:,.0f} 元
+目標：{goal.target_value:,.0f} 元（{goal.target_multiplier}x）
+還需獲利：{target_pnl:,.0f} 元
+剩餘天數：{days_left} 天
+策略方向：{goal.approach}
+{market_section}
+=== 五維度選股框架（適用所有策略）===
+{_SELECTION_FRAMEWORK}
+=== 候選股票（含零股資訊）===
+{stocks_text}
+=== 此策略的選股標準（{cfg['label']}專屬門檻）===
+{cfg['selection_criteria']}
+
+=== 此策略的操作原則 ===
+{cfg['instructions']}
+
+=== 零股說明 ===
+- 台灣零股 1–999 股，盤後 13:40–14:30 交易
+- 若整張買不起，可用零股方式進場（is_fractional=true，填 shares 數量）
+- 整張（quantity）與零股（shares）擇一，不能同時填
+
+=== 回傳格式（只回 JSON，不要其他文字）===
+{{
+  "description": "一句話說明此計劃特色",
+  "thesis": "整體論述：為何現在進場、選股邏輯（3–5句）",
+  "macro_context": "總體環境摘要",
+  "capital_deployed_pct": 0到1,
+  "expected_return_pct": 整體預期報酬百分比,
+  "risk_note": "主要風險提示",
+  "picks": [
+    {{
+      "code": "股票代碼",
+      "name": "股票名稱",
+      "action": "buy",
+      "quantity": 張數（整張時填，零股時填0）,
+      "hold_days": 持有天數,
+      "expected_return_pct": 預期報酬百分比,
+      "reason": "核心理由",
+      "confidence": 0到10,
+      "is_fractional": false或true,
+      "shares": 零股股數（整張時填0）,
+      "key_catalysts": ["催化劑1", "催化劑2"],
+      "entry_logic": "進場邏輯",
+      "exit_logic": "出場邏輯"
+    }}
+  ]
+}}"""
+
+
+def generate_plan(
+    plan_type: str,
+    goal: StrategyGoal,
+    capital: float,
+    candidates: list[dict],
+    market_summary: str = "",
+) -> Optional["StrategyPlan"]:
+    """呼叫 AI 生成單一策略計劃。失敗回傳 None。"""
+    prompt = build_plan_prompt(plan_type, goal, capital, candidates, market_summary)
+    try:
+        raw  = call_ollama(config.DECISION_MODEL, prompt, timeout=120)
+        data = _extract_json(raw)
+        return _parse_one(data, plan_type)
+    except Exception:
+        return None
+
+
 # ── Parser ────────────────────────────────────────────────────────────────────
 
 def _parse_picks(raw_picks: list[dict]) -> list[StockPick]:
     picks = []
     for p in raw_picks:
         try:
+            is_frac = bool(p.get("is_fractional", False))
+            shares  = max(0, int(p.get("shares", 0)))
+            qty_raw = int(p.get("quantity", 1))
+            quantity = max(0, qty_raw) if is_frac else max(1, qty_raw)
             picks.append(StockPick(
                 code=str(p["code"]),
                 name=str(p.get("name", p["code"])),
                 action=p.get("action", "buy"),
-                quantity=max(1, int(p.get("quantity", 1))),
+                quantity=quantity,
                 hold_days=max(1, int(p.get("hold_days", 1))),
                 expected_return_pct=float(p.get("expected_return_pct", 0.0)),
                 reason=str(p.get("reason", "")),
@@ -188,6 +491,8 @@ def _parse_picks(raw_picks: list[dict]) -> list[StockPick]:
                 entry_logic=str(p.get("entry_logic", "")),
                 exit_logic=str(p.get("exit_logic", "")),
                 confidence=max(0, min(10, int(p.get("confidence", 5)))),
+                is_fractional=is_frac,
+                shares=shares,
             ))
         except Exception:
             continue
@@ -247,6 +552,7 @@ def _clamp_quantities(plan_set: PlanSet, candidates: list[dict], capital: float)
                 reason=pick.reason, confidence=pick.confidence,
                 key_catalysts=pick.key_catalysts,
                 entry_logic=pick.entry_logic, exit_logic=pick.exit_logic,
+                is_fractional=pick.is_fractional, shares=pick.shares,
             ))
         return StrategyPlan(
             plan_type=plan.plan_type, description=plan.description,
