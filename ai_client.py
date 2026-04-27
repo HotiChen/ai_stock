@@ -4,12 +4,12 @@ import os
 from dotenv import load_dotenv
 import anthropic
 
-load_dotenv()
-
-anthropic_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+load_dotenv(override=True)  # override=True: .env wins even if shell set the var empty
 
 _HAIKU_MODEL  = "claude-haiku-4-5-20251001"
-_SONNET_MODEL = "claude-sonnet-4-5-20251022"
+_SONNET_MODEL = "claude-sonnet-4-6"
+
+anthropic_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
 def call_haiku(prompt: str) -> str:
