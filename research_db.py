@@ -84,6 +84,36 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
     review        TEXT,
     next_day_plan TEXT
 );
+
+CREATE TABLE IF NOT EXISTS daily_plans (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_date  TEXT NOT NULL UNIQUE,
+    picks_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS daily_trades (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date  TEXT NOT NULL,
+    code        TEXT NOT NULL,
+    name        TEXT,
+    action      TEXT NOT NULL,
+    quantity    INTEGER,
+    price       REAL,
+    amount      REAL,
+    pnl         REAL,
+    note        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT,
+    name        TEXT,
+    alert_type  TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    severity    TEXT NOT NULL DEFAULT 'normal',
+    created_at  TEXT NOT NULL,
+    sent        INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -303,3 +333,115 @@ def load_daily_summaries(execution_id: str, path: str) -> list[DailySummaryRow]:
         )
         for r in rows
     ]
+
+
+# ── DailyPlan ─────────────────────────────────────────────────────────────────
+
+def save_daily_plan(plan_date: date, picks: list[dict], path: str) -> None:
+    """Upsert today's approved picks list (replaces if same date exists)."""
+    with _conn(path) as con:
+        con.execute(
+            "INSERT OR REPLACE INTO daily_plans (plan_date, picks_json) VALUES (?, ?)",
+            (plan_date.isoformat(), json.dumps(picks, ensure_ascii=False)),
+        )
+
+
+def load_daily_plan(plan_date: date, path: str) -> list[dict]:
+    """Return approved picks for the given date, or [] if none saved."""
+    with _conn(path) as con:
+        row = con.execute(
+            "SELECT picks_json FROM daily_plans WHERE plan_date=?",
+            (plan_date.isoformat(),),
+        ).fetchone()
+    if not row:
+        return []
+    return json.loads(row[0])
+
+
+# ── DailyTrade ────────────────────────────────────────────────────────────────
+
+def save_daily_trade(trade: dict, path: str) -> None:
+    """Append a trade record. trade dict keys: trade_date, code, name, action,
+    quantity, price, amount, pnl (nullable), note."""
+    td = trade.get("trade_date")
+    td_str = td.isoformat() if isinstance(td, date) else str(td)
+    with _conn(path) as con:
+        con.execute(
+            "INSERT INTO daily_trades "
+            "(trade_date, code, name, action, quantity, price, amount, pnl, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                td_str,
+                trade.get("code"),
+                trade.get("name"),
+                trade.get("action"),
+                trade.get("quantity"),
+                trade.get("price"),
+                trade.get("amount"),
+                trade.get("pnl"),
+                trade.get("note"),
+            ),
+        )
+
+
+def load_daily_trades(trade_date: date, path: str) -> list[dict]:
+    """Return all trades for the given date."""
+    with _conn(path) as con:
+        rows = con.execute(
+            "SELECT code, name, action, quantity, price, amount, pnl, note "
+            "FROM daily_trades WHERE trade_date=? ORDER BY id",
+            (trade_date.isoformat(),),
+        ).fetchall()
+    return [
+        {
+            "code": r[0], "name": r[1], "action": r[2],
+            "quantity": r[3], "price": r[4], "amount": r[5],
+            "pnl": r[6], "note": r[7],
+        }
+        for r in rows
+    ]
+
+
+# ── Alert ─────────────────────────────────────────────────────────────────────
+
+def save_alert(alert: dict, path: str) -> None:
+    """Insert a new alert. alert dict keys: code, name, alert_type, message,
+    severity, created_at (datetime or str)."""
+    ca = alert.get("created_at", datetime.now())
+    ca_str = ca.isoformat() if isinstance(ca, datetime) else str(ca)
+    with _conn(path) as con:
+        con.execute(
+            "INSERT INTO alerts (code, name, alert_type, message, severity, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                alert.get("code"),
+                alert.get("name"),
+                alert.get("alert_type"),
+                alert.get("message"),
+                alert.get("severity", "normal"),
+                ca_str,
+            ),
+        )
+
+
+def load_pending_alerts(path: str) -> list[dict]:
+    """Return all unsent alerts ordered by created_at."""
+    with _conn(path) as con:
+        rows = con.execute(
+            "SELECT id, code, name, alert_type, message, severity, created_at "
+            "FROM alerts WHERE sent=0 ORDER BY created_at",
+        ).fetchall()
+    return [
+        {
+            "id": r[0], "code": r[1], "name": r[2],
+            "alert_type": r[3], "message": r[4],
+            "severity": r[5], "created_at": r[6],
+        }
+        for r in rows
+    ]
+
+
+def mark_alert_sent(alert_id: int, path: str) -> None:
+    """Mark an alert as sent so it won't appear in load_pending_alerts."""
+    with _conn(path) as con:
+        con.execute("UPDATE alerts SET sent=1 WHERE id=?", (alert_id,))
