@@ -1,16 +1,17 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 
-echo "啟動 AI 自動交易系統..."
+echo "啟動 AI 股票系統（模擬模式）..."
 
-# 背景啟動 auto_trader
-python3 auto_trader.py &
-TRADER_PID=$!
-echo "✅ auto_trader 已啟動 (PID: $TRADER_PID)"
+# 背景啟動主排程（08:30/09:00/13:35 三個排程任務）
+python3 main.py &
+MAIN_PID=$!
+echo "✅ main.py 已啟動 (PID: $MAIN_PID)"
 
-# 前景啟動 Streamlit
+# 前景啟動 Dashboard
 streamlit run app.py
 
-# Streamlit 關閉時，一起停掉 auto_trader
-echo "🛑 關閉 auto_trader..."
-kill $TRADER_PID
+# Dashboard 關閉時，一起停掉主排程
+echo "🛑 關閉 main.py..."
+kill $MAIN_PID 2>/dev/null
+wait $MAIN_PID 2>/dev/null
