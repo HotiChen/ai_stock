@@ -29,3 +29,6 @@ shioaji.log
 # IDE
 .idea/
 .vscode/
+
+# Old version
+antigravity-version/
