@@ -14,11 +14,14 @@ from typing import Optional
 import requests
 from dotenv import load_dotenv
 
+from logger import get_logger
+
 load_dotenv(override=True)
+
+log = get_logger(__name__)
 
 _TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-_API     = f"https://api.telegram.org/bot{_TOKEN}"
 _VERBOSE = os.getenv("TELEGRAM_VERBOSE", "false").lower() == "true"
 
 
@@ -27,11 +30,13 @@ def _send(text: str, chat_id: str = "") -> None:
     if not cid or not _TOKEN:
         return
     try:
-        requests.post(
-            f"{_API}/sendMessage",
+        resp = requests.post(
+            f"https://api.telegram.org/bot{_TOKEN}/sendMessage",
             json={"chat_id": cid, "text": text, "parse_mode": "HTML"},
             timeout=8,
         )
+        if resp.status_code >= 400:
+            log.warning("Telegram sendMessage HTTP %s: %s", resp.status_code, resp.text)
     except Exception:
         pass
 

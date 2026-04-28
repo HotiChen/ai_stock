@@ -269,13 +269,15 @@ class TestAlertWorker:
         db_path = str(tmp_path / "test.db")
         init_db(db_path)
 
-        with patch("monitor_agent.send_telegram") as mock_send:
+        with patch("notifier.notify_price_alert") as mock_notify:
             q = queue.Queue()
             worker = AlertWorker(q, db_path=db_path, telegram_chat_id=None)
             q.put(self._make_alert())
             q.put(None)
             worker.run()
-            assert not mock_send.called
+            # notify_price_alert is always called regardless of chat_id;
+            # the notifier itself skips if _CHAT_ID is not set
+            assert mock_notify.called
 
     def test_worker_processes_multiple_alerts(self, tmp_path):
         from monitor_agent import AlertWorker
@@ -333,6 +335,20 @@ class TestMonitorAgent:
         assert agent.running is False
 
     @patch("monitor_agent.ensure_connected")
+    def test_stop_joins_poll_thread(self, mock_connect, tmp_path):
+        from monitor_agent import MonitorAgent
+        mock_connect.return_value = MagicMock()
+        agent = MonitorAgent(
+            api_key="key", secret_key="secret", simulation=True,
+            db_path=str(tmp_path / "test.db"), telegram_chat_id=None,
+        )
+        agent.start()
+        mock_poll = MagicMock()
+        agent._poll_thread = mock_poll
+        agent.stop()
+        mock_poll.join.assert_called_once()
+
+    @patch("monitor_agent.ensure_connected")
     def test_connection_failure_does_not_raise(self, mock_connect, tmp_path):
         from monitor_agent import MonitorAgent
         mock_connect.return_value = None  # login failed
@@ -342,3 +358,29 @@ class TestMonitorAgent:
         )
         agent.start()  # should not raise
         agent.stop()
+
+    def test_provided_api_skips_ensure_connected(self, tmp_path):
+        from monitor_agent import MonitorAgent
+        with patch("monitor_agent.ensure_connected") as mock_conn:
+            pre_api = MagicMock()
+            agent = MonitorAgent(
+                api_key="k", secret_key="s", simulation=True,
+                db_path=str(tmp_path / "test.db"), telegram_chat_id=None,
+                api=pre_api,
+            )
+            agent.start()
+            agent.stop()
+            mock_conn.assert_not_called()
+
+    def test_provided_api_is_used_for_polling(self, tmp_path):
+        from monitor_agent import MonitorAgent
+        with patch("monitor_agent.ensure_connected") as mock_conn:
+            pre_api = MagicMock()
+            agent = MonitorAgent(
+                api_key="k", secret_key="s", simulation=True,
+                db_path=str(tmp_path / "test.db"), telegram_chat_id=None,
+                api=pre_api,
+            )
+            agent.start()
+            agent.stop()
+            assert agent._api is pre_api

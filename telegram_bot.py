@@ -15,7 +15,6 @@ Run standalone: python3 telegram_bot.py
 Or via start.sh as a background process.
 """
 
-import json
 import os
 import time
 from datetime import date, datetime
@@ -34,7 +33,6 @@ log = get_logger(__name__)
 BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID     = os.getenv("TELEGRAM_CHAT_ID", "")
 DB_PATH     = os.getenv("DB_PATH", "data/research.db")
-_API        = f"https://api.telegram.org/bot{BOT_TOKEN}"
 _POLL_TIMEOUT = 30  # long polling seconds
 
 
@@ -42,7 +40,11 @@ _POLL_TIMEOUT = 30  # long polling seconds
 
 def _post(method: str, payload: dict) -> dict:
     try:
-        resp = requests.post(f"{_API}/{method}", json=payload, timeout=15)
+        resp = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
+            json=payload,
+            timeout=15,
+        )
         return resp.json()
     except Exception as e:
         log.error("Telegram %s failed: %s", method, e)
@@ -52,7 +54,7 @@ def _post(method: str, payload: dict) -> dict:
 def send_text(chat_id: str, text: str, reply_markup: dict | None = None) -> None:
     payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+        payload["reply_markup"] = reply_markup
     _post("sendMessage", payload)
 
 
@@ -159,6 +161,33 @@ def handle_stop_loss(chat_id: str) -> None:
         "請輸入停損指令，格式：\n\n"
         "<code>停損 2330 540</code>\n\n"
         "（代號 + 停損價格）"
+    )
+
+
+def _handle_set_stop_loss(chat_id: str, text: str) -> None:
+    """Parse '停損 CODE PRICE' and confirm back to the user."""
+    _FORMAT_HINT = (
+        "⚠️ 格式錯誤，請輸入：\n\n"
+        "<code>停損 2330 540</code>\n\n"
+        "（代號 + 停損價格）"
+    )
+    parts = text.split()
+    if len(parts) != 3:
+        send_text(chat_id, _FORMAT_HINT)
+        return
+    code = parts[1]
+    try:
+        price = float(parts[2])
+    except ValueError:
+        send_text(chat_id, _FORMAT_HINT)
+        return
+    send_text(
+        chat_id,
+        f"🛡️ <b>停損已設定</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"股票：{code}\n"
+        f"停損價：{price}\n\n"
+        f"⚠️ 注意：此設定僅更新提醒，系統不會自動下單。",
     )
 
 
@@ -312,6 +341,10 @@ def process_update(update: dict) -> None:
             send_text(chat_id, "✅ 系統已恢復，排程重新生效。")
         else:
             send_text(chat_id, "ℹ️ 系統目前正常運作中，無需恢復。")
+        return
+
+    if text.startswith("停損 "):
+        _handle_set_stop_loss(chat_id, text)
         return
 
     import telegram_bot as _self

@@ -46,6 +46,18 @@ def is_trading_day(dt: datetime) -> bool:
     return dt.weekday() < 5
 
 
+def _confidence_budget(
+    confidence: int,
+    capital: float,
+    min_pct: float = 0.02,
+    max_pct: float = 0.05,
+) -> float:
+    """Map confidence (1–10) linearly to [min_pct, max_pct] of capital."""
+    c = max(1, min(10, confidence))
+    pct = min_pct + (c - 1) / 9 * (max_pct - min_pct)
+    return capital * pct
+
+
 # ── PremarketJob ──────────────────────────────────────────────────────────────
 
 class PremarketJob:
@@ -90,7 +102,7 @@ class PremarketJob:
                 buy_picks.append({
                     "code":             code,
                     "name":             name,
-                    "budget":           self._capital * 0.05,
+                    "budget":           _confidence_budget(analysis.confidence, self._capital),
                     "sector":           cand.get("sector", "未知"),
                     "signal":           analysis.signal,
                     "confidence":       analysis.confidence,
@@ -186,6 +198,7 @@ class MarketOpenJob:
             simulation=SIMULATION,
             db_path=self._db_path,
             telegram_chat_id=self._telegram_chat_id,
+            api=self._api,
         )
         monitor.set_watchlist(executed_picks)
         monitor.start()

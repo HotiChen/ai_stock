@@ -206,6 +206,53 @@ def test_handle_status_shows_date():
         assert "今日狀態" in text
 
 
+# ── 停損 command parsing (#8) ─────────────────────────────────────────────────
+
+def test_stop_loss_command_valid_replies_with_code_and_price(monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot.send_text") as mock_send, \
+         patch("telegram_bot.send_main_menu") as mock_menu:
+        bot.process_update(_make_update("123", "停損 2330 540"))
+        mock_menu.assert_not_called()  # should NOT fall through to unknown-command menu
+        text = mock_send.call_args[0][1]
+        assert "2330" in text
+        assert "540" in text
+        assert "已設定" in text or "停損" in text
+
+
+def test_stop_loss_command_missing_price_shows_format_hint(monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot.send_text") as mock_send, \
+         patch("telegram_bot.send_main_menu") as mock_menu:
+        bot.process_update(_make_update("123", "停損 2330"))
+        mock_menu.assert_not_called()
+        text = mock_send.call_args[0][1]
+        assert "格式" in text
+
+
+def test_stop_loss_command_non_numeric_price_shows_format_hint(monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot.send_text") as mock_send, \
+         patch("telegram_bot.send_main_menu") as mock_menu:
+        bot.process_update(_make_update("123", "停損 2330 abc"))
+        mock_menu.assert_not_called()
+        text = mock_send.call_args[0][1]
+        assert "格式" in text
+
+
+def test_stop_loss_command_decimal_price(monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot.send_text") as mock_send, \
+         patch("telegram_bot.send_main_menu") as mock_menu:
+        bot.process_update(_make_update("123", "停損 0050 145.5"))
+        mock_menu.assert_not_called()
+        text = mock_send.call_args[0][1]
+        assert "0050" in text
+        assert "145.5" in text
+
+
+# ── handle_status ─────────────────────────────────────────────────────────────
+
 def test_handle_status_sums_pnl():
     trades = [
         {"action": "buy", "amount": 10000, "pnl": 200},
@@ -225,9 +272,22 @@ def test_send_main_menu_includes_all_buttons():
         bot.send_main_menu("123")
         payload = mock_post.call_args[0][1]
         markup = payload["reply_markup"]
-        assert "📊 今日狀態" in markup
-        assert "💼 持倉" in markup
-        assert "📈 選股計劃" in markup
-        assert "⚡ 快速下單" in markup
-        assert "🛡️ 停損設定" in markup
-        assert "❓ 說明" in markup
+        # markup must be a dict (not a pre-serialized string) so Telegram
+        # receives a proper JSON object inside the JSON body
+        assert isinstance(markup, dict), "reply_markup must be a dict, not a JSON string"
+        flat = str(markup)
+        assert "📊 今日狀態" in flat
+        assert "💼 持倉" in flat
+        assert "📈 選股計劃" in flat
+        assert "⚡ 快速下單" in flat
+        assert "🛡️ 停損設定" in flat
+        assert "❓ 說明" in flat
+
+
+def test_send_text_reply_markup_passed_as_dict():
+    """reply_markup must reach _post as a dict, not a pre-serialised string."""
+    with patch("telegram_bot._post") as mock_post:
+        keyboard = {"inline_keyboard": [[{"text": "OK", "callback_data": "ok"}]]}
+        bot.send_text("123", "test", reply_markup=keyboard)
+        payload = mock_post.call_args[0][1]
+        assert isinstance(payload["reply_markup"], dict)

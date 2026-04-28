@@ -105,21 +105,6 @@ def get_snapshot(api: sj.Shioaji, code: str) -> Optional[dict]:
         return None
 
 
-# ── Telegram helper (thin wrapper so AlertWorker can mock it) ─────────────────
-
-def send_telegram(chat_id: str, message: str) -> None:
-    import requests
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message},
-            timeout=5,
-        )
-    except Exception as e:
-        log.warning("Telegram send failed: %s", e)
-
-
 # ── AlertWorker ───────────────────────────────────────────────────────────────
 
 class AlertWorker:
@@ -186,6 +171,7 @@ class MonitorAgent:
         simulation: bool,
         db_path: str,
         telegram_chat_id: Optional[str],
+        api: Optional[sj.Shioaji] = None,
     ) -> None:
         self._api_key          = api_key
         self._secret_key       = secret_key
@@ -194,7 +180,7 @@ class MonitorAgent:
         self._telegram_chat_id = telegram_chat_id
 
         self.running: bool            = False
-        self._api: Optional[sj.Shioaji] = None
+        self._api: Optional[sj.Shioaji] = api
         self._watchlist: list[dict]   = []
         self._alert_queue: queue.Queue = queue.Queue()
         self._worker: Optional[AlertWorker] = None
@@ -207,7 +193,8 @@ class MonitorAgent:
         self._watchlist = picks
 
     def start(self) -> None:
-        self._api = ensure_connected(self._api_key, self._secret_key, self._simulation)
+        if self._api is None:
+            self._api = ensure_connected(self._api_key, self._secret_key, self._simulation)
         self.running = True
 
         self._worker = AlertWorker(self._alert_queue, self._db_path, self._telegram_chat_id)
@@ -224,6 +211,8 @@ class MonitorAgent:
         self._alert_queue.put(None)  # poison pill for worker
         if self._worker_thread:
             self._worker_thread.join(timeout=5)
+        if self._poll_thread:
+            self._poll_thread.join(timeout=5)
         log.info("MonitorAgent stopped")
 
     def _poll_loop(self) -> None:

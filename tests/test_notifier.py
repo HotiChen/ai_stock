@@ -39,8 +39,8 @@ def test_send_skips_when_no_chat_id(monkeypatch):
 def test_send_calls_post_with_correct_url(monkeypatch):
     monkeypatch.setattr(notifier, "_TOKEN", "mytoken")
     monkeypatch.setattr(notifier, "_CHAT_ID", "999")
-    monkeypatch.setattr(notifier, "_API", "https://api.telegram.org/botmytoken")
     with patch("notifier.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=200)
         notifier._send("test message")
         mock_post.assert_called_once()
         url = mock_post.call_args[0][0]
@@ -48,6 +48,58 @@ def test_send_calls_post_with_correct_url(monkeypatch):
         payload = mock_post.call_args[1]["json"]
         assert payload["text"] == "test message"
         assert payload["chat_id"] == "999"
+
+
+# ── _send HTTP error logging (#5) ─────────────────────────────────────────────
+
+def test_send_logs_warning_on_http_400(monkeypatch):
+    monkeypatch.setattr(notifier, "_TOKEN", "tok")
+    monkeypatch.setattr(notifier, "_CHAT_ID", "123")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 400
+    mock_resp.text = "Bad Request"
+    with patch("notifier.requests.post", return_value=mock_resp), \
+         patch("notifier.log") as mock_log:
+        notifier._send("test")
+        mock_log.warning.assert_called_once()
+        warning_msg = mock_log.warning.call_args[0][0]
+        assert "400" in str(mock_log.warning.call_args)
+
+
+def test_send_logs_warning_on_http_401(monkeypatch):
+    monkeypatch.setattr(notifier, "_TOKEN", "tok")
+    monkeypatch.setattr(notifier, "_CHAT_ID", "123")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+    mock_resp.text = "Unauthorized"
+    with patch("notifier.requests.post", return_value=mock_resp), \
+         patch("notifier.log") as mock_log:
+        notifier._send("test")
+        mock_log.warning.assert_called_once()
+
+
+def test_send_does_not_log_on_200(monkeypatch):
+    monkeypatch.setattr(notifier, "_TOKEN", "tok")
+    monkeypatch.setattr(notifier, "_CHAT_ID", "123")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    with patch("notifier.requests.post", return_value=mock_resp), \
+         patch("notifier.log") as mock_log:
+        notifier._send("test")
+        mock_log.warning.assert_not_called()
+
+
+# ── lazy _API URL (#6) ────────────────────────────────────────────────────────
+
+def test_send_uses_current_token_not_import_time_value(monkeypatch):
+    """Patching _TOKEN after import should update the URL used in requests."""
+    monkeypatch.setattr(notifier, "_TOKEN", "runtime_token")
+    monkeypatch.setattr(notifier, "_CHAT_ID", "123")
+    with patch("notifier.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=200)
+        notifier._send("hello")
+        url = mock_post.call_args[0][0]
+        assert "runtime_token" in url
 
 
 # ── notify_system_start ───────────────────────────────────────────────────────
