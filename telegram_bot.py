@@ -235,7 +235,7 @@ def handle_callback(callback_query: dict) -> None:
 
     # ── 快速下單確認（⚡ 快速下單 按鈕送出的）──
     elif data == "order_confirm":
-        send_text(chat_id, "✅ 下單指令已送出，請至 Dashboard 確認委託狀態。")
+        send_text(chat_id, "✅ 已收到確認。\n\n⚠️ 測試版說明：下單由排程自動執行（09:00 開盤），非即時觸發。\n\n請等待排程執行後查看委託狀態。")
     elif data == "order_cancel":
         send_text(chat_id, "❌ 已取消。")
         send_main_menu(chat_id)
@@ -249,7 +249,7 @@ def handle_callback(callback_query: dict) -> None:
         api = ensure_connected(
             os.getenv("SHIOAJI_API_KEY", ""),
             os.getenv("SHIOAJI_SECRET_KEY", ""),
-            simulation=os.getenv("SIMULATION", "true").lower() == "true",
+            simulation=os.getenv("SHIOAJI_SIMULATION", "true").lower() == "true",
         )
         if api:
             result = cancel_all_orders(api)

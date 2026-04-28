@@ -42,22 +42,26 @@ def check_price_alerts(code: str, current_price: float, pick: dict) -> list[dict
 
     if target is not None and current_price >= target:
         alerts.append({
-            "code":       code,
-            "name":       name,
-            "alert_type": "target_hit",
-            "message":    f"{code} {name} 達到目標價 {target}，現價 {current_price}",
-            "severity":   "high",
-            "created_at": datetime.now(),
+            "code":          code,
+            "name":          name,
+            "alert_type":    "target_hit",
+            "message":       f"{code} {name} 達到目標價 {target}，現價 {current_price}",
+            "severity":      "high",
+            "created_at":    datetime.now(),
+            "current_price": current_price,
+            "target_price":  target,
         })
 
     if stop_loss is not None and current_price <= stop_loss:
         alerts.append({
-            "code":       code,
-            "name":       name,
-            "alert_type": "stop_loss",
-            "message":    f"{code} {name} 觸及停損價 {stop_loss}，現價 {current_price}",
-            "severity":   "high",
-            "created_at": datetime.now(),
+            "code":             code,
+            "name":             name,
+            "alert_type":       "stop_loss",
+            "message":          f"{code} {name} 觸及停損價 {stop_loss}，現價 {current_price}",
+            "severity":         "high",
+            "created_at":       datetime.now(),
+            "current_price":    current_price,
+            "stop_loss_price":  stop_loss,
         })
 
     return alerts

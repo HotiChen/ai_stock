@@ -231,7 +231,7 @@ def notify_price_alert(
             f"🚨 <b>觸及停損！{code} {name}</b>\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"現價：{current_price:.2f}　停損：{stop_loss_price}\n"
-            f"⚠️ 強制停損已觸發"
+            f"⚠️ 請手動處理停損（系統為測試版，不會自動下單）"
         )
 
 

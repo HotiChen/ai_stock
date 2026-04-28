@@ -98,6 +98,30 @@ class TestCheckPriceAlerts:
         stop_alert = next(a for a in alerts if a["alert_type"] == "stop_loss")
         assert stop_alert["severity"] == "high"
 
+    def test_target_alert_contains_current_price(self):
+        from monitor_agent import check_price_alerts
+        alerts = check_price_alerts("2330", 920.0, self._pick())
+        alert = next(a for a in alerts if a["alert_type"] == "target_hit")
+        assert alert["current_price"] == 920.0
+
+    def test_target_alert_contains_target_price(self):
+        from monitor_agent import check_price_alerts
+        alerts = check_price_alerts("2330", 920.0, self._pick())
+        alert = next(a for a in alerts if a["alert_type"] == "target_hit")
+        assert alert["target_price"] == 900.0
+
+    def test_stop_alert_contains_current_price(self):
+        from monitor_agent import check_price_alerts
+        alerts = check_price_alerts("2330", 780.0, self._pick())
+        alert = next(a for a in alerts if a["alert_type"] == "stop_loss")
+        assert alert["current_price"] == 780.0
+
+    def test_stop_alert_contains_stop_loss_price(self):
+        from monitor_agent import check_price_alerts
+        alerts = check_price_alerts("2330", 780.0, self._pick())
+        alert = next(a for a in alerts if a["alert_type"] == "stop_loss")
+        assert alert["stop_loss_price"] == 800.0
+
 
 # ── get_snapshot ──────────────────────────────────────────────────────────────
 
