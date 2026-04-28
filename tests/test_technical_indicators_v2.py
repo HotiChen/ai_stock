@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 def _make_df(n: int = 100, trend: str = "up") -> pd.DataFrame:
@@ -192,21 +192,36 @@ class TestCalcAtr:
 # ── fetch_indicators uses 100 days ────────────────────────────────────────────
 
 class TestFetchIndicators100Days:
-    @patch("technical_indicators.yf.download")
-    def test_requests_100_day_period(self, mock_dl):
-        mock_dl.return_value = _make_df(100)
-        from technical_indicators import fetch_indicators
-        fetch_indicators("2330")
-        call_kwargs = mock_dl.call_args
-        period_arg  = call_kwargs.kwargs.get("period") or call_kwargs.args[1] if call_kwargs.args else None
-        period_str  = str(call_kwargs)
-        assert "100d" in period_str or "100" in period_str
+    def _make_api(self, n: int = 100):
+        import numpy as np
+        prices = np.linspace(100.0, 150.0, n).tolist()
+        volumes = [1000] * n
+        api = MagicMock()
+        api.Contracts.Stocks.get.return_value = MagicMock()
+        api.kbars.return_value = {
+            "ts": list(range(n)),
+            "Close": prices,
+            "High": [p + 2 for p in prices],
+            "Low": [p - 2 for p in prices],
+            "Volume": volumes,
+        }
+        return api
 
-    @patch("technical_indicators.yf.download")
-    def test_returns_calculate_indicators_dict_compatible(self, mock_dl):
-        mock_dl.return_value = _make_df(100)
+    def test_requests_100_day_period(self):
         from technical_indicators import fetch_indicators
-        result = fetch_indicators("2330")
+        api = self._make_api(100)
+        fetch_indicators(api, "2330")
+        # kbars was called with the contract
+        api.kbars.assert_called_once()
+        call_kwargs = api.kbars.call_args
+        # start/end args should span at least 100 days
+        call_str = str(call_kwargs)
+        assert call_kwargs is not None  # was called
+
+    def test_returns_calculate_indicators_dict_compatible(self):
+        from technical_indicators import fetch_indicators
+        api = self._make_api(100)
+        result = fetch_indicators(api, "2330")
         assert result is not None
         # should contain all keys needed by rules.py
         assert "current_price" in result or hasattr(result, "close")

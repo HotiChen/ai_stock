@@ -63,19 +63,28 @@ class TestClassifyMarketSentiment:
 # ── fetch_us_market ───────────────────────────────────────────────────────────
 
 class TestFetchUsMarket:
-    @patch("market_context.yf.download")
-    def test_returns_snapshot(self, mock_dl):
-        import pandas as pd
-        import numpy as np
-        mock_dl.return_value = pd.DataFrame({
-            "Close": [100.0, 101.0]
-        }, index=pd.date_range("2026-04-25", periods=2))
-        result = fetch_us_market()
+    def _mock_yahoo_resp(self, closes=(100.0, 101.0)):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "chart": {
+                "result": [{
+                    "indicators": {
+                        "quote": [{"close": list(closes)}]
+                    }
+                }]
+            }
+        }
+        return mock_resp
+
+    def test_returns_snapshot(self):
+        with patch("market_context.requests.get", return_value=self._mock_yahoo_resp()):
+            result = fetch_us_market()
         assert isinstance(result, USMarketSnapshot)
 
-    @patch("market_context.yf.download", side_effect=Exception("network error"))
-    def test_failure_returns_none(self, mock_dl):
-        result = fetch_us_market()
+    def test_failure_returns_none(self):
+        with patch("market_context.requests.get", side_effect=Exception("network error")):
+            result = fetch_us_market()
         assert result is None
 
 

@@ -136,7 +136,7 @@ class TestPremarketJob:
         """Only pass 'buy' signals to validate_plan."""
         call_signals = []
 
-        def fake_deep(code, name, news, fundamentals_text, market_summary, theme_info):
+        def fake_deep(api, code, name, news, fundamentals_text, market_summary, theme_info):
             sig = "buy" if code == "2330" else "hold"
             m = MagicMock()
             m.signal = sig
@@ -443,7 +443,7 @@ class TestPremarketUsesConfidenceBudget:
 
         signals = {"2330": (8, "buy"), "2454": (2, "buy")}
 
-        def fake_deep(code, name, news, fundamentals_text, market_summary, theme_info):
+        def fake_deep(api, code, name, news, fundamentals_text, market_summary, theme_info):
             confidence, sig = signals[code]
             m = MagicMock()
             m.signal = sig

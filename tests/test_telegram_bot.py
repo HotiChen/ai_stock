@@ -111,7 +111,7 @@ def test_callback_unauthorized_is_blocked(monkeypatch):
 def test_callback_liquidate_all_confirm(monkeypatch):
     monkeypatch.setattr(bot, "CHAT_ID", "123")
     with patch("telegram_bot.send_text") as mock_send, \
-         patch("telegram_bot.ensure_connected") as mock_conn, \
+         patch("monitor_agent.ensure_connected") as mock_conn, \
          patch("halt.liquidate_all_positions") as mock_liq:
         
         mock_api = MagicMock()

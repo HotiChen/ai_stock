@@ -44,6 +44,11 @@ from strategy_planner import (
     PlanSet,
     generate_strategy_plans,
 )
+from sim_plan_store import (
+    list_sim_plans,
+    load_sim_plan,
+    save_sim_plan,
+)
 from sim_engine import (
     compare_plans,
     generate_sim_report,
@@ -1078,10 +1083,9 @@ def _render_strategy_tracker():
     st.markdown("#### 🤖 AI 投資計劃生成")
     st.caption("AI 會分析候選股票後，生成衝刺版 / 均衡版 / 保守版三套計劃")
 
-    col_gen, col_clear = st.columns([3, 1])
-    if col_gen.button("🚀 生成三套投資計劃", use_container_width=True, type="primary"):
-        # 從 ai_log 或 watchlist 取候選股票
-        candidates: list[dict] = []
+    def _build_candidates() -> list[dict]:
+        """從 ai_log 抓候選股票，去重補價，最多 10 支。"""
+        raw: list[dict] = []
         log_path = Path("data/ai_log.jsonl")
         if log_path.exists():
             with log_path.open(encoding="utf-8") as f:
@@ -1090,7 +1094,7 @@ def _render_strategy_tracker():
                         e = json.loads(line)
                         d = e.get("decision", {})
                         if d.get("stock_code"):
-                            candidates.append({
+                            raw.append({
                                 "code":        d["stock_code"],
                                 "name":        d.get("stock_code"),
                                 "close":       0.0,
@@ -1099,15 +1103,32 @@ def _render_strategy_tracker():
                             })
                     except Exception:
                         pass
-        # 去重，最多 10 支
         seen: set[str] = set()
         deduped = []
-        for c in reversed(candidates):
+        for c in reversed(raw):
             if c["code"] not in seen:
                 seen.add(c["code"])
                 deduped.append(c)
             if len(deduped) >= 10:
                 break
+        nm   = get_name_map()
+        _api = get_api()
+        for c in deduped:
+            c["name"] = nm.get(c["code"], c["code"])
+            try:
+                contract = _api.Contracts.Stocks.get(c["code"])
+                if contract:
+                    snaps = _api.snapshots([contract])
+                    if snaps:
+                        c["close"]       = float(snaps[0].close)
+                        c["change_rate"] = float(snaps[0].change_rate)
+            except Exception:
+                pass
+        return deduped
+
+    col_gen, col_clear = st.columns([3, 1])
+    if col_gen.button("🚀 生成三套投資計劃", use_container_width=True, type="primary"):
+        deduped = _build_candidates()
 
         with st.spinner("AI 分析中，約需 30–60 秒..."):
             plan_set = generate_strategy_plans(goal, current_value, deduped)
@@ -1119,6 +1140,11 @@ def _render_strategy_tracker():
                 st.error(f"生成失敗（API Key 已設定，但 AI 回應解析失敗）。請查看終端機 log 取得詳細錯誤。")
         else:
             st.session_state["_plan_set"] = plan_set
+            try:
+                saved_path = save_sim_plan(plan_set)
+                st.toast(f"計劃已存檔：{saved_path.name}", icon="💾")
+            except Exception:
+                pass
             st.rerun()
 
     if col_clear.button("🗑️ 清除", use_container_width=True):
@@ -1170,17 +1196,36 @@ def _render_strategy_tracker():
                         if plan.macro_context:
                             st.caption(f"總體環境：{plan.macro_context}")
 
+                # 計算本套計劃總成本
+                _plan_total = 0
+                _pick_costs = {}
+                for pick in plan.picks:
+                    _, _snap = fetch_snapshot(pick.code)
+                    _px = float(_snap.close) if _snap else 0.0
+                    if pick.action == "buy":
+                        _cost = _px * 1000 * pick.quantity if pick.quantity else _px * (pick.shares or 0)
+                        _pick_costs[pick.code] = (_px, _cost)
+                        _plan_total += _cost
+
                 st.markdown("**選股：**")
-                st.caption("ℹ️ 若執行此計畫，系統將會**一次買進/賣出**清單中所有股票。")
+                st.info(
+                    f"📌 **這是三套方案之一，選其中一套執行。**\n\n"
+                    f"執行後系統會**同時買進**此套計劃內所有股票（共 {len(plan.picks)} 支）。\n\n"
+                    f"💰 **本套預估總花費：{_plan_total:,.0f} 元**"
+                    if _plan_total > 0 else
+                    f"📌 **這是三套方案之一，選其中一套執行。**\n執行後系統會**同時買進**此套計劃內所有股票。"
+                )
                 for pick in plan.picks:
                     action_icon = "🟢" if pick.action == "buy" else "⬜"
-                    contract, snap = fetch_snapshot(pick.code)
-                    price_text = f"現價 {snap.close:.2f}" if snap else "無報價"
-                    
+                    _px, _cost = _pick_costs.get(pick.code, (0.0, 0.0))
+                    price_text = f"現價 {_px:.2f}" if _px else "無報價"
+                    cost_text  = f"需 {_cost:,.0f} 元" if _cost else ""
+
                     with st.expander(
-                        f"{action_icon} {pick.code} {pick.name} ({price_text})　"
+                        f"{action_icon} {pick.code} {pick.name}　"
                         f"{pick.quantity}張　{pick.hold_days}天　"
-                        f"{pick.expected_return_pct:+.1f}%　信心{pick.confidence}/10"
+                        f"{pick.expected_return_pct:+.1f}%　信心{pick.confidence}/10　"
+                        f"｜{price_text}　{cost_text}"
                     ):
                         st.markdown(f"**核心理由：** {pick.reason}")
                         if pick.key_catalysts:
@@ -1201,6 +1246,75 @@ def _render_strategy_tracker():
                     st.session_state["_exec_map"] = {plan.plan_type: exec_id}
                     _start_executor()
                     st.success(f"✅ 已啟動！ID: {exec_id}")
+                    st.rerun()
+
+    # ── 歷史計劃 ──────────────────────────────────────────────────
+    _sim_plan_dir = "data/sim_plans"
+    _saved_plans  = list_sim_plans(plan_dir=_sim_plan_dir)
+    if _saved_plans:
+        with st.expander(f"📂 歷史計劃（共 {len(_saved_plans)} 份）", expanded=False):
+            st.caption("可載入舊計劃繼續檢視，或以其收盤資金為基準重新生成下一天的三套計劃。")
+            for entry in _saved_plans:
+                col_info, col_load, col_regen = st.columns([3, 1, 2])
+                col_info.markdown(
+                    f"**{entry['day_label']}**　📅 {entry['plan_date']}"
+                )
+                if col_load.button("載入", key=f"load_{entry['filename']}", use_container_width=True):
+                    loaded = load_sim_plan(entry["filename"], plan_dir=_sim_plan_dir)
+                    if loaded:
+                        st.session_state["_plan_set"] = loaded
+                        st.toast(f"已載入 {entry['day_label']} 計劃（維持不變）", icon="📂")
+                        st.rerun()
+                    else:
+                        st.error("載入失敗")
+
+                # 重新生成：讓使用者輸入當天收盤後的資金，以此作為下一天的起始資金
+                regen_key = f"regen_cap_{entry['filename']}"
+                with col_regen:
+                    if st.button(
+                        "以此為基準重新生成 ➜",
+                        key=f"regen_{entry['filename']}",
+                        use_container_width=True,
+                        type="primary",
+                    ):
+                        st.session_state["_regen_from"] = entry["filename"]
+                        st.rerun()
+
+            # 如果使用者按了「以此為基準重新生成」，顯示資金輸入框
+            if "_regen_from" in st.session_state:
+                regen_fn = st.session_state["_regen_from"]
+                regen_label = regen_fn.split("_")[0]  # e.g. "day1"
+                st.markdown(f"---\n**以 {regen_label} 為基準，設定新的起始資金：**")
+                prev_cap = float(goal.initial_capital)
+                new_cap = st.number_input(
+                    "收盤後資金（元）", min_value=1000.0,
+                    value=prev_cap, step=1000.0, format="%.0f",
+                    key="regen_capital_input",
+                )
+                col_ok, col_cancel = st.columns(2)
+                if col_ok.button("✅ 確認，重新生成", use_container_width=True, type="primary"):
+                    regen_goal = StrategyGoal(
+                        initial_capital=new_cap,
+                        target_return_pct=goal.target_return_pct,
+                        max_drawdown_pct=goal.max_drawdown_pct,
+                        holding_days=goal.holding_days,
+                        risk_level=goal.risk_level,
+                    )
+                    with st.spinner("AI 分析中，約需 30–60 秒..."):
+                        plan_set = generate_strategy_plans(regen_goal, new_cap, _build_candidates())
+                    if plan_set:
+                        st.session_state["_plan_set"] = plan_set
+                        try:
+                            sp = save_sim_plan(plan_set)
+                            st.toast(f"新計劃已存檔：{sp.name}", icon="💾")
+                        except Exception:
+                            pass
+                        st.session_state.pop("_regen_from", None)
+                        st.rerun()
+                    else:
+                        st.error("生成失敗，請重試")
+                if col_cancel.button("取消", use_container_width=True):
+                    st.session_state.pop("_regen_from", None)
                     st.rerun()
 
     st.divider()

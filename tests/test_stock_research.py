@@ -227,58 +227,65 @@ class TestFetchStockNews:
 # ── fetch_stock_fundamentals ──────────────────────────────────────────────────
 
 class TestFetchStockFundamentals:
-    def _make_yf_info(self, **kwargs):
-        defaults = {
-            "trailingPE": 20.5,
-            "trailingEps": 42.0,
-            "marketCap": 10_000_000_000,
-            "fiftyTwoWeekHigh": 1000.0,
-            "fiftyTwoWeekLow": 700.0,
-            "dividendYield": 0.03,
-            "revenueGrowth": 0.15,
-            "profitMargins": 0.40,
+    def _make_yahoo_json(self, **overrides):
+        summary = {
+            "trailingPE": {"raw": 20.5},
+            "marketCap": {"raw": 10_000_000_000},
+            "fiftyTwoWeekHigh": {"raw": 1000.0},
+            "fiftyTwoWeekLow": {"raw": 700.0},
+            "dividendYield": {"raw": 0.03},
         }
-        defaults.update(kwargs)
-        return defaults
+        fin = {
+            "revenuePerShare": {"raw": 42.0},
+            "revenueGrowth": {"raw": 0.15},
+            "profitMargins": {"raw": 0.40},
+        }
+        summary.update(overrides.get("summaryDetail", {}))
+        fin.update(overrides.get("financialData", {}))
+        return {
+            "quoteSummary": {
+                "result": [{"summaryDetail": summary, "financialData": fin}]
+            }
+        }
+
+    def _mock_resp(self, json_data):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = json_data
+        return mock_resp
 
     def test_returns_stock_fundamentals(self):
-        mock_ticker = MagicMock()
-        mock_ticker.info = self._make_yf_info()
-        with patch("stock_research.yf.Ticker", return_value=mock_ticker):
+        with patch("stock_research.requests.get", return_value=self._mock_resp(self._make_yahoo_json())):
             result = fetch_stock_fundamentals("2330")
         assert isinstance(result, StockFundamentals)
 
     def test_maps_pe_ratio(self):
-        mock_ticker = MagicMock()
-        mock_ticker.info = self._make_yf_info(trailingPE=18.5)
-        with patch("stock_research.yf.Ticker", return_value=mock_ticker):
+        data = self._make_yahoo_json(summaryDetail={"trailingPE": {"raw": 18.5}})
+        with patch("stock_research.requests.get", return_value=self._mock_resp(data)):
             result = fetch_stock_fundamentals("2330")
         assert result.pe_ratio == pytest.approx(18.5)
 
     def test_maps_eps(self):
-        mock_ticker = MagicMock()
-        mock_ticker.info = self._make_yf_info(trailingEps=55.0)
-        with patch("stock_research.yf.Ticker", return_value=mock_ticker):
+        data = self._make_yahoo_json(financialData={"revenuePerShare": {"raw": 55.0}})
+        with patch("stock_research.requests.get", return_value=self._mock_resp(data)):
             result = fetch_stock_fundamentals("2330")
         assert result.eps == pytest.approx(55.0)
 
     def test_uses_tw_suffix(self):
-        mock_ticker = MagicMock()
-        mock_ticker.info = self._make_yf_info()
-        with patch("stock_research.yf.Ticker", return_value=mock_ticker) as mock_yf:
+        with patch("stock_research.requests.get", return_value=self._mock_resp(self._make_yahoo_json())) as mock_get:
             fetch_stock_fundamentals("2330")
-        mock_yf.assert_called_once_with("2330.TW")
+        call_url = mock_get.call_args[0][0]
+        assert "2330.TW" in call_url
 
     def test_handles_api_error_gracefully(self):
-        with patch("stock_research.yf.Ticker", side_effect=Exception("API 失敗")):
+        with patch("stock_research.requests.get", side_effect=Exception("API 失敗")):
             result = fetch_stock_fundamentals("2330")
         assert isinstance(result, StockFundamentals)
         assert result.pe_ratio is None
 
     def test_handles_missing_fields(self):
-        mock_ticker = MagicMock()
-        mock_ticker.info = {}  # empty
-        with patch("stock_research.yf.Ticker", return_value=mock_ticker):
+        empty = {"quoteSummary": {"result": [{"summaryDetail": {}, "financialData": {}}]}}
+        with patch("stock_research.requests.get", return_value=self._mock_resp(empty)):
             result = fetch_stock_fundamentals("2330")
         assert result.pe_ratio is None
         assert result.eps is None
