@@ -413,7 +413,7 @@ def run() -> None:
     while True:
         try:
             resp = requests.get(
-                f"{_API}/getUpdates",
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
                 params={"timeout": _POLL_TIMEOUT, "offset": offset},
                 timeout=_POLL_TIMEOUT + 5,
             )

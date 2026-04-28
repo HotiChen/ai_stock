@@ -123,8 +123,12 @@ def fetch_snapshot(code: str):
     contract = api.Contracts.Stocks.get(code)
     if not contract:
         return None, None
-    snaps = api.snapshots([contract])
-    return contract, snaps[0] if snaps else None
+    try:
+        snaps = api.snapshots([contract])
+        return contract, snaps[0] if snaps else None
+    except Exception as e:
+        print(f"Failed to fetch snapshot for {code}: {e}")
+        return contract, None
 
 
 @st.cache_data(ttl=300)
@@ -171,13 +175,17 @@ def fetch_theme_snaps(theme: str) -> dict[str, dict]:
     if not contracts:
         return {}
     result = {}
-    for snap in api.snapshots(contracts):
-        result[snap.code] = {
-            "name": name_map.get(snap.code, snap.code),
-            "close": snap.close, "change_rate": snap.change_rate,
-            "change_price": snap.change_price, "total_volume": snap.total_volume,
-            "open": snap.open, "high": snap.high, "low": snap.low,
-        }
+    try:
+        snaps = api.snapshots(contracts)
+        for snap in snaps:
+            result[snap.code] = {
+                "name": name_map.get(snap.code, snap.code),
+                "close": snap.close, "change_rate": snap.change_rate,
+                "change_price": snap.change_price, "total_volume": snap.total_volume,
+                "open": snap.open, "high": snap.high, "low": snap.low,
+            }
+    except Exception as e:
+        print(f"Failed to fetch theme snaps for {theme}: {e}")
     return result
 
 
@@ -1163,10 +1171,14 @@ def _render_strategy_tracker():
                             st.caption(f"總體環境：{plan.macro_context}")
 
                 st.markdown("**選股：**")
+                st.caption("ℹ️ 若執行此計畫，系統將會**一次買進/賣出**清單中所有股票。")
                 for pick in plan.picks:
                     action_icon = "🟢" if pick.action == "buy" else "⬜"
+                    contract, snap = fetch_snapshot(pick.code)
+                    price_text = f"現價 {snap.close:.2f}" if snap else "無報價"
+                    
                     with st.expander(
-                        f"{action_icon} {pick.code} {pick.name}　"
+                        f"{action_icon} {pick.code} {pick.name} ({price_text})　"
                         f"{pick.quantity}張　{pick.hold_days}天　"
                         f"{pick.expected_return_pct:+.1f}%　信心{pick.confidence}/10"
                     ):
