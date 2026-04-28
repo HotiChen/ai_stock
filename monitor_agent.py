@@ -142,8 +142,15 @@ class AlertWorker:
                 break
             try:
                 save_alert(alert, self._db_path)
-                if self._telegram_chat_id:
-                    send_telegram(self._telegram_chat_id, alert["message"])
+                from notifier import notify_price_alert
+                notify_price_alert(
+                    code=alert.get("code", ""),
+                    name=alert.get("name", ""),
+                    alert_type=alert.get("alert_type", ""),
+                    current_price=alert.get("current_price", 0),
+                    target_price=alert.get("target_price"),
+                    stop_loss_price=alert.get("stop_loss_price"),
+                )
             except Exception as e:
                 log.error("AlertWorker error: %s", e)
 

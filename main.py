@@ -258,6 +258,9 @@ def main() -> None:
 
     log.info("main.py started — simulation=%s", SIMULATION)
 
+    from notifier import notify_system_start, notify_system_stop, notify_market_open, notify_market_close
+    notify_system_start(SIMULATION)
+
     api = ensure_connected(
         os.getenv("SHIOAJI_API_KEY", ""),
         os.getenv("SHIOAJI_SECRET_KEY", ""),
@@ -278,7 +281,7 @@ def main() -> None:
         # 08:30 pre-market
         if t.hour == 8 and t.minute == 30:
             job = PremarketJob(
-                candidates=[],          # populated by strategy scanner in production
+                candidates=[],
                 capital=CAPITAL,
                 db_path=DB_PATH,
                 telegram_chat_id=TELEGRAM_CHAT_ID or None,
@@ -289,6 +292,7 @@ def main() -> None:
 
         # 09:00 market open
         elif t.hour == 9 and t.minute == 0:
+            notify_market_open()
             if api and approved_picks:
                 job = MarketOpenJob(
                     api=api,
@@ -303,12 +307,16 @@ def main() -> None:
 
         # 13:35 post-market
         elif t.hour == 13 and t.minute == 35:
+            from research_db import load_daily_trades
+            trades = load_daily_trades(date.today(), DB_PATH)
+            total_pnl = sum(t.get("pnl") or 0 for t in trades)
             job = PostMarketJob(
                 monitor=monitor,
                 db_path=DB_PATH,
                 execution_id=f"main-{now.date().isoformat()}",
             )
-            job.run(total_pnl=0.0, trades_summary="自動收盤")
+            job.run(total_pnl=total_pnl, trades_summary="自動收盤")
+            notify_market_close(total_pnl=total_pnl, trade_count=len(trades))
             monitor = None
             approved_picks = []
             time.sleep(60)
@@ -318,6 +326,7 @@ def main() -> None:
 
     if monitor:
         monitor.stop()
+    notify_system_stop()
     log.info("main.py stopped")
 
 

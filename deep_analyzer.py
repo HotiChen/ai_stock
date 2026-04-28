@@ -170,6 +170,8 @@ def run_deep_analysis(
     market_summary: str,
     theme_info: str,
 ) -> DeepAnalysis:
+    from notifier import notify_analysis_result
+
     price_trend = get_price_trend_summary(code)
     indicators  = fetch_indicators(code)
     tech_text   = format_indicators_text(indicators) if indicators else ""
@@ -177,10 +179,27 @@ def run_deep_analysis(
                                fundamentals_text, market_summary, theme_info,
                                technical_text=tech_text)
     try:
-        raw = call_haiku(prompt)
-        return parse_deep_response(code, name, raw)
+        raw    = call_haiku(prompt)
+        result = parse_deep_response(code, name, raw)
     except Exception:
-        from dataclasses import fields
-        return DeepAnalysis(code=code, name=name, signal="hold", confidence=0,
-                            summary="AI 分析失敗，預設持有",
-                            factors=AnalysisFactor("", "", "", "", "", ""))
+        result = DeepAnalysis(code=code, name=name, signal="hold", confidence=0,
+                              summary="AI 分析失敗，預設持有",
+                              factors=AnalysisFactor("", "", "", "", "", ""))
+
+    notify_analysis_result(
+        code=result.code,
+        name=result.name,
+        signal=result.signal,
+        confidence=result.confidence,
+        summary=result.summary,
+        factors={
+            "historical_trend": result.factors.historical_trend,
+            "news":             result.factors.news,
+            "theme":            result.factors.theme,
+            "us_market":        result.factors.us_market,
+            "tw_policy":        result.factors.tw_policy,
+        },
+        target_price=result.target_price,
+        stop_loss_price=result.stop_loss_price,
+    )
+    return result

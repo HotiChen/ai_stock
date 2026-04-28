@@ -144,4 +144,15 @@ def validate_plan(
 
         approved.append(result)
 
+    # Push notifications
+    try:
+        from notifier import notify_risk_approved, notify_risk_rejected, notify_risk_summary
+        for p in approved:
+            notify_risk_approved(p["code"], p.get("name", ""), p.get("budget", 0), p.get("reason", ""))
+        for p in rejected:
+            notify_risk_rejected(p["code"], p.get("name", ""), p.get("reason", ""))
+        notify_risk_summary(approved, rejected)
+    except Exception:
+        pass
+
     return {"approved": approved, "rejected": rejected}

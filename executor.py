@@ -120,37 +120,34 @@ def place_stock_order(
     prior_orders = prior_orders or []
     sj_action = sc.Action.Buy if action == "buy" else sc.Action.Sell
 
-    # Guard 1: duplicate
-    if is_duplicate_order(code, action, prior_orders):
+    def _skip(reason: str, qty: int = 0, amt: float = 0.0, lt: str = "common") -> ExecutionResult:
+        try:
+            from notifier import notify_order_skipped
+            notify_order_skipped(code, name, reason)
+        except Exception:
+            pass
         return ExecutionResult(
             code=code, name=name, action=action,
-            quantity=0, price=price, amount=0.0,
-            lot_type="common", success=False,
-            order_id=None, reason=f"重複委託：{code} {action} 今日已下單",
+            quantity=qty, price=price, amount=amt,
+            lot_type=lt, success=False, order_id=None, reason=reason,
         )
+
+    # Guard 1: duplicate
+    if is_duplicate_order(code, action, prior_orders):
+        return _skip(f"重複委託：{code} {action} 今日已下單")
 
     # Guard 2: lot type + quantity
     lot_type = calc_lot_type(budget, price)
     quantity = calc_quantity(budget, price, lot_type)
 
     if quantity <= 0:
-        return ExecutionResult(
-            code=code, name=name, action=action,
-            quantity=0, price=price, amount=0.0,
-            lot_type=lot_type, success=False,
-            order_id=None, reason="預算不足，無法下單任何數量",
-        )
+        return _skip("預算不足，無法下單任何數量", lt=lot_type)
 
     # Guard 3: hard limit
     multiplier = SHARES_PER_LOT if lot_type == "common" else 1
     amount = quantity * price * multiplier
     if not check_hard_limit(amount, hard_limit):
-        return ExecutionResult(
-            code=code, name=name, action=action,
-            quantity=quantity, price=price, amount=amount,
-            lot_type=lot_type, success=False,
-            order_id=None, reason=f"超過硬性金額上限 {hard_limit:,.0f}，委託金額 {amount:,.0f}",
-        )
+        return _skip(f"超過硬性金額上限 {hard_limit:,.0f}，委託金額 {amount:,.0f}", qty=quantity, amt=amount, lt=lot_type)
 
     # Place order
     try:
@@ -183,21 +180,33 @@ def place_stock_order(
                  code, name, action, quantity,
                  "張" if lot_type == "common" else "股",
                  price, order_id)
-        return ExecutionResult(
+        result = ExecutionResult(
             code=code, name=name, action=action,
             quantity=quantity, price=price, amount=amount,
             lot_type=lot_type, success=True,
             order_id=order_id, reason="",
         )
+        try:
+            from notifier import notify_order_success
+            notify_order_success(code, name, action, quantity, price, amount, lot_type, order_id)
+        except Exception:
+            pass
+        return result
 
     except Exception as e:
         log.error("委託失敗 %s: %s", code, e)
-        return ExecutionResult(
+        result = ExecutionResult(
             code=code, name=name, action=action,
             quantity=quantity, price=price, amount=amount,
             lot_type=lot_type, success=False,
             order_id=None, reason=str(e),
         )
+        try:
+            from notifier import notify_order_skipped
+            notify_order_skipped(code, name, str(e))
+        except Exception:
+            pass
+        return result
 
 
 # ── Force stop-loss ───────────────────────────────────────────────────────────
