@@ -105,6 +105,58 @@ def test_callback_unauthorized_is_blocked(monkeypatch):
         mock_send.assert_not_called()
 
 
+# ── approve / reject per-stock callbacks ─────────────────────────────────────
+
+@pytest.mark.parametrize("code", ["2330", "2317", "0050", "2454", "3008", "9999"])
+def test_approve_any_stock_replies_with_code(code, monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot._post"), \
+         patch("telegram_bot.send_text") as mock_send:
+        bot.process_update(_make_callback("123", f"approve:{code}"))
+        text = mock_send.call_args[0][1]
+        assert code in text
+        assert "批准" in text
+
+
+@pytest.mark.parametrize("code", ["2330", "2317", "0050", "2454", "3008", "9999"])
+def test_reject_any_stock_replies_with_code(code, monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot._post"), \
+         patch("telegram_bot.send_text") as mock_send:
+        bot.process_update(_make_callback("123", f"reject:{code}"))
+        text = mock_send.call_args[0][1]
+        assert code in text
+        assert "拒絕" in text
+
+
+def test_approve_all_callback(monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot._post"), \
+         patch("telegram_bot.send_text") as mock_send:
+        bot.process_update(_make_callback("123", "approve_all"))
+        text = mock_send.call_args[0][1]
+        assert "全部批准" in text or "全部" in text
+
+
+def test_reject_all_callback(monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot._post"), \
+         patch("telegram_bot.send_text") as mock_send:
+        bot.process_update(_make_callback("123", "reject_all"))
+        text = mock_send.call_args[0][1]
+        assert "拒絕" in text
+
+
+def test_approve_reject_unauthorized_blocked(monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "999")
+    with patch("telegram_bot._post"), \
+         patch("telegram_bot.send_text") as mock_send:
+        bot.process_update(_make_callback("888", "approve:2330"))
+        mock_send.assert_not_called()
+        bot.process_update(_make_callback("888", "reject_all"))
+        mock_send.assert_not_called()
+
+
 # ── handle_plan ───────────────────────────────────────────────────────────────
 
 def test_handle_plan_no_picks_shows_notice(monkeypatch):

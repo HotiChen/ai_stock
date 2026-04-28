@@ -184,7 +184,20 @@ def handle_callback(callback_query: dict) -> None:
 
     _post("answerCallbackQuery", {"callback_query_id": cq_id})
 
-    if data == "order_confirm":
+    # ── 盤前選股確認（user_confirm.py 送出的 inline keyboard）──
+    if data == "approve_all":
+        send_text(chat_id, "✅ 全部批准，09:00 開盤將執行今日計劃。")
+    elif data == "reject_all":
+        send_text(chat_id, "❌ 全部拒絕，今日不執行任何下單。")
+    elif data.startswith("approve:"):
+        code = data.split(":", 1)[1]
+        send_text(chat_id, f"✅ {code} 已批准，開盤時將執行此筆委託。")
+    elif data.startswith("reject:"):
+        code = data.split(":", 1)[1]
+        send_text(chat_id, f"❌ {code} 已拒絕，跳過此筆。")
+
+    # ── 快速下單確認（⚡ 快速下單 按鈕送出的）──
+    elif data == "order_confirm":
         send_text(chat_id, "✅ 下單指令已送出，請至 Dashboard 確認委託狀態。")
     elif data == "order_cancel":
         send_text(chat_id, "❌ 已取消。")
