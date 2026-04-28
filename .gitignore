@@ -32,3 +32,6 @@ shioaji.log
 
 # Old version
 antigravity-version/
+
+# Temp scripts
+check_updates.py
