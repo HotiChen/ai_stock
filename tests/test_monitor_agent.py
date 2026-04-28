@@ -231,13 +231,13 @@ class TestAlertWorker:
         db_path = str(tmp_path / "test.db")
         init_db(db_path)
 
-        with patch("monitor_agent.send_telegram") as mock_send:
+        with patch("notifier.notify_price_alert") as mock_notify:
             q = queue.Queue()
             worker = AlertWorker(q, db_path=db_path, telegram_chat_id="12345")
             q.put(self._make_alert())
             q.put(None)
             worker.run()
-            assert mock_send.called
+            assert mock_notify.called
 
     def test_worker_skips_telegram_when_no_chat_id(self, tmp_path):
         from monitor_agent import AlertWorker

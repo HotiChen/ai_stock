@@ -52,7 +52,7 @@ def _post(method: str, payload: dict) -> dict:
 def send_text(chat_id: str, text: str, reply_markup: dict | None = None) -> None:
     payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     _post("sendMessage", payload)
 
 
@@ -193,13 +193,15 @@ def handle_callback(callback_query: dict) -> None:
 
 # ── Message router ─────────────────────────────────────────────────────────────
 
-_HANDLERS = {
-    "📊 今日狀態":  handle_status,
-    "💼 持倉":      handle_holdings,
-    "📈 選股計劃":  handle_plan,
-    "⚡ 快速下單":  handle_quick_order,
-    "🛡️ 停損設定": handle_stop_loss,
-    "❓ 說明":      handle_help,
+# Map button text → handler function name (string).
+# Using names instead of direct references so unittest.mock.patch works correctly.
+_HANDLER_NAMES: dict[str, str] = {
+    "📊 今日狀態":  "handle_status",
+    "💼 持倉":      "handle_holdings",
+    "📈 選股計劃":  "handle_plan",
+    "⚡ 快速下單":  "handle_quick_order",
+    "🛡️ 停損設定": "handle_stop_loss",
+    "❓ 說明":      "handle_help",
 }
 
 
@@ -217,17 +219,18 @@ def process_update(update: dict) -> None:
         handle_callback(update["callback_query"])
         return
 
-    msg  = update.get("message", {})
-    text = msg.get("text", "").strip()
+    msg     = update.get("message", {})
+    text    = msg.get("text", "").strip()
     chat_id = str(msg.get("chat", {}).get("id", ""))
 
     if text in ("/start", "/menu"):
         send_main_menu(chat_id, "📱 AI Stock 已啟動，請選擇功能：")
         return
 
-    handler = _HANDLERS.get(text)
-    if handler:
-        handler(chat_id)
+    import telegram_bot as _self
+    handler_name = _HANDLER_NAMES.get(text)
+    if handler_name:
+        getattr(_self, handler_name)(chat_id)
     else:
         send_main_menu(chat_id, f"不認識「{text}」，請使用下方選單：")
 
