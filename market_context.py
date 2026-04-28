@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import feedparser
-import yfinance as yf
+import requests
 
 _US_TICKERS = {
     "sp500":  "^GSPC",
@@ -44,16 +44,23 @@ class MacroHeadline:
 def fetch_us_market() -> Optional[USMarketSnapshot]:
     try:
         changes: dict[str, float] = {}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
         for key, ticker in _US_TICKERS.items():
-            df = yf.download(ticker, period="2d", interval="1d", progress=False, auto_adjust=True)
-            if df is None or len(df) < 2:
-                changes[key] = 0.0
-                continue
-            closes = df["Close"].dropna().values
-            if len(closes) >= 2:
-                changes[key] = float((closes[-1] - closes[-2]) / closes[-2] * 100)
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=2d&interval=1d"
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                closes = data.get("chart", {}).get("result", [{}])[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                closes = [c for c in closes if c is not None]
+                if len(closes) >= 2:
+                    changes[key] = float((closes[-1] - closes[-2]) / closes[-2] * 100)
+                else:
+                    changes[key] = 0.0
             else:
                 changes[key] = 0.0
+
         return USMarketSnapshot(
             sp500_change=changes.get("sp500", 0.0),
             nasdaq_change=changes.get("nasdaq", 0.0),

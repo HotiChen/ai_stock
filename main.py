@@ -159,6 +159,7 @@ class PremarketJob:
             name = cand.get("name", code)
             try:
                 analysis = run_deep_analysis(
+                    api=self._api,
                     code=code, name=name, news=[],
                     fundamentals_text="", market_summary=market_summary,
                     theme_info=theme_info,

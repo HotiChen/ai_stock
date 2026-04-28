@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-import yfinance as yf
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -143,7 +142,7 @@ def calc_atr(
 # ── calculate_indicators: dict format for rules.py ────────────────────────────
 
 def _df_to_arrays(df) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """yfinance DataFrame（可能 MultiIndex）→ (closes, highs, lows, volumes)。"""
+    """DataFrame → (closes, highs, lows, volumes)。"""
     if hasattr(df.columns, "levels"):
         df = df.copy()
         df.columns = df.columns.get_level_values(0)
@@ -156,7 +155,7 @@ def _df_to_arrays(df) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
 def calculate_indicators(df) -> dict:
     """
-    輸入 yfinance OHLCV DataFrame（至少 80 筆），
+    輸入 OHLCV DataFrame（至少 80 筆），
     輸出完整指標 dict，直接供 rules.py 使用。
     """
     closes, highs, lows, volumes = _df_to_arrays(df)
@@ -278,16 +277,27 @@ def format_indicators_text(ind) -> str:
 
 # ── Data fetcher（100 日）─────────────────────────────────────────────────────
 
-def fetch_indicators(code: str) -> Optional[dict]:
+def fetch_indicators(api, code: str) -> Optional[dict]:
     """
-    從 yfinance 抓 100 日歷史，計算所有指標。
+    從 Shioaji 抓 100 日歷史，計算所有指標。
     回傳 calculate_indicators() 的 dict，失敗回傳 None。
     """
+    import pandas as pd
+    from datetime import date, timedelta
+    
     try:
-        df = yf.download(f"{code}.TW", period="100d", interval="1d",
-                         progress=False, auto_adjust=True)
-        if df is None or len(df) < 80:
+        contract = api.Contracts.Stocks.get(code)
+        if not contract:
             return None
+            
+        end = date.today()
+        start = end - timedelta(days=150) # Approx 100 trading days
+        
+        kbars = api.kbars(contract, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
+        if not kbars or not kbars.get('ts') or len(kbars['ts']) < 80:
+            return None
+            
+        df = pd.DataFrame({**kbars})
         return calculate_indicators(df)
     except Exception:
         return None

@@ -7,12 +7,15 @@ halt()        → write HALT flag, stop MonitorAgent if running
 resume()      → clear HALT flag
 is_halted()   → check flag
 cancel_all()  → cancel all today's open orders via Shioaji
+liquidate_all_positions() → sell all current positions at market price
 """
 
 import os
 from datetime import date
 from pathlib import Path
 from typing import Optional
+
+import shioaji.constant as sc
 
 from logger import get_logger
 
@@ -70,3 +73,45 @@ def cancel_all_orders(api) -> dict:
 
     log.warning("cancel_all: cancelled=%d failed=%d", len(cancelled), len(failed))
     return {"cancelled": cancelled, "failed": failed}
+
+
+# ── Liquidate all positions ───────────────────────────────────────────────────
+
+def liquidate_all_positions(api) -> dict:
+    """
+    Fetch all current positions and sell them at market price.
+    Returns {"liquidated": [{"code": ..., "quantity": ...}], "failed": [{"code": ..., "error": ...}]}.
+    """
+    liquidated = []
+    failed = []
+
+    try:
+        api.update_status()
+        positions = api.list_positions(api.stock_account)
+    except Exception as e:
+        log.error("liquidate_all: failed to fetch positions: %s", e)
+        return {"liquidated": [], "failed": [], "error": str(e)}
+
+    for pos in positions:
+        try:
+            contract = api.Contracts.Stocks.get(pos.code)
+            if not contract:
+                raise ValueError(f"Contract not found for {pos.code}")
+
+            order = api.Order(
+                price=0,
+                quantity=pos.quantity,
+                action=sc.Action.Sell,
+                price_type=sc.StockPriceType.MKT,
+                order_type=sc.OrderType.ROD,
+                account=api.stock_account
+            )
+            trade = api.place_order(contract, order)
+            log.warning("Liquidated position %s %d shares, trade id: %s", pos.code, pos.quantity, trade.order.id if hasattr(trade, 'order') else '')
+            liquidated.append({"code": pos.code, "quantity": pos.quantity})
+        except Exception as e:
+            failed.append({"code": pos.code, "error": str(e)})
+            log.error("Failed to liquidate %s: %s", pos.code, e)
+
+    log.warning("liquidate_all: liquidated=%d failed=%d", len(liquidated), len(failed))
+    return {"liquidated": liquidated, "failed": failed}

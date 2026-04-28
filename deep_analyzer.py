@@ -5,8 +5,6 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-import yfinance as yf
-
 import config
 from ai_client import call_haiku
 from technical_indicators import fetch_indicators, format_indicators_text
@@ -39,15 +37,23 @@ class DeepAnalysis:
 
 # ── Historical price trend ────────────────────────────────────────────────────
 
-def get_price_trend_summary(code: str, days: int = 20) -> str:
+def get_price_trend_summary(api, code: str, days: int = 20) -> str:
+    from datetime import date, timedelta
     try:
-        df = yf.download(f"{code}.TW", period=f"{days + 5}d", interval="1d",
-                         progress=False, auto_adjust=True)
-        if df is None or len(df) < 5:
+        contract = api.Contracts.Stocks.get(code)
+        if not contract:
             return "歷史資料不足"
-        closes = df["Close"].dropna().values[-days:]
-        ma5  = float(closes[-5:].mean())
-        ma20 = float(closes.mean())
+        end = date.today()
+        start = end - timedelta(days=days + 15)
+        kbars = api.kbars(contract, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
+        
+        if not kbars or not kbars.get('Close') or len(kbars['Close']) < 5:
+            return "歷史資料不足"
+            
+        closes = kbars["Close"][-days:]
+        import numpy as np
+        ma5  = float(np.mean(closes[-5:]))
+        ma20 = float(np.mean(closes))
         latest = float(closes[-1])
         trend = "向上" if ma5 > ma20 else "向下" if ma5 < ma20 else "橫盤"
         pct = (latest - closes[0]) / closes[0] * 100
@@ -163,6 +169,7 @@ def parse_deep_response(code: str, name: str, raw: str) -> DeepAnalysis:
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def run_deep_analysis(
+    api,
     code: str,
     name: str,
     news: list[str],
@@ -172,8 +179,24 @@ def run_deep_analysis(
 ) -> DeepAnalysis:
     from notifier import notify_analysis_result
 
-    price_trend = get_price_trend_summary(code)
-    indicators  = fetch_indicators(code)
+    price_trend = get_price_trend_summary(api, code)
+    indicators  = fetch_indicators(api, code)
+    
+    # ── Pre-filter: 節省 API 呼叫成本 ──
+    if indicators:
+        price = indicators.get("current_price", 0)
+        ma20  = indicators.get("MA20", 0)
+        vol_r = indicators.get("volume_ratio", 0)
+        # 若股價低於月線，或量能極度萎縮，直接判定為觀望，不呼叫 AI
+        if price < ma20 or vol_r < 0.5:
+            reason = "股價低於月線" if price < ma20 else "量能極度萎縮 (量比 < 0.5)"
+            result = DeepAnalysis(
+                code=code, name=name, signal="hold", confidence=0,
+                summary=f"未達 AI 分析門檻（前置過濾：{reason}）",
+                factors=AnalysisFactor("", "", "", "", "", "")
+            )
+            return result
+
     tech_text   = format_indicators_text(indicators) if indicators else ""
     prompt = build_deep_prompt(code, name, price_trend, news,
                                fundamentals_text, market_summary, theme_info,

@@ -249,75 +249,67 @@ class TestFormatIndicatorsText:
 # ── fetch_indicators (integration, mocked) ───────────────────────────────────
 
 class TestFetchIndicators:
-    def _make_df(self, n=60):
-        import pandas as pd
-        dates  = pd.date_range("2026-01-01", periods=n, freq="B")
-        closes = np.linspace(100, 120, n)
-        highs  = closes + 2
-        lows   = closes - 2
-        vols   = np.array([1_000_000] * n, dtype=float)
-        df = pd.DataFrame({
-            "Close":  closes,
-            "High":   highs,
-            "Low":    lows,
+    def _make_kbars(self, n=100):
+        closes = np.linspace(100, 120, n).tolist()
+        highs  = (np.array(closes) + 2).tolist()
+        lows   = (np.array(closes) - 2).tolist()
+        vols   = [1_000_000] * n
+        return {
+            "ts": [f"2026-01-{i%30+1:02d}" for i in range(n)],
+            "Close": closes,
+            "High": highs,
+            "Low": lows,
             "Volume": vols,
-        }, index=dates)
-        # yfinance returns MultiIndex columns when auto_adjust=True
-        df.columns = pd.MultiIndex.from_tuples(
-            [(c, "2330.TW") for c in df.columns]
-        )
-        return df
+        }
 
-    @patch("technical_indicators.yf.download")
-    def test_returns_dict(self, mock_dl):
-        mock_dl.return_value = self._make_df(n=100)
-        result = fetch_indicators("2330")
+    def test_returns_dict(self):
+        api = MagicMock()
+        api.kbars.return_value = self._make_kbars(n=100)
+        result = fetch_indicators(api, "2330")
         assert isinstance(result, dict)
         assert "current_price" in result
 
-    @patch("technical_indicators.yf.download")
-    def test_ma5_ma20_ma60_are_floats(self, mock_dl):
-        mock_dl.return_value = self._make_df(n=100)
-        result = fetch_indicators("2330")
+    def test_ma5_ma20_ma60_are_floats(self):
+        api = MagicMock()
+        api.kbars.return_value = self._make_kbars(n=100)
+        result = fetch_indicators(api, "2330")
         assert isinstance(result["MA5"],  float)
         assert isinstance(result["MA20"], float)
         assert isinstance(result["MA60"], float)
 
-    @patch("technical_indicators.yf.download")
-    def test_rsi_in_range(self, mock_dl):
-        mock_dl.return_value = self._make_df(n=100)
-        result = fetch_indicators("2330")
+    def test_rsi_in_range(self):
+        api = MagicMock()
+        api.kbars.return_value = self._make_kbars(n=100)
+        result = fetch_indicators(api, "2330")
         assert 0 <= result["RSI"] <= 100
 
-    @patch("technical_indicators.yf.download")
-    def test_kd_in_range(self, mock_dl):
-        mock_dl.return_value = self._make_df(n=100)
-        result = fetch_indicators("2330")
+    def test_kd_in_range(self):
+        api = MagicMock()
+        api.kbars.return_value = self._make_kbars(n=100)
+        result = fetch_indicators(api, "2330")
         assert 0 <= result["KD_K"] <= 100
         assert 0 <= result["KD_D"] <= 100
 
-    @patch("technical_indicators.yf.download")
-    def test_bb_order(self, mock_dl):
-        mock_dl.return_value = self._make_df(n=100)
-        result = fetch_indicators("2330")
+    def test_bb_order(self):
+        api = MagicMock()
+        api.kbars.return_value = self._make_kbars(n=100)
+        result = fetch_indicators(api, "2330")
         assert result["BB_upper"] > result["BB_lower"]
 
-    @patch("technical_indicators.yf.download")
-    def test_volume_ratio_positive(self, mock_dl):
-        mock_dl.return_value = self._make_df(n=100)
-        result = fetch_indicators("2330")
+    def test_volume_ratio_positive(self):
+        api = MagicMock()
+        api.kbars.return_value = self._make_kbars(n=100)
+        result = fetch_indicators(api, "2330")
         assert result["volume_ratio"] > 0
 
-    @patch("technical_indicators.yf.download")
-    def test_download_failure_returns_none(self, mock_dl):
-        mock_dl.side_effect = Exception("network error")
-        result = fetch_indicators("2330")
+    def test_download_failure_returns_none(self):
+        api = MagicMock()
+        api.kbars.side_effect = Exception("network error")
+        result = fetch_indicators(api, "2330")
         assert result is None
 
-    @patch("technical_indicators.yf.download")
-    def test_insufficient_data_returns_none(self, mock_dl):
-        import pandas as pd
-        df = pd.DataFrame({"Close": [100.0, 101.0]})
-        mock_dl.return_value = df
-        result = fetch_indicators("2330")
+    def test_insufficient_data_returns_none(self):
+        api = MagicMock()
+        api.kbars.return_value = self._make_kbars(n=10)
+        result = fetch_indicators(api, "2330")
         assert result is None

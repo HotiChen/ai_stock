@@ -54,6 +54,9 @@ def test_authorized_chat_id_is_allowed(monkeypatch):
     ("⚡ 快速下單",  "handle_quick_order"),
     ("🛡️ 停損設定", "handle_stop_loss"),
     ("❓ 說明",      "handle_help"),
+    ("🚨 緊急暫停",  "handle_emergency_halt"),
+    ("🔄 撤銷所有委託", "handle_cancel_all"),
+    ("💥 一鍵全平倉", "handle_liquidate_all"),
 ])
 def test_button_routes_to_correct_handler(text, handler_name, monkeypatch):
     monkeypatch.setattr(bot, "CHAT_ID", "123")
@@ -103,6 +106,32 @@ def test_callback_unauthorized_is_blocked(monkeypatch):
          patch("telegram_bot.send_text") as mock_send:
         bot.process_update(_make_callback("888", "order_confirm"))
         mock_send.assert_not_called()
+
+
+def test_callback_liquidate_all_confirm(monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot.send_text") as mock_send, \
+         patch("telegram_bot.ensure_connected") as mock_conn, \
+         patch("halt.liquidate_all_positions") as mock_liq:
+        
+        mock_api = MagicMock()
+        mock_conn.return_value = mock_api
+        mock_liq.return_value = {"liquidated": [{"code": "2330", "quantity": 1}], "failed": []}
+        
+        bot.process_update(_make_callback("123", "liquidate_all_confirm"))
+        
+        mock_liq.assert_called_once_with(mock_api)
+        text = mock_send.call_args_list[-1][0][1]
+        assert "全平倉完成" in text
+        assert "1" in text
+
+def test_callback_liquidate_all_abort(monkeypatch):
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    with patch("telegram_bot.send_text") as mock_send, \
+         patch("telegram_bot.send_main_menu"):
+        bot.process_update(_make_callback("123", "liquidate_all_abort"))
+        text = mock_send.call_args[0][1]
+        assert "取消" in text
 
 
 # ── approve / reject per-stock callbacks ─────────────────────────────────────
@@ -333,6 +362,7 @@ def test_send_main_menu_includes_all_buttons():
         assert "⚡ 快速下單" in flat
         assert "🛡️ 停損設定" in flat
         assert "❓ 說明" in flat
+        assert "💥 一鍵全平倉" in flat
 
 
 def test_send_text_reply_markup_passed_as_dict():

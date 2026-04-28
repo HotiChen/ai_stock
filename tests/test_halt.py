@@ -109,6 +109,64 @@ def test_cancel_all_empty_trades():
     assert result["failed"] == []
 
 
+# ── liquidate_all_positions ───────────────────────────────────────────────────
+
+def _make_position(code: str, quantity: int):
+    pos = MagicMock()
+    pos.code = code
+    pos.quantity = quantity
+    return pos
+
+
+def test_liquidate_all_places_sell_orders():
+    api = MagicMock()
+    api.list_positions.return_value = [
+        _make_position("2330", 2),
+        _make_position("2317", 1),
+    ]
+    contract1 = MagicMock()
+    contract2 = MagicMock()
+    api.Contracts.Stocks.get.side_effect = [contract1, contract2]
+
+    # Mock order place
+    trade = MagicMock()
+    trade.order.id = "SELL_001"
+    api.place_order.return_value = trade
+
+    result = halt.liquidate_all_positions(api)
+    
+    assert len(result["liquidated"]) == 2
+    assert "2330" in result["liquidated"][0]["code"]
+    assert "2317" in result["liquidated"][1]["code"]
+    assert result["failed"] == []
+    assert api.place_order.call_count == 2
+
+    # Verify action is Sell and price type is MKT
+    order_args = api.Order.call_args_list
+    import shioaji.constant as sc
+    assert order_args[0].kwargs["action"] == sc.Action.Sell
+    assert order_args[0].kwargs["price_type"] == sc.StockPriceType.MKT
+
+
+def test_liquidate_all_handles_api_failure():
+    api = MagicMock()
+    api.list_positions.side_effect = Exception("network timeout")
+    
+    result = halt.liquidate_all_positions(api)
+    assert result["liquidated"] == []
+    assert "error" in result
+
+
+def test_liquidate_all_empty_positions():
+    api = MagicMock()
+    api.list_positions.return_value = []
+    
+    result = halt.liquidate_all_positions(api)
+    assert result["liquidated"] == []
+    assert result["failed"] == []
+    api.place_order.assert_not_called()
+
+
 # ── telegram_bot integration ──────────────────────────────────────────────────
 
 def test_bot_halt_button_sets_flag(monkeypatch):

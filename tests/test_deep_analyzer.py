@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -82,21 +82,20 @@ class TestDeepAnalysis:
 # ── get_price_trend_summary ───────────────────────────────────────────────────
 
 class TestGetPriceTrendSummary:
-    @patch("deep_analyzer.yf.download")
-    def test_returns_string(self, mock_dl):
-        import pandas as pd
-        prices = [100, 102, 101, 103, 105, 104, 106]
-        mock_dl.return_value = pd.DataFrame(
-            {"Close": prices},
-            index=pd.date_range("2026-04-01", periods=len(prices))
-        )
-        result = get_price_trend_summary("2330")
+    def test_returns_string(self):
+        api = MagicMock()
+        api.Contracts.Stocks.get.return_value = "contract"
+        api.kbars.return_value = {
+            "Close": [100, 102, 101, 103, 105, 104, 106] * 5
+        }
+        result = get_price_trend_summary(api, "2330")
         assert isinstance(result, str)
         assert len(result) > 5
 
-    @patch("deep_analyzer.yf.download", side_effect=Exception("network"))
-    def test_failure_returns_fallback(self, mock_dl):
-        result = get_price_trend_summary("2330")
+    def test_failure_returns_fallback(self):
+        api = MagicMock()
+        api.kbars.side_effect = Exception("network")
+        result = get_price_trend_summary(api, "2330")
         assert isinstance(result, str)
 
 
@@ -172,11 +171,22 @@ class TestParseDeepResponse:
 # ── run_deep_analysis ─────────────────────────────────────────────────────────
 
 class TestRunDeepAnalysis:
+    def _mock_indicators(self):
+        return {
+            "current_price": 100, "MA5": 95, "MA20": 90, "MA60": 85,
+            "RSI": 60, "KD_K": 70, "KD_D": 65, "BB_upper": 110, "BB_lower": 90,
+            "BB_width": 20, "volume_ratio": 1.5, "bullish_alignment": True
+        }
+
     @patch("deep_analyzer.call_haiku")
     @patch("deep_analyzer.get_price_trend_summary", return_value="20日均線向上")
-    def test_returns_deep_analysis(self, mock_trend, mock_ollama):
+    @patch("deep_analyzer.fetch_indicators")
+    def test_returns_deep_analysis(self, mock_fetch, mock_trend, mock_ollama):
+        mock_fetch.return_value = self._mock_indicators()
         mock_ollama.return_value = SAMPLE_RESPONSE
+        api = MagicMock()
         result = run_deep_analysis(
+            api=api,
             code="2330", name="台積電",
             news=["法人買超"], fundamentals_text="PE 20",
             market_summary="費半強勢", theme_info="AI 題材",
@@ -186,14 +196,20 @@ class TestRunDeepAnalysis:
 
     @patch("deep_analyzer.call_haiku", side_effect=Exception("timeout"))
     @patch("deep_analyzer.get_price_trend_summary", return_value="")
-    def test_failure_returns_hold(self, mock_trend, mock_ollama):
-        result = run_deep_analysis("2330", "台積電", [], "", "", "")
+    @patch("deep_analyzer.fetch_indicators")
+    def test_failure_returns_hold(self, mock_fetch, mock_trend, mock_ollama):
+        mock_fetch.return_value = self._mock_indicators()
+        api = MagicMock()
+        result = run_deep_analysis(api, "2330", "台積電", [], "", "", "")
         assert result.signal == "hold"
 
     @patch("deep_analyzer.call_haiku")
     @patch("deep_analyzer.get_price_trend_summary", return_value="下降")
-    def test_prompt_includes_stock_info(self, mock_trend, mock_ollama):
+    @patch("deep_analyzer.fetch_indicators")
+    def test_prompt_includes_stock_info(self, mock_fetch, mock_trend, mock_ollama):
+        mock_fetch.return_value = self._mock_indicators()
         mock_ollama.return_value = SAMPLE_RESPONSE
-        run_deep_analysis("2454", "聯發科", ["新聞"], "PE 15", "空頭", "AI")
+        api = MagicMock()
+        run_deep_analysis(api, "2454", "聯發科", ["新聞"], "PE 15", "空頭", "AI")
         prompt = mock_ollama.call_args[0][0]
         assert "2454" in prompt or "聯發科" in prompt

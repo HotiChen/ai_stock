@@ -1,7 +1,6 @@
 # Core — broker + AI + data
 shioaji>=1.3.0
 anthropic>=0.97.0
-yfinance>=0.2.40
 feedparser>=6.0.0
 
 # Data processing

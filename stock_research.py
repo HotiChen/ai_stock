@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import feedparser
 import requests
-import yfinance as yf
 
 import config
 
@@ -55,26 +54,37 @@ def fetch_stock_news(code: str, name: str, max_items: int = 5) -> list[str]:
 
 
 def fetch_stock_fundamentals(code: str) -> StockFundamentals:
-    """Fetch fundamentals from Yahoo Finance (code.TW format)."""
+    """Fetch fundamentals via Yahoo Finance query API."""
     try:
-        ticker = yf.Ticker(f"{code}.TW")
-        info = ticker.info
-        return StockFundamentals(
-            pe_ratio=info.get("trailingPE"),
-            eps=info.get("trailingEps"),
-            market_cap=info.get("marketCap"),
-            week52_high=info.get("fiftyTwoWeekHigh"),
-            week52_low=info.get("fiftyTwoWeekLow"),
-            dividend_yield=info.get("dividendYield"),
-            revenue_growth=info.get("revenueGrowth"),
-            profit_margin=info.get("profitMargins"),
-        )
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{code}.TW?modules=defaultKeyStatistics,summaryDetail,financialData"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json().get("quoteSummary", {}).get("result", [])
+            if data:
+                d = data[0]
+                fin = d.get("financialData", {})
+                summ = d.get("summaryDetail", {})
+                return StockFundamentals(
+                    pe_ratio=summ.get("trailingPE", {}).get("raw"),
+                    eps=fin.get("revenuePerShare", {}).get("raw"), # Used as fallback if EPS not found
+                    market_cap=summ.get("marketCap", {}).get("raw"),
+                    week52_high=summ.get("fiftyTwoWeekHigh", {}).get("raw"),
+                    week52_low=summ.get("fiftyTwoWeekLow", {}).get("raw"),
+                    dividend_yield=summ.get("dividendYield", {}).get("raw"),
+                    revenue_growth=fin.get("revenueGrowth", {}).get("raw"),
+                    profit_margin=fin.get("profitMargins", {}).get("raw"),
+                )
     except Exception:
-        return StockFundamentals(
-            pe_ratio=None, eps=None, market_cap=None,
-            week52_high=None, week52_low=None,
-            dividend_yield=None, revenue_growth=None, profit_margin=None,
-        )
+        pass
+    
+    return StockFundamentals(
+        pe_ratio=None, eps=None, market_cap=None,
+        week52_high=None, week52_low=None,
+        dividend_yield=None, revenue_growth=None, profit_margin=None,
+    )
 
 
 # ── Formatting ────────────────────────────────────────────────────────────────

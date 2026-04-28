@@ -68,6 +68,7 @@ def send_main_menu(chat_id: str, text: str = "請選擇功能：") -> None:
             ["📈 選股計劃", "⚡ 快速下單"],
             ["🛡️ 停損設定", "❓ 說明"],
             ["🚨 緊急暫停", "🔄 撤銷所有委託"],
+            ["💥 一鍵全平倉"],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -204,7 +205,8 @@ def handle_help(chat_id: str) -> None:
         "⚡ 快速下單　→ 執行今日計劃\n"
         "🛡️ 停損設定　→ 設定個股停損價\n"
         "🚨 緊急暫停　→ 立即停止系統，今日不再下單\n"
-        "🔄 撤銷委託　→ 取消今日所有未成交委託\n\n"
+        "🔄 撤銷委託　→ 取消今日所有未成交委託\n"
+        "💥 一鍵平倉　→ 市價賣出所有持倉\n\n"
         "排程：\n"
         "  08:30 盤前 AI 分析\n"
         "  09:00 開盤下單\n"
@@ -242,6 +244,19 @@ def handle_cancel_all(chat_id: str) -> None:
         reply_markup={"inline_keyboard": [[
             {"text": "✅ 確認撤銷", "callback_data": "cancel_all_confirm"},
             {"text": "❌ 取消",     "callback_data": "cancel_all_abort"},
+        ]]}
+    )
+
+
+def handle_liquidate_all(chat_id: str) -> None:
+    send_text(chat_id,
+        "💥 <b>一鍵全平倉</b>\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "⚠️ 確定要以市價出清所有庫存嗎？此操作無法復原！\n\n"
+        "請按下方按鈕確認：",
+        reply_markup={"inline_keyboard": [[
+            {"text": "💥 確認市價全平倉", "callback_data": "liquidate_all_confirm"},
+            {"text": "❌ 取消",     "callback_data": "liquidate_all_abort"},
         ]]}
     )
 
@@ -300,6 +315,32 @@ def handle_callback(callback_query: dict) -> None:
         send_text(chat_id, "已取消操作。")
         send_main_menu(chat_id)
 
+    # ── 一鍵全平倉確認 ──
+    elif data == "liquidate_all_confirm":
+        send_text(chat_id, "⏳ 正在執行市價全平倉...")
+        from halt import liquidate_all_positions
+        from monitor_agent import ensure_connected
+        import os
+        api = ensure_connected(
+            os.getenv("SHIOAJI_API_KEY", ""),
+            os.getenv("SHIOAJI_SECRET_KEY", ""),
+            simulation=os.getenv("SHIOAJI_SIMULATION", "true").lower() == "true",
+        )
+        if api:
+            result = liquidate_all_positions(api)
+            n = len(result["liquidated"])
+            f = len(result.get("failed", []))
+            send_text(chat_id,
+                f"💥 <b>全平倉完成</b>\n"
+                f"✅ 成功送出：{n} 檔\n"
+                f"❌ 失敗：{f} 檔"
+            )
+        else:
+            send_text(chat_id, "❌ 無法連線 Shioaji，全平倉失敗。")
+    elif data == "liquidate_all_abort":
+        send_text(chat_id, "已取消操作。")
+        send_main_menu(chat_id)
+
 
 # ── Message router ─────────────────────────────────────────────────────────────
 
@@ -314,6 +355,7 @@ _HANDLER_NAMES: dict[str, str] = {
     "❓ 說明":        "handle_help",
     "🚨 緊急暫停":    "handle_emergency_halt",
     "🔄 撤銷所有委託": "handle_cancel_all",
+    "💥 一鍵全平倉":   "handle_liquidate_all",
 }
 
 
