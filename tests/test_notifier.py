@@ -7,6 +7,12 @@ import pytest
 import notifier
 
 
+@pytest.fixture(autouse=False)
+def verbose(monkeypatch):
+    """Force TELEGRAM_VERBOSE=True for tests that check verbose-only messages."""
+    monkeypatch.setattr(notifier, "_VERBOSE", True)
+
+
 # ── _send ─────────────────────────────────────────────────────────────────────
 
 def test_send_silently_ignores_network_error():
@@ -81,25 +87,25 @@ def _analysis_kwargs(**overrides):
     return base
 
 
-def test_analysis_buy_shows_checkmark():
+def test_analysis_buy_shows_checkmark(verbose):
     with patch("notifier._send") as mock_send:
         notifier.notify_analysis_result(**_analysis_kwargs(signal="buy"))
         assert "✅" in mock_send.call_args[0][0]
 
 
-def test_analysis_sell_shows_cross():
+def test_analysis_sell_shows_cross(verbose):
     with patch("notifier._send") as mock_send:
         notifier.notify_analysis_result(**_analysis_kwargs(signal="sell"))
         assert "❌" in mock_send.call_args[0][0]
 
 
-def test_analysis_hold_shows_pause():
+def test_analysis_hold_shows_pause(verbose):
     with patch("notifier._send") as mock_send:
         notifier.notify_analysis_result(**_analysis_kwargs(signal="hold"))
         assert "⏸️" in mock_send.call_args[0][0]
 
 
-def test_analysis_contains_code_and_name():
+def test_analysis_contains_code_and_name(verbose):
     with patch("notifier._send") as mock_send:
         notifier.notify_analysis_result(**_analysis_kwargs())
         text = mock_send.call_args[0][0]
@@ -107,13 +113,13 @@ def test_analysis_contains_code_and_name():
         assert "台積電" in text
 
 
-def test_analysis_contains_confidence():
+def test_analysis_contains_confidence(verbose):
     with patch("notifier._send") as mock_send:
         notifier.notify_analysis_result(**_analysis_kwargs(confidence=7))
         assert "7/10" in mock_send.call_args[0][0]
 
 
-def test_analysis_shows_target_and_stop_loss():
+def test_analysis_shows_target_and_stop_loss(verbose):
     with patch("notifier._send") as mock_send:
         notifier.notify_analysis_result(**_analysis_kwargs(target_price=1020.0, stop_loss_price=880.0))
         text = mock_send.call_args[0][0]
@@ -121,20 +127,20 @@ def test_analysis_shows_target_and_stop_loss():
         assert "880" in text
 
 
-def test_analysis_no_target_no_crash():
+def test_analysis_no_target_no_crash(verbose):
     with patch("notifier._send"):
         notifier.notify_analysis_result(**_analysis_kwargs(target_price=None, stop_loss_price=None))
 
 
 # ── notify_risk_approved / rejected ──────────────────────────────────────────
 
-def test_risk_approved_contains_code():
+def test_risk_approved_contains_code(verbose):
     with patch("notifier._send") as mock_send:
         notifier.notify_risk_approved("2330", "台積電", 5000.0)
         assert "2330" in mock_send.call_args[0][0]
 
 
-def test_risk_rejected_translates_reason():
+def test_risk_rejected_translates_reason(verbose):
     with patch("notifier._send") as mock_send:
         notifier.notify_risk_rejected("2330", "台積電", "ex_dividend")
         assert "除息" in mock_send.call_args[0][0]

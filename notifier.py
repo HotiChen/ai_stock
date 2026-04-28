@@ -19,6 +19,7 @@ load_dotenv(override=True)
 _TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 _API     = f"https://api.telegram.org/bot{_TOKEN}"
+_VERBOSE = os.getenv("TELEGRAM_VERBOSE", "false").lower() == "true"
 
 
 def _send(text: str, chat_id: str = "") -> None:
@@ -70,7 +71,7 @@ def notify_premarket_start(candidate_count: int) -> None:
     )
 
 
-def notify_analysis_result(
+def notify_analysis_result(  # verbose only
     code: str,
     name: str,
     signal: str,
@@ -110,12 +111,15 @@ def notify_analysis_result(
         if stop_loss_price:
             lines.append(f"🛡️ 停損價：{stop_loss_price}")
 
-    _send("\n".join(lines))
+    if _VERBOSE:
+        _send("\n".join(lines))
 
 
 # ── 風控 ──────────────────────────────────────────────────────────────────────
 
 def notify_risk_approved(code: str, name: str, budget: float, reason: str = "") -> None:
+    if not _VERBOSE:
+        return
     note = f"\n📝 {reason}" if reason else ""
     _send(
         f"✅ <b>風控通過：{code} {name}</b>\n"
@@ -124,6 +128,8 @@ def notify_risk_approved(code: str, name: str, budget: float, reason: str = "") 
 
 
 def notify_risk_rejected(code: str, name: str, reason: str) -> None:
+    if not _VERBOSE:
+        return
     reason_zh = {
         "blacklisted":  "列入黑名單",
         "ex_dividend":  "今日除息",
@@ -230,6 +236,8 @@ def notify_price_alert(
 
 
 def notify_snapshot(code: str, name: str, price: float, change_price: float) -> None:
+    if not _VERBOSE:
+        return
     arrow = "▲" if change_price >= 0 else "▼"
     _send(
         f"📡 {code} {name}　"
