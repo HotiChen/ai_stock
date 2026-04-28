@@ -62,6 +62,7 @@ def send_main_menu(chat_id: str, text: str = "請選擇功能：") -> None:
             ["📊 今日狀態", "💼 持倉"],
             ["📈 選股計劃", "⚡ 快速下單"],
             ["🛡️ 停損設定", "❓ 說明"],
+            ["🚨 緊急暫停", "🔄 撤銷所有委託"],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -169,11 +170,47 @@ def handle_help(chat_id: str) -> None:
         "💼 持倉　　　→ 今日持倉明細\n"
         "📈 選股計劃　→ AI 今日選股清單\n"
         "⚡ 快速下單　→ 執行今日計劃\n"
-        "🛡️ 停損設定　→ 設定個股停損價\n\n"
+        "🛡️ 停損設定　→ 設定個股停損價\n"
+        "🚨 緊急暫停　→ 立即停止系統，今日不再下單\n"
+        "🔄 撤銷委託　→ 取消今日所有未成交委託\n\n"
         "排程：\n"
         "  08:30 盤前 AI 分析\n"
         "  09:00 開盤下單\n"
         "  13:35 收盤總結"
+    )
+
+
+def handle_emergency_halt(chat_id: str) -> None:
+    from halt import halt, is_halted
+    if is_halted():
+        send_text(chat_id,
+            "⚠️ 系統已經是暫停狀態。\n\n"
+            "傳 <code>恢復系統</code> 可重新啟用。"
+        )
+        return
+
+    halt(reason="telegram_manual")
+    from notifier import _send
+    _send("🚨 <b>緊急暫停！</b>\n系統已停止，今日不再執行任何下單。")
+    send_text(chat_id,
+        "🚨 <b>緊急暫停已啟動</b>\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "✅ HALT flag 已寫入\n"
+        "✅ 今日不再下單\n\n"
+        "傳 <code>恢復系統</code> 可重新啟用。"
+    )
+
+
+def handle_cancel_all(chat_id: str) -> None:
+    send_text(chat_id,
+        "🔄 <b>撤銷所有委託</b>\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "⚠️ 確定要撤銷今日所有未成交委託嗎？\n\n"
+        "請按下方按鈕確認：",
+        reply_markup={"inline_keyboard": [[
+            {"text": "✅ 確認撤銷", "callback_data": "cancel_all_confirm"},
+            {"text": "❌ 取消",     "callback_data": "cancel_all_abort"},
+        ]]}
     )
 
 
@@ -203,18 +240,46 @@ def handle_callback(callback_query: dict) -> None:
         send_text(chat_id, "❌ 已取消。")
         send_main_menu(chat_id)
 
+    # ── 撤銷所有委託確認 ──
+    elif data == "cancel_all_confirm":
+        send_text(chat_id, "⏳ 正在撤銷所有委託...")
+        from halt import cancel_all_orders
+        from monitor_agent import ensure_connected
+        import os
+        api = ensure_connected(
+            os.getenv("SHIOAJI_API_KEY", ""),
+            os.getenv("SHIOAJI_SECRET_KEY", ""),
+            simulation=os.getenv("SIMULATION", "true").lower() == "true",
+        )
+        if api:
+            result = cancel_all_orders(api)
+            n = len(result["cancelled"])
+            f = len(result.get("failed", []))
+            send_text(chat_id,
+                f"🔄 <b>撤銷完成</b>\n"
+                f"✅ 成功撤銷：{n} 筆\n"
+                f"❌ 失敗：{f} 筆"
+            )
+        else:
+            send_text(chat_id, "❌ 無法連線 Shioaji，撤銷失敗。")
+    elif data == "cancel_all_abort":
+        send_text(chat_id, "已取消操作。")
+        send_main_menu(chat_id)
+
 
 # ── Message router ─────────────────────────────────────────────────────────────
 
 # Map button text → handler function name (string).
 # Using names instead of direct references so unittest.mock.patch works correctly.
 _HANDLER_NAMES: dict[str, str] = {
-    "📊 今日狀態":  "handle_status",
-    "💼 持倉":      "handle_holdings",
-    "📈 選股計劃":  "handle_plan",
-    "⚡ 快速下單":  "handle_quick_order",
-    "🛡️ 停損設定": "handle_stop_loss",
-    "❓ 說明":      "handle_help",
+    "📊 今日狀態":    "handle_status",
+    "💼 持倉":        "handle_holdings",
+    "📈 選股計劃":    "handle_plan",
+    "⚡ 快速下單":    "handle_quick_order",
+    "🛡️ 停損設定":   "handle_stop_loss",
+    "❓ 說明":        "handle_help",
+    "🚨 緊急暫停":    "handle_emergency_halt",
+    "🔄 撤銷所有委託": "handle_cancel_all",
 }
 
 
@@ -238,6 +303,15 @@ def process_update(update: dict) -> None:
 
     if text in ("/start", "/menu"):
         send_main_menu(chat_id, "📱 AI Stock 已啟動，請選擇功能：")
+        return
+
+    if text == "恢復系統":
+        from halt import resume, is_halted
+        if is_halted():
+            resume()
+            send_text(chat_id, "✅ 系統已恢復，排程重新生效。")
+        else:
+            send_text(chat_id, "ℹ️ 系統目前正常運作中，無需恢復。")
         return
 
     import telegram_bot as _self

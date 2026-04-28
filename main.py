@@ -278,6 +278,11 @@ def main() -> None:
 
         t = now.time()
 
+        from halt import is_halted
+        if is_halted():
+            time.sleep(30)
+            continue
+
         # 08:30 pre-market
         if t.hour == 8 and t.minute == 30:
             job = PremarketJob(
