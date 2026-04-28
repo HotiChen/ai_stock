@@ -1,40 +1,54 @@
 from __future__ import annotations
 
+import logging
 import os
-from dotenv import load_dotenv
+
 import anthropic
+from dotenv import load_dotenv
 
 load_dotenv(override=True)  # override=True: .env wins even if shell set the var empty
+
+log = logging.getLogger(__name__)
 
 _HAIKU_MODEL  = "claude-haiku-4-5-20251001"
 _SONNET_MODEL = "claude-sonnet-4-6"
 
-anthropic_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+_client: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    """Lazy singleton — reads key at first call so .env is always loaded first."""
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    return _client
 
 
 def call_haiku(prompt: str) -> str:
     """輕量分析：候選股初篩、盤中訊號確認。失敗回傳空字串。"""
     try:
-        resp = anthropic_client.messages.create(
+        resp = _get_client().messages.create(
             model=_HAIKU_MODEL,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
         return resp.content[0].text
-    except Exception:
+    except Exception as e:
+        log.error("call_haiku failed: %s", e)
         return ""
 
 
-def call_sonnet(prompt: str) -> str:
+def call_sonnet(prompt: str, max_tokens: int = 8192) -> str:
     """深度推理：三套策略生成。失敗回傳空字串。"""
     try:
-        resp = anthropic_client.messages.create(
+        resp = _get_client().messages.create(
             model=_SONNET_MODEL,
-            max_tokens=4096,
+            max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
         return resp.content[0].text
-    except Exception:
+    except Exception as e:
+        log.error("call_sonnet failed: %s", e)
         return ""
 
 

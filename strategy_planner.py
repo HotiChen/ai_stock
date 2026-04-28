@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -8,6 +9,8 @@ from typing import Optional
 
 import config
 from ai_client import call_haiku, call_sonnet
+
+log = logging.getLogger(__name__)
 from strategy_tracker import StrategyGoal
 
 
@@ -585,11 +588,16 @@ def generate_strategy_plans(
         all_with_lots.append({**c, "max_lots": max_lots})
     prompt = build_planner_prompt(goal, current_value, all_with_lots)
     try:
-        raw      = call_sonnet(prompt)
+        raw = call_sonnet(prompt)
+        if not raw:
+            log.error("generate_strategy_plans: call_sonnet returned empty — check ANTHROPIC_API_KEY")
+            return None
         plan_set = parse_plan_response(raw)
         if plan_set is None:
+            log.error("generate_strategy_plans: parse_plan_response failed, raw[:200]=%s", raw[:200])
             return None
         # 最後再 clamp 一次，防止 AI 忽視上限
         return _clamp_quantities(plan_set, affordable, current_value)
-    except Exception:
+    except Exception as e:
+        log.error("generate_strategy_plans exception: %s", e)
         return None

@@ -1104,7 +1104,11 @@ def _render_strategy_tracker():
         with st.spinner("AI 分析中，約需 30–60 秒..."):
             plan_set = generate_strategy_plans(goal, current_value, deduped)
         if plan_set is None:
-            st.error("生成失敗，請確認 ANTHROPIC_API_KEY 已設定")
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                st.error("生成失敗，請確認 ANTHROPIC_API_KEY 已設定")
+            else:
+                st.error(f"生成失敗（API Key 已設定，但 AI 回應解析失敗）。請查看終端機 log 取得詳細錯誤。")
         else:
             st.session_state["_plan_set"] = plan_set
             st.rerun()

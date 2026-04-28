@@ -10,46 +10,46 @@ from ai_client import call_haiku, call_sonnet, build_safe_prompt
 # ── call_haiku ────────────────────────────────────────────────────────────────
 
 class TestCallHaiku:
-    @patch("ai_client.anthropic_client")
-    def test_returns_string(self, mock_client):
-        mock_client.messages.create.return_value = MagicMock(
+    @patch("ai_client._get_client")
+    def test_returns_string(self, mock_get):
+        mock_get.return_value.messages.create.return_value = MagicMock(
             content=[MagicMock(text="分析結果")]
         )
         result = call_haiku("測試 prompt")
         assert isinstance(result, str)
 
-    @patch("ai_client.anthropic_client")
-    def test_uses_haiku_model(self, mock_client):
-        mock_client.messages.create.return_value = MagicMock(
+    @patch("ai_client._get_client")
+    def test_uses_haiku_model(self, mock_get):
+        mock_get.return_value.messages.create.return_value = MagicMock(
             content=[MagicMock(text="ok")]
         )
         call_haiku("prompt")
-        call_args = mock_client.messages.create.call_args
+        call_args = mock_get.return_value.messages.create.call_args
         assert "haiku" in call_args.kwargs["model"]
 
-    @patch("ai_client.anthropic_client")
-    def test_max_tokens_300(self, mock_client):
-        mock_client.messages.create.return_value = MagicMock(
+    @patch("ai_client._get_client")
+    def test_max_tokens_300(self, mock_get):
+        mock_get.return_value.messages.create.return_value = MagicMock(
             content=[MagicMock(text="ok")]
         )
         call_haiku("prompt")
-        call_args = mock_client.messages.create.call_args
+        call_args = mock_get.return_value.messages.create.call_args
         assert call_args.kwargs["max_tokens"] <= 1024
 
-    @patch("ai_client.anthropic_client")
-    def test_prompt_passed_as_user_message(self, mock_client):
-        mock_client.messages.create.return_value = MagicMock(
+    @patch("ai_client._get_client")
+    def test_prompt_passed_as_user_message(self, mock_get):
+        mock_get.return_value.messages.create.return_value = MagicMock(
             content=[MagicMock(text="ok")]
         )
         call_haiku("my prompt")
-        call_args = mock_client.messages.create.call_args
+        call_args = mock_get.return_value.messages.create.call_args
         messages = call_args.kwargs["messages"]
         assert messages[0]["role"] == "user"
         assert "my prompt" in messages[0]["content"]
 
-    @patch("ai_client.anthropic_client")
-    def test_api_error_returns_empty_string(self, mock_client):
-        mock_client.messages.create.side_effect = Exception("API error")
+    @patch("ai_client._get_client")
+    def test_api_error_returns_empty_string(self, mock_get):
+        mock_get.return_value.messages.create.side_effect = Exception("API error")
         result = call_haiku("prompt")
         assert result == ""
 
@@ -57,42 +57,42 @@ class TestCallHaiku:
 # ── call_sonnet ───────────────────────────────────────────────────────────────
 
 class TestCallSonnet:
-    @patch("ai_client.anthropic_client")
-    def test_returns_string(self, mock_client):
-        mock_client.messages.create.return_value = MagicMock(
+    @patch("ai_client._get_client")
+    def test_returns_string(self, mock_get):
+        mock_get.return_value.messages.create.return_value = MagicMock(
             content=[MagicMock(text="策略計劃")]
         )
         result = call_sonnet("測試 prompt")
         assert isinstance(result, str)
 
-    @patch("ai_client.anthropic_client")
-    def test_uses_sonnet_model(self, mock_client):
-        mock_client.messages.create.return_value = MagicMock(
+    @patch("ai_client._get_client")
+    def test_uses_sonnet_model(self, mock_get):
+        mock_get.return_value.messages.create.return_value = MagicMock(
             content=[MagicMock(text="ok")]
         )
         call_sonnet("prompt")
-        call_args = mock_client.messages.create.call_args
+        call_args = mock_get.return_value.messages.create.call_args
         assert "sonnet" in call_args.kwargs["model"]
 
-    @patch("ai_client.anthropic_client")
-    def test_max_tokens_higher_than_haiku(self, mock_client):
-        mock_client.messages.create.return_value = MagicMock(
+    @patch("ai_client._get_client")
+    def test_max_tokens_higher_than_haiku(self, mock_get):
+        mock_get.return_value.messages.create.return_value = MagicMock(
             content=[MagicMock(text="ok")]
         )
         call_haiku("prompt")
-        haiku_tokens = mock_client.messages.create.call_args.kwargs["max_tokens"]
+        haiku_tokens = mock_get.return_value.messages.create.call_args.kwargs["max_tokens"]
 
-        mock_client.messages.create.return_value = MagicMock(
+        mock_get.return_value.messages.create.return_value = MagicMock(
             content=[MagicMock(text="ok")]
         )
         call_sonnet("prompt")
-        sonnet_tokens = mock_client.messages.create.call_args.kwargs["max_tokens"]
+        sonnet_tokens = mock_get.return_value.messages.create.call_args.kwargs["max_tokens"]
 
         assert sonnet_tokens > haiku_tokens
 
-    @patch("ai_client.anthropic_client")
-    def test_api_error_returns_empty_string(self, mock_client):
-        mock_client.messages.create.side_effect = Exception("timeout")
+    @patch("ai_client._get_client")
+    def test_api_error_returns_empty_string(self, mock_get):
+        mock_get.return_value.messages.create.side_effect = Exception("timeout")
         result = call_sonnet("prompt")
         assert result == ""
 
