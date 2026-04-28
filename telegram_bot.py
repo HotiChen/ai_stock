@@ -26,7 +26,10 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from logger import get_logger
-from research_db import init_db, load_daily_plan, load_daily_trades
+from research_db import (
+    init_db, load_daily_plan, load_daily_trades,
+    reject_pick_from_plan, reject_all_picks_from_plan,
+)
 
 log = get_logger(__name__)
 
@@ -254,13 +257,15 @@ def handle_callback(callback_query: dict) -> None:
     if data == "approve_all":
         send_text(chat_id, "✅ 全部批准，09:00 開盤將執行今日計劃。")
     elif data == "reject_all":
-        send_text(chat_id, "❌ 全部拒絕，今日不執行任何下單。")
+        reject_all_picks_from_plan(date.today(), DB_PATH)
+        send_text(chat_id, "❌ 全部拒絕，今日計劃已清除，不執行任何下單。")
     elif data.startswith("approve:"):
         code = data.split(":", 1)[1]
         send_text(chat_id, f"✅ {code} 已批准，開盤時將執行此筆委託。")
     elif data.startswith("reject:"):
         code = data.split(":", 1)[1]
-        send_text(chat_id, f"❌ {code} 已拒絕，跳過此筆。")
+        reject_pick_from_plan(date.today(), code, DB_PATH)
+        send_text(chat_id, f"❌ {code} 已從今日計劃中移除。")
 
     # ── 快速下單確認（⚡ 快速下單 按鈕送出的）──
     elif data == "order_confirm":

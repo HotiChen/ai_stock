@@ -20,12 +20,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from deep_analyzer import run_deep_analysis
-from executor import place_stock_order, ExecutionResult
+from executor import place_stock_order, ExecutionResult, force_stop_loss
 from logger import get_logger
+from market_scan import batch_fetch_snapshots
+from market_scanner import ScanCriteria, get_all_stock_codes, screen_candidates
 from monitor_agent import MonitorAgent, ensure_connected
 from research_db import (
-    init_db, save_daily_plan, save_daily_trade,
-    save_daily_summary, DailySummaryRow,
+    init_db, save_daily_plan, load_daily_plan, save_daily_trade,
+    save_daily_summary, DailySummaryRow, load_daily_trades,
 )
 from risk_guard import validate_plan
 from user_confirm import send_confirmation
@@ -58,6 +60,63 @@ def _confidence_budget(
     return capital * pct
 
 
+def scan_candidates(
+    api,
+    criteria: Optional[ScanCriteria] = None,
+    name_map: Optional[dict[str, str]] = None,
+) -> list[dict]:
+    """Screen all listed stocks and return top candidates for deep analysis.
+    Returns [] when api is None or on any error."""
+    if api is None:
+        return []
+    try:
+        codes = get_all_stock_codes(api)
+        snapshots = batch_fetch_snapshots(api, codes)
+        if name_map:
+            for code, snap in snapshots.items():
+                snap["name"] = name_map.get(code, code)
+        rows = screen_candidates(snapshots, criteria or ScanCriteria())
+        for row in rows:
+            if "name" not in row and name_map:
+                row["name"] = name_map.get(row["code"], row["code"])
+        return rows
+    except Exception as e:
+        log.warning("scan_candidates failed: %s", e)
+        return []
+
+
+def load_prior_orders(api) -> list[dict]:
+    """Return today's already-placed orders from Shioaji as plain dicts.
+    Used to prevent duplicate orders at 09:00."""
+    if api is None:
+        return []
+    try:
+        trades = api.list_trades()
+        return [
+            {
+                "code":     t.contract.code,
+                "action":   str(t.order.action),
+                "quantity": t.order.quantity,
+                "price":    float(t.order.price),
+            }
+            for t in (trades or [])
+        ]
+    except Exception as e:
+        log.warning("load_prior_orders failed: %s", e)
+        return []
+
+
+def load_current_positions(trade_date: date, db_path: str) -> list[dict]:
+    """Return today's executed buy trades from DB as position dicts.
+    Used by PremarketJob to pass current exposure to risk_guard."""
+    try:
+        trades = load_daily_trades(trade_date, db_path)
+        return [t for t in trades if t.get("action") == "buy"]
+    except Exception as e:
+        log.warning("load_current_positions failed: %s", e)
+        return []
+
+
 # ── PremarketJob ──────────────────────────────────────────────────────────────
 
 class PremarketJob:
@@ -73,22 +132,29 @@ class PremarketJob:
 
     def __init__(
         self,
-        candidates: list[dict],
+        candidates: Optional[list[dict]],
         capital: float,
         db_path: str,
         telegram_chat_id: Optional[str],
-        current_positions: list[dict],
+        current_positions: Optional[list[dict]] = None,
+        api=None,
     ) -> None:
         self._candidates       = candidates
         self._capital          = capital
         self._db_path          = db_path
         self._telegram_chat_id = telegram_chat_id
         self._current_positions = current_positions
+        self._api              = api
 
     def run(self, market_summary: str = "", theme_info: str = "") -> list[dict]:
+        candidates = (
+            self._candidates
+            if self._candidates is not None
+            else scan_candidates(self._api)
+        )
         buy_picks: list[dict] = []
 
-        for cand in self._candidates:
+        for cand in candidates:
             code = cand["code"]
             name = cand.get("name", code)
             try:
@@ -112,7 +178,12 @@ class PremarketJob:
             except Exception as e:
                 log.warning("PremarketJob analysis failed for %s: %s", code, e)
 
-        result = validate_plan(buy_picks, self._capital, self._current_positions)
+        positions = (
+            self._current_positions
+            if self._current_positions is not None
+            else load_current_positions(date.today(), self._db_path)
+        )
+        result = validate_plan(buy_picks, self._capital, positions)
         approved: list[dict] = result["approved"]
         rejected: list[dict] = result["rejected"]
 
@@ -143,7 +214,7 @@ class MarketOpenJob:
         db_path: str,
         telegram_chat_id: Optional[str],
         hard_limit: float,
-        prior_orders: list[dict],
+        prior_orders: Optional[list[dict]] = None,
     ) -> None:
         self._api             = api
         self._picks           = approved_picks
@@ -154,9 +225,21 @@ class MarketOpenJob:
         init_db(db_path)
 
     def run(self) -> MonitorAgent:
+        # Always read from DB — user may have rejected picks via Telegram between
+        # 08:30 (premarket) and 09:00 (open), so in-memory list may be stale.
+        try:
+            picks_to_execute = load_daily_plan(date.today(), self._db_path) or self._picks
+        except Exception:
+            picks_to_execute = self._picks
+
+        prior_orders = (
+            self._prior_orders
+            if self._prior_orders is not None
+            else load_prior_orders(self._api)
+        )
         executed_picks: list[dict] = []
 
-        for pick in self._picks:
+        for pick in picks_to_execute:
             code  = pick["code"]
             name  = pick.get("name", code)
             price = self._get_price(code)
@@ -169,7 +252,7 @@ class MarketOpenJob:
                 budget=pick.get("budget", 0),
                 price=price,
                 hard_limit=self._hard_limit,
-                prior_orders=self._prior_orders,
+                prior_orders=prior_orders,
             )
 
             if result.success:
@@ -250,6 +333,39 @@ class PostMarketJob:
         log.info("PostMarket: pnl=%+.0f saved", total_pnl)
 
 
+# ── ForceCloseJob ─────────────────────────────────────────────────────────────
+
+class ForceCloseJob:
+    """
+    13:25 job (10 min before market close):
+      Sell all open buy positions at market price to avoid overnight exposure.
+    """
+
+    def __init__(self, api, db_path: str) -> None:
+        self._api     = api
+        self._db_path = db_path
+
+    def run(self) -> list[dict]:
+        positions = load_current_positions(date.today(), self._db_path)
+        results = []
+        for pos in positions:
+            code     = pos["code"]
+            name     = pos.get("name", code)
+            quantity = pos.get("quantity", 0)
+            success  = force_stop_loss(
+                api=self._api,
+                code=code,
+                name=name,
+                quantity=quantity,
+            )
+            results.append({"code": code, "success": success})
+            if success:
+                log.info("ForceClose: sold %s qty=%d", code, quantity)
+            else:
+                log.error("ForceClose: failed to sell %s", code)
+        return results
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 _RUNNING = True
@@ -299,11 +415,12 @@ def main() -> None:
         # 08:30 pre-market
         if t.hour == 8 and t.minute == 30:
             job = PremarketJob(
-                candidates=[],
+                candidates=None,
                 capital=CAPITAL,
                 db_path=DB_PATH,
                 telegram_chat_id=TELEGRAM_CHAT_ID or None,
-                current_positions=[],
+                current_positions=None,
+                api=api,
             )
             approved_picks = job.run()
             time.sleep(60)
@@ -318,9 +435,15 @@ def main() -> None:
                     db_path=DB_PATH,
                     telegram_chat_id=TELEGRAM_CHAT_ID or None,
                     hard_limit=HARD_LIMIT,
-                    prior_orders=[],
+                    prior_orders=None,
                 )
                 monitor = job.run()
+            time.sleep(60)
+
+        # 13:25 force-close all positions before market close
+        elif t.hour == 13 and t.minute == 25:
+            if api:
+                ForceCloseJob(api=api, db_path=DB_PATH).run()
             time.sleep(60)
 
         # 13:35 post-market

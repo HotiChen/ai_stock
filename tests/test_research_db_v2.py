@@ -89,6 +89,37 @@ class TestDailyPlans:
         result = load_daily_plan(date(2026, 4, 28), db)
         assert result == []
 
+    def test_reject_pick_removes_code(self, db):
+        from research_db import save_daily_plan, load_daily_plan, reject_pick_from_plan
+        save_daily_plan(date(2026, 4, 28), self._make_picks(), db)
+        reject_pick_from_plan(date(2026, 4, 28), "2330", db)
+        result = load_daily_plan(date(2026, 4, 28), db)
+        codes = [p["code"] for p in result]
+        assert "2330" not in codes
+        assert "2454" in codes
+
+    def test_reject_pick_is_idempotent_on_missing_code(self, db):
+        from research_db import save_daily_plan, load_daily_plan, reject_pick_from_plan
+        save_daily_plan(date(2026, 4, 28), self._make_picks(), db)
+        reject_pick_from_plan(date(2026, 4, 28), "9999", db)
+        result = load_daily_plan(date(2026, 4, 28), db)
+        assert len(result) == 2
+
+    def test_reject_pick_on_nonexistent_date_does_not_raise(self, db):
+        from research_db import reject_pick_from_plan
+        reject_pick_from_plan(date(2000, 1, 1), "2330", db)
+
+    def test_reject_all_picks_clears_plan(self, db):
+        from research_db import save_daily_plan, load_daily_plan, reject_all_picks_from_plan
+        save_daily_plan(date(2026, 4, 28), self._make_picks(), db)
+        reject_all_picks_from_plan(date(2026, 4, 28), db)
+        result = load_daily_plan(date(2026, 4, 28), db)
+        assert result == []
+
+    def test_reject_all_on_nonexistent_date_does_not_raise(self, db):
+        from research_db import reject_all_picks_from_plan
+        reject_all_picks_from_plan(date(2000, 1, 1), db)
+
 
 # ── daily_trades ──────────────────────────────────────────────────────────────
 
@@ -244,3 +275,20 @@ class TestAlerts:
         save_alert(self._make_alert(created_at=dt), db)
         result = load_pending_alerts(db)
         assert result[0]["created_at"] == dt.isoformat()
+
+    def test_save_alert_returns_integer_id(self, db):
+        from research_db import save_alert
+        alert_id = save_alert(self._make_alert(), db)
+        assert isinstance(alert_id, int) and alert_id > 0
+
+    def test_save_alert_ids_are_sequential(self, db):
+        from research_db import save_alert
+        id1 = save_alert(self._make_alert(code="2330"), db)
+        id2 = save_alert(self._make_alert(code="2454", name="聯發科"), db)
+        assert id2 > id1
+
+    def test_save_alert_id_matches_loaded_id(self, db):
+        from research_db import save_alert, load_pending_alerts
+        returned_id = save_alert(self._make_alert(), db)
+        loaded = load_pending_alerts(db)
+        assert loaded[0]["id"] == returned_id

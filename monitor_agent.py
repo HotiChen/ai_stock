@@ -21,7 +21,7 @@ from typing import Optional
 import shioaji as sj
 
 from logger import get_logger
-from research_db import init_db, save_alert
+from research_db import init_db, save_alert, mark_alert_sent
 
 log = get_logger(__name__)
 
@@ -130,7 +130,7 @@ class AlertWorker:
             if alert is None:
                 break
             try:
-                save_alert(alert, self._db_path)
+                alert_id = save_alert(alert, self._db_path)
                 from notifier import notify_price_alert
                 notify_price_alert(
                     code=alert.get("code", ""),
@@ -140,6 +140,7 @@ class AlertWorker:
                     target_price=alert.get("target_price"),
                     stop_loss_price=alert.get("stop_loss_price"),
                 )
+                mark_alert_sent(alert_id, self._db_path)
             except Exception as e:
                 log.error("AlertWorker error: %s", e)
 

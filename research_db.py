@@ -360,6 +360,24 @@ def load_daily_plan(plan_date: date, path: str) -> list[dict]:
 
 # ── DailyTrade ────────────────────────────────────────────────────────────────
 
+def reject_pick_from_plan(plan_date: date, code: str, path: str) -> None:
+    """Remove a single stock code from today's daily plan (user rejected it)."""
+    picks = load_daily_plan(plan_date, path)
+    updated = [p for p in picks if p.get("code") != code]
+    if updated != picks:  # something changed — write back
+        save_daily_plan(plan_date, updated, path)
+
+
+def reject_all_picks_from_plan(plan_date: date, path: str) -> None:
+    """Clear all picks for the given date (user rejected all).
+    No-op if no plan exists for that date."""
+    with _conn(path) as con:
+        con.execute(
+            "UPDATE daily_plans SET picks_json=? WHERE plan_date=?",
+            ("[]", plan_date.isoformat()),
+        )
+
+
 def save_daily_trade(trade: dict, path: str) -> None:
     """Append a trade record. trade dict keys: trade_date, code, name, action,
     quantity, price, amount, pnl (nullable), note."""
@@ -404,13 +422,13 @@ def load_daily_trades(trade_date: date, path: str) -> list[dict]:
 
 # ── Alert ─────────────────────────────────────────────────────────────────────
 
-def save_alert(alert: dict, path: str) -> None:
-    """Insert a new alert. alert dict keys: code, name, alert_type, message,
-    severity, created_at (datetime or str)."""
+def save_alert(alert: dict, path: str) -> int:
+    """Insert a new alert. Returns the new row id.
+    alert dict keys: code, name, alert_type, message, severity, created_at (datetime or str)."""
     ca = alert.get("created_at", datetime.now())
     ca_str = ca.isoformat() if isinstance(ca, datetime) else str(ca)
     with _conn(path) as con:
-        con.execute(
+        cur = con.execute(
             "INSERT INTO alerts (code, name, alert_type, message, severity, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
@@ -422,6 +440,7 @@ def save_alert(alert: dict, path: str) -> None:
                 ca_str,
             ),
         )
+        return cur.lastrowid
 
 
 def load_pending_alerts(path: str) -> list[dict]:

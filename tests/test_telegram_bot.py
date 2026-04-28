@@ -122,11 +122,12 @@ def test_approve_any_stock_replies_with_code(code, monkeypatch):
 def test_reject_any_stock_replies_with_code(code, monkeypatch):
     monkeypatch.setattr(bot, "CHAT_ID", "123")
     with patch("telegram_bot._post"), \
+         patch("telegram_bot.reject_pick_from_plan"), \
          patch("telegram_bot.send_text") as mock_send:
         bot.process_update(_make_callback("123", f"reject:{code}"))
         text = mock_send.call_args[0][1]
         assert code in text
-        assert "拒絕" in text
+        assert "移除" in text or "拒絕" in text
 
 
 def test_approve_all_callback(monkeypatch):
@@ -145,6 +146,56 @@ def test_reject_all_callback(monkeypatch):
         bot.process_update(_make_callback("123", "reject_all"))
         text = mock_send.call_args[0][1]
         assert "拒絕" in text
+
+
+# ── approve/reject persistence (#fix2) ───────────────────────────────────────
+
+def test_reject_code_callback_updates_db(monkeypatch, tmp_path):
+    from research_db import init_db, save_daily_plan, load_daily_plan
+    from datetime import date
+    db_path = str(tmp_path / "t.db")
+    init_db(db_path)
+    save_daily_plan(date.today(), [
+        {"code": "2330", "name": "台積電"}, {"code": "2454", "name": "聯發科"}
+    ], db_path)
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    monkeypatch.setattr(bot, "DB_PATH", db_path)
+    with patch("telegram_bot._post"), patch("telegram_bot.send_text"):
+        bot.process_update(_make_callback("123", "reject:2330"))
+    remaining = load_daily_plan(date.today(), db_path)
+    codes = [p["code"] for p in remaining]
+    assert "2330" not in codes
+    assert "2454" in codes
+
+
+def test_reject_all_callback_clears_db(monkeypatch, tmp_path):
+    from research_db import init_db, save_daily_plan, load_daily_plan
+    from datetime import date
+    db_path = str(tmp_path / "t.db")
+    init_db(db_path)
+    save_daily_plan(date.today(), [
+        {"code": "2330", "name": "台積電"}, {"code": "2454", "name": "聯發科"}
+    ], db_path)
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    monkeypatch.setattr(bot, "DB_PATH", db_path)
+    with patch("telegram_bot._post"), patch("telegram_bot.send_text"):
+        bot.process_update(_make_callback("123", "reject_all"))
+    remaining = load_daily_plan(date.today(), db_path)
+    assert remaining == []
+
+
+def test_approve_code_callback_does_not_modify_db(monkeypatch, tmp_path):
+    from research_db import init_db, save_daily_plan, load_daily_plan
+    from datetime import date
+    db_path = str(tmp_path / "t.db")
+    init_db(db_path)
+    save_daily_plan(date.today(), [{"code": "2330", "name": "台積電"}], db_path)
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    monkeypatch.setattr(bot, "DB_PATH", db_path)
+    with patch("telegram_bot._post"), patch("telegram_bot.send_text"):
+        bot.process_update(_make_callback("123", "approve:2330"))
+    remaining = load_daily_plan(date.today(), db_path)
+    assert len(remaining) == 1
 
 
 def test_approve_reject_unauthorized_blocked(monkeypatch):

@@ -245,9 +245,11 @@ class TestAlertWorker:
         q.put(None)  # poison pill
         worker.run()
 
-        alerts = load_pending_alerts(db_path)
-        assert len(alerts) == 1
-        assert alerts[0]["code"] == "2330"
+        # After processing, alert is marked sent — verify via direct DB count
+        import sqlite3
+        with sqlite3.connect(db_path) as con:
+            count = con.execute("SELECT COUNT(*) FROM alerts WHERE code='2330'").fetchone()[0]
+        assert count == 1
 
     def test_worker_sends_telegram_when_chat_id_set(self, tmp_path):
         from monitor_agent import AlertWorker
@@ -292,8 +294,27 @@ class TestAlertWorker:
         q.put(None)
         worker.run()
 
-        alerts = load_pending_alerts(db_path)
-        assert len(alerts) == 2
+        import sqlite3
+        with sqlite3.connect(db_path) as con:
+            count = con.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+        assert count == 2
+
+    def test_worker_marks_alert_sent_after_notify(self, tmp_path):
+        from monitor_agent import AlertWorker
+        from research_db import init_db, load_pending_alerts
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+
+        with patch("notifier.notify_price_alert"):
+            q = queue.Queue()
+            worker = AlertWorker(q, db_path=db_path, telegram_chat_id=None)
+            q.put(self._make_alert())
+            q.put(None)
+            worker.run()
+
+        # After processing, the alert should be marked as sent (not pending)
+        pending = load_pending_alerts(db_path)
+        assert len(pending) == 0
 
     def test_worker_stops_on_poison_pill(self, tmp_path):
         from monitor_agent import AlertWorker
