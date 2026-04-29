@@ -30,11 +30,11 @@ def make_goal(**kw) -> StrategyGoal:
     return StrategyGoal(**defaults)
 
 SAMPLE_CANDIDATES = [
-    {"code": "2330", "name": "台積電", "close": 850.0, "change_rate": 2.1,
+    {"code": "2330", "name": "台積電", "close": 25.0, "change_rate": 2.1,
      "analysis": "RSI 低檔反彈，法人買超，短線偏多"},
-    {"code": "2454", "name": "聯發科", "close": 1100.0, "change_rate": -0.5,
+    {"code": "2454", "name": "聯發科", "close": 28.0, "change_rate": -0.5,
      "analysis": "均線糾結，等待突破"},
-    {"code": "2881", "name": "富邦金", "close": 85.0, "change_rate": 1.2,
+    {"code": "2881", "name": "富邦金", "close": 20.0, "change_rate": 1.2,
      "analysis": "殖利率高，防禦型配置"},
 ]
 

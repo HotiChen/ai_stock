@@ -110,24 +110,26 @@ def build_planner_prompt(
     days_left = (goal.end_date - date.today()).days
     target_pnl = goal.target_value - current_value
 
+    # 只列出有真實報價且本金買得起的股票
+    affordable_candidates = [
+        c for c in candidates
+        if float(c.get("close", 0) or 0) > 0
+        and (c.get("max_lots") or calc_max_lots(float(c.get("close", 0)), current_value)) > 0
+    ]
     stocks_text = ""
-    for c in candidates:
+    for c in affordable_candidates:
         analysis  = c.get("analysis") or "無分析"
         price     = float(c.get("close", 0) or 0)
         max_lots  = c.get("max_lots") if "max_lots" in c else calc_max_lots(price, current_value)
         lot_cost  = price * 1000
-        affordable_tag = f"最多可買 {max_lots} 張" if max_lots > 0 else "【買不起，跳過】"
         stocks_text += (
             f"- {c['code']} {c.get('name', '')}　"
-            f"現價 {price:,.1f}　一張需 {lot_cost:,.0f} 元　{affordable_tag}　"
+            f"現價 {price:,.1f}　一張需 {lot_cost:,.0f} 元　最多可買 {max_lots} 張　"
             f"漲跌 {c.get('change_rate', 0):+.1f}%　"
             f"分析：{analysis}\n"
         )
     if not stocks_text:
-        stocks_text = (
-            f"（無候選股票。本金 {current_value:,.0f} 元，"
-            f"請推薦股價低於 {int(current_value // 1000)} 元的台股，例如金融股、電子零件股）\n"
-        )
+        stocks_text = f"（目前無本金 {current_value:,.0f} 元以內可買的候選股票）\n"
 
     market_section = f"\n=== 總體環境 ===\n{market_summary}\n" if market_summary else ""
 
@@ -149,8 +151,9 @@ def build_planner_prompt(
 **資金限制（強制遵守）：**
 - 台灣股票 1 張 = 1000 股，股價 × 1000 = 一張成本
 - 每支股票的 quantity 不能超過上方列出的「最多可買 X 張」
-- 若某支股票最多買 0 張，絕對不要選它
-- 若候選股票都買不起，請自行推薦股價低於 {int(current_value // 1000)} 元的台股
+- **只能從上方候選清單中選股，絕對不可以自行編造股票代碼或選清單以外的股票**
+- 所有計劃的所有 picks 花費加總不得超過本金 {current_value:,.0f} 元
+- 若候選清單為空，則三套計劃的 picks 都給空陣列 []
 
 **每套計劃都必須寫出清楚的投資論述，包含：**
 - 為什麼現在進場？（總體環境、美股影響、政策利多）
@@ -563,8 +566,7 @@ def _clamp_quantities(plan_set: PlanSet, candidates: list[dict], capital: float)
         for pick in plan.picks:
             price = price_map.get(pick.code, 0.0)
             if price <= 0:
-                candidates_ok.append(pick)
-                continue
+                continue   # 沒有真實報價 → 跳過（可能是 AI 幻覺代碼）
             if pick.is_fractional:
                 max_sh  = calc_max_shares(price, capital)
                 new_sh  = min(pick.shares or 1, max_sh) if max_sh > 0 else 0
@@ -629,16 +631,9 @@ def generate_strategy_plans(
     current_value: float,
     candidates: list[dict],
 ) -> Optional[PlanSet]:
-    # 先過濾買不起的股票，並加上 max_lots
+    # 只把有真實報價且本金買得起的股票傳給 AI，防止 AI 選買不起的股票
     affordable = filter_affordable_candidates(candidates, current_value)
-    # 傳給 prompt：可負擔的股票 + max_lots；若全買不起就傳空讓 AI 自找便宜股
-    # 同時附上完整候選清單供 prompt 知道哪些買不起（以 max_lots=0 標記）
-    all_with_lots = []
-    for c in candidates:
-        price    = float(c.get("close", 0) or 0)
-        max_lots = calc_max_lots(price, current_value)
-        all_with_lots.append({**c, "max_lots": max_lots})
-    prompt = build_planner_prompt(goal, current_value, all_with_lots)
+    prompt = build_planner_prompt(goal, current_value, affordable)
     try:
         raw = call_sonnet(prompt)
         if not raw:
