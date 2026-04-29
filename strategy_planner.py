@@ -89,13 +89,24 @@ def calc_max_shares(price: float, capital: float) -> int:
 def filter_affordable_candidates(
     candidates: list[dict], capital: float
 ) -> list[dict]:
-    """過濾買不起的候選股（max_lots == 0），並在每個 candidate 加上 max_lots 欄位。"""
+    """回傳本金買得起的候選股，加上 max_lots / max_shares / is_fractional_only 欄位。
+    - 整張買得起（max_lots > 0）：優先回傳
+    - 整張買不起但零股買得起（max_shares > 0）：標記 is_fractional_only=True
+    - 兩者都買不起或無報價：排除
+    """
     result = []
     for c in candidates:
         price = float(c.get("close", 0) or 0)
-        max_lots = calc_max_lots(price, capital)
+        if price <= 0:
+            continue
+        max_lots  = calc_max_lots(price, capital)
+        max_shares = calc_max_shares(price, capital)
         if max_lots > 0:
-            result.append({**c, "max_lots": max_lots})
+            result.append({**c, "max_lots": max_lots, "max_shares": max_shares,
+                           "is_fractional_only": False})
+        elif max_shares > 0:
+            result.append({**c, "max_lots": 0, "max_shares": max_shares,
+                           "is_fractional_only": True})
     return result
 
 
@@ -110,21 +121,25 @@ def build_planner_prompt(
     days_left = (goal.end_date - date.today()).days
     target_pnl = goal.target_value - current_value
 
-    # 只列出有真實報價且本金買得起的股票
-    affordable_candidates = [
-        c for c in candidates
-        if float(c.get("close", 0) or 0) > 0
-        and (c.get("max_lots") or calc_max_lots(float(c.get("close", 0)), current_value)) > 0
-    ]
     stocks_text = ""
-    for c in affordable_candidates:
-        analysis  = c.get("analysis") or "無分析"
+    for c in candidates:
         price     = float(c.get("close", 0) or 0)
-        max_lots  = c.get("max_lots") if "max_lots" in c else calc_max_lots(price, current_value)
+        if price <= 0:
+            continue
+        analysis  = c.get("analysis") or "無分析"
+        max_lots  = c.get("max_lots", 0)
+        max_shares = c.get("max_shares", calc_max_shares(price, current_value))
+        frac_only = c.get("is_fractional_only", False)
         lot_cost  = price * 1000
+
+        if frac_only:
+            buy_tag = f"【零股】最多可買 {max_shares} 股（每股 {price:.1f} 元，整張需 {lot_cost:,.0f} 元買不起）"
+        else:
+            buy_tag = f"最多可買 {max_lots} 張（整張）或 {max_shares} 股（零股）"
+
         stocks_text += (
             f"- {c['code']} {c.get('name', '')}　"
-            f"現價 {price:,.1f}　一張需 {lot_cost:,.0f} 元　最多可買 {max_lots} 張　"
+            f"現價 {price:,.1f}　{buy_tag}　"
             f"漲跌 {c.get('change_rate', 0):+.1f}%　"
             f"分析：{analysis}\n"
         )
@@ -150,10 +165,12 @@ def build_planner_prompt(
 
 **資金限制（強制遵守）：**
 - 台灣股票 1 張 = 1000 股，股價 × 1000 = 一張成本
-- 每支股票的 quantity 不能超過上方列出的「最多可買 X 張」
 - **只能從上方候選清單中選股，絕對不可以自行編造股票代碼或選清單以外的股票**
 - 所有計劃的所有 picks 花費加總不得超過本金 {current_value:,.0f} 元
 - 若候選清單為空，則三套計劃的 picks 都給空陣列 []
+- **整張買法**：quantity = 張數，is_fractional = false，shares = 0
+- **零股買法**：標記【零股】的股票用 is_fractional = true，shares = 股數（不超過上方最多可買股數），quantity = 0
+- 若整張買不起，優先考慮零股（is_fractional=true）而非直接跳過
 
 **每套計劃都必須寫出清楚的投資論述，包含：**
 - 為什麼現在進場？（總體環境、美股影響、政策利多）

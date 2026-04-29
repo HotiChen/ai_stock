@@ -67,29 +67,46 @@ class TestFilterAffordableCandidates:
         ]
 
     def test_filters_out_unaffordable(self):
-        result = filter_affordable_candidates(self._candidates(), capital=30_000.0)
+        # 連零股都買不起（price > capital）才排除
+        # 9999: 5000/股，30,000/5000=6股，零股買得起，所以不應被排除
+        # 若要測試真正買不起，需要 price > capital
+        candidates = [
+            {"code": "OVER", "name": "買不起", "close": 50_000.0, "change_rate": 0.0, "analysis": ""},
+            {"code": "3706", "name": "神達",   "close": 25.0,     "change_rate": 1.2, "analysis": "低價"},
+        ]
+        result = filter_affordable_candidates(candidates, capital=30_000.0)
         codes = [c["code"] for c in result]
-        assert "2330" not in codes   # 850*1000=850k, can't afford
-        assert "9999" not in codes   # 5000*1000=5M, can't afford
+        assert "OVER" not in codes   # 50,000/股 > 30,000元 → 連1股都買不起
+        assert "3706" in codes
 
     def test_keeps_affordable(self):
         result = filter_affordable_candidates(self._candidates(), capital=30_000.0)
         codes = [c["code"] for c in result]
-        assert "2881" not in codes  # 85*1000=85,000 > 30,000 → 買不起
-        assert "3706" in codes      # 25*1000=25,000 < 30,000 → 可以買
+        assert "3706" in codes      # 25*1000=25,000 < 30,000 → 整張可買
+        # 2330(850/股)、2881(85/股) 整張買不起，但零股買得起，仍保留為 is_fractional_only
+        assert "2330" in codes
+        assert "2881" in codes
+
+    def test_fractional_only_flag(self):
+        result = filter_affordable_candidates(self._candidates(), capital=30_000.0)
+        by_code = {c["code"]: c for c in result}
+        assert by_code["3706"]["is_fractional_only"] is False   # 整張買得起
+        assert by_code["2330"]["is_fractional_only"] is True    # 只能零股
+        assert by_code["2881"]["is_fractional_only"] is True    # 只能零股
 
     def test_adds_max_lots_field(self):
         result = filter_affordable_candidates(self._candidates(), capital=30_000.0)
         for c in result:
             assert "max_lots" in c
-            assert c["max_lots"] >= 1
+            assert "max_shares" in c
 
     def test_empty_candidates_returns_empty(self):
         assert filter_affordable_candidates([], capital=30_000.0) == []
 
     def test_all_unaffordable_returns_empty(self):
-        candidates = [{"code": "2330", "name": "台積電", "close": 850.0,
-                       "change_rate": 2.1, "analysis": "貴"}]
+        # 每股 50,000 元 → 連 1 股都買不起（capital=30,000）
+        candidates = [{"code": "XXXX", "name": "超貴", "close": 50_000.0,
+                       "change_rate": 0.0, "analysis": "貴"}]
         result = filter_affordable_candidates(candidates, capital=30_000.0)
         assert result == []
 
