@@ -545,27 +545,73 @@ def parse_plan_response(raw: str) -> Optional[PlanSet]:
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def _clamp_quantities(plan_set: PlanSet, candidates: list[dict], capital: float) -> PlanSet:
-    """確保所有 pick 的 quantity 不超過本金能買的上限。"""
+    """確保計劃內所有 picks 的總花費不超過本金。
+    - 整張模式：max_lots=0 → 直接排除該 pick
+    - 零股模式：調整 shares 不超過剩餘本金
+    - 最後按信心分數由高到低累加，超出本金的 picks 一律移除
+    """
     price_map = {c["code"]: float(c.get("close", 0) or 0) for c in candidates}
 
+    def _pick_cost(pick: StockPick, price: float) -> float:
+        if pick.is_fractional:
+            return (pick.shares or 0) * price
+        return pick.quantity * 1000 * price
+
     def _clamp_plan(plan: StrategyPlan) -> StrategyPlan:
-        clamped = []
+        # 第一步：過濾 + 調整個別數量
+        candidates_ok: list[StockPick] = []
         for pick in plan.picks:
-            price    = price_map.get(pick.code, 0.0)
-            max_lots = calc_max_lots(price, capital) if price > 0 else pick.quantity
-            new_qty  = max(1, min(pick.quantity, max_lots)) if max_lots > 0 else 1
-            clamped.append(StockPick(
-                code=pick.code, name=pick.name, action=pick.action,
-                quantity=new_qty, hold_days=pick.hold_days,
-                expected_return_pct=pick.expected_return_pct,
-                reason=pick.reason, confidence=pick.confidence,
-                key_catalysts=pick.key_catalysts,
-                entry_logic=pick.entry_logic, exit_logic=pick.exit_logic,
-                is_fractional=pick.is_fractional, shares=pick.shares,
-            ))
+            price = price_map.get(pick.code, 0.0)
+            if price <= 0:
+                candidates_ok.append(pick)
+                continue
+            if pick.is_fractional:
+                max_sh  = calc_max_shares(price, capital)
+                new_sh  = min(pick.shares or 1, max_sh) if max_sh > 0 else 0
+                if new_sh <= 0:
+                    continue   # 連 1 股都買不起，跳過
+                candidates_ok.append(StockPick(
+                    code=pick.code, name=pick.name, action=pick.action,
+                    quantity=pick.quantity, hold_days=pick.hold_days,
+                    expected_return_pct=pick.expected_return_pct,
+                    reason=pick.reason, confidence=pick.confidence,
+                    key_catalysts=pick.key_catalysts,
+                    entry_logic=pick.entry_logic, exit_logic=pick.exit_logic,
+                    is_fractional=True, shares=new_sh,
+                ))
+            else:
+                max_lots = calc_max_lots(price, capital)
+                if max_lots <= 0:
+                    continue   # 連 1 張都買不起，跳過
+                new_qty = min(pick.quantity, max_lots)
+                candidates_ok.append(StockPick(
+                    code=pick.code, name=pick.name, action=pick.action,
+                    quantity=new_qty, hold_days=pick.hold_days,
+                    expected_return_pct=pick.expected_return_pct,
+                    reason=pick.reason, confidence=pick.confidence,
+                    key_catalysts=pick.key_catalysts,
+                    entry_logic=pick.entry_logic, exit_logic=pick.exit_logic,
+                    is_fractional=False, shares=pick.shares,
+                ))
+
+        # 第二步：按信心分數排序，累加直到總花費超出本金
+        candidates_ok.sort(key=lambda p: p.confidence, reverse=True)
+        final: list[StockPick] = []
+        remaining = capital
+        for pick in candidates_ok:
+            price = price_map.get(pick.code, 0.0)
+            cost  = _pick_cost(pick, price) if price > 0 else 0.0
+            if cost > remaining:
+                continue   # 加了這支就超出本金，跳過
+            final.append(pick)
+            remaining -= cost
+
+        total_cost = capital - remaining
+        deployed_pct = (total_cost / capital) if capital > 0 else 0.0
+
         return StrategyPlan(
             plan_type=plan.plan_type, description=plan.description,
-            picks=clamped, capital_deployed_pct=plan.capital_deployed_pct,
+            picks=final, capital_deployed_pct=deployed_pct,
             expected_return_pct=plan.expected_return_pct, risk_note=plan.risk_note,
             thesis=plan.thesis, macro_context=plan.macro_context,
         )

@@ -49,6 +49,13 @@ from sim_plan_store import (
     load_sim_plan,
     save_sim_plan,
 )
+from daily_tracker import (
+    DailyTrackRecord,
+    PlanResult,
+    load_day_record,
+    save_day_record,
+    update_plan_result,
+)
 from sim_engine import (
     compare_plans,
     generate_sim_report,
@@ -1167,6 +1174,26 @@ def _render_strategy_tracker():
                 exec_map[pt] = eid
             st.session_state["_exec_map"] = exec_map
             _start_executor()
+
+            # ── 三套全跑：全部標為影子追蹤，待使用者事後點選實際路徑 ──
+            _track_record = DailyTrackRecord(
+                date=date.today(),
+                starting_capital=current_value,
+                chosen_plan_type="",   # 尚未選擇
+                results=[
+                    PlanResult(
+                        plan_type=pt,
+                        pnl=None, pnl_pct=None, closing_capital=None,
+                        is_actual=False,
+                    )
+                    for pt in ("aggressive", "balanced", "conservative")
+                ],
+            )
+            try:
+                save_day_record(_track_record)
+            except Exception:
+                pass
+
             st.success("✅ 三套計劃已同時啟動模擬！每 10 分鐘更新。")
             st.rerun()
 
@@ -1245,6 +1272,30 @@ def _render_strategy_tracker():
                     exec_id = _start_exec(plan_set, plan.plan_type, _RESEARCH_DB)
                     st.session_state["_exec_map"] = {plan.plan_type: exec_id}
                     _start_executor()
+
+                    # ── 建立今日追蹤記錄（實際路徑 + 影子追蹤）──
+                    _all_types = ("aggressive", "balanced", "conservative")
+                    _track_record = DailyTrackRecord(
+                        date=date.today(),
+                        starting_capital=current_value,
+                        chosen_plan_type=plan.plan_type,
+                        results=[
+                            PlanResult(
+                                plan_type=pt,
+                                pnl=None,
+                                pnl_pct=None,
+                                closing_capital=None,
+                                is_actual=(pt == plan.plan_type),
+                            )
+                            for pt in _all_types
+                        ],
+                    )
+                    try:
+                        save_day_record(_track_record)
+                        st.toast("📊 今日追蹤記錄已建立（實際路徑 + 影子追蹤）", icon="📊")
+                    except Exception:
+                        pass
+
                     st.success(f"✅ 已啟動！ID: {exec_id}")
                     st.rerun()
 
