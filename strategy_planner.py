@@ -28,23 +28,32 @@ def _extract_json(raw: str) -> dict:
 
 # ── Data models ───────────────────────────────────────────────────────────────
 
+# 不消耗資金的 action 類型（module-level，避免 dataclass 序列化問題）
+_FREE_ACTIONS = frozenset({"hold", "close", "reduce", "switch"})
+_BUY_ACTIONS  = frozenset({"open", "add", "buy"})
+
+
 @dataclass
 class StockPick:
     code:                str
     name:                str
-    action:              str    # "buy" | "hold"
+    action:              str    # "open"|"add"|"reduce"|"close"|"switch"|"hold"  (舊"buy"向後兼容)
     quantity:            int
     hold_days:           int
     expected_return_pct: float
     reason:              str
     confidence:          int    # 0–10
-    key_catalysts:       list[str] = field(default_factory=list)  # 具體催化劑清單
-    entry_logic:         str = ""   # 進場邏輯（技術面 + 基本面）
-    exit_logic:          str = ""   # 出場邏輯（目標價 / 停損條件）
-    is_fractional:       bool = False  # 零股模式
-    shares:              int = 0       # 零股股數（is_fractional=True 時使用）
+    key_catalysts:       list[str] = field(default_factory=list)
+    entry_logic:         str = ""
+    exit_logic:          str = ""
+    is_fractional:       bool = False
+    shares:              int = 0
+    switch_from:         str = ""   # switch action 時要賣掉的股票代碼
 
     def total_cost(self, price: float) -> float:
+        """open/add/buy 消耗資金；hold/close/reduce/switch 資金中性（回傳 0）。"""
+        if self.action in _FREE_ACTIONS:
+            return 0.0
         if self.is_fractional:
             return self.shares * price
         return self.quantity * 1000 * price
@@ -465,7 +474,10 @@ def build_plan_prompt(
     {{
       "code": "股票代碼",
       "name": "股票名稱",
-      "action": "buy",
+      "code": "股票代碼",
+      "name": "股票名稱",
+      "action": "open（新建倉）| add（加碼）| reduce（減碼）| close（平倉）| switch（換股）| hold（維持不動）",
+      "switch_from": "換股時填被賣掉的舊股代碼，其他 action 填空字串",
       "quantity": 張數（整張時填，零股時填0）,
       "hold_days": 持有天數,
       "expected_return_pct": 預期報酬百分比,
@@ -511,7 +523,7 @@ def _parse_picks(raw_picks: list[dict]) -> list[StockPick]:
             picks.append(StockPick(
                 code=str(p["code"]),
                 name=str(p.get("name", p["code"])),
-                action=p.get("action", "buy"),
+                action=p.get("action", "open"),
                 quantity=quantity,
                 hold_days=max(1, int(p.get("hold_days", 1))),
                 expected_return_pct=float(p.get("expected_return_pct", 0.0)),
@@ -522,6 +534,7 @@ def _parse_picks(raw_picks: list[dict]) -> list[StockPick]:
                 confidence=max(0, min(10, int(p.get("confidence", 5)))),
                 is_fractional=is_frac,
                 shares=shares,
+                switch_from=str(p.get("switch_from", "")),
             ))
         except Exception:
             continue
@@ -577,10 +590,22 @@ def _clamp_quantities(plan_set: PlanSet, candidates: list[dict], capital: float)
             return (pick.shares or 0) * price
         return pick.quantity * 1000 * price
 
+    # 不消耗資金的 action 類型
+    _FREE_ACTIONS = frozenset({"hold", "close", "reduce", "switch"})
+    # 向後兼容舊 "buy" action
+    _BUY_ACTIONS  = frozenset({"open", "add", "buy"})
+
     def _clamp_plan(plan: StrategyPlan) -> StrategyPlan:
         # 第一步：過濾 + 調整個別數量
-        candidates_ok: list[StockPick] = []
+        free_picks: list[StockPick] = []    # hold/close/reduce/switch — 不消耗資金
+        candidates_ok: list[StockPick] = [] # open/add/buy — 需要資金
+
         for pick in plan.picks:
+            # 不消耗資金的 action：不需要價格驗證，直接保留
+            if pick.action in _FREE_ACTIONS:
+                free_picks.append(pick)
+                continue
+
             price = price_map.get(pick.code, 0.0)
             if price <= 0:
                 continue   # 沒有真實報價 → 跳過（可能是 AI 幻覺代碼）
@@ -597,6 +622,7 @@ def _clamp_quantities(plan_set: PlanSet, candidates: list[dict], capital: float)
                     key_catalysts=pick.key_catalysts,
                     entry_logic=pick.entry_logic, exit_logic=pick.exit_logic,
                     is_fractional=True, shares=new_sh,
+                    switch_from=pick.switch_from,
                 ))
             else:
                 max_lots = calc_max_lots(price, capital)
@@ -611,11 +637,12 @@ def _clamp_quantities(plan_set: PlanSet, candidates: list[dict], capital: float)
                     key_catalysts=pick.key_catalysts,
                     entry_logic=pick.entry_logic, exit_logic=pick.exit_logic,
                     is_fractional=False, shares=pick.shares,
+                    switch_from=pick.switch_from,
                 ))
 
         # 第二步：按信心分數排序，累加直到總花費超出本金
         candidates_ok.sort(key=lambda p: p.confidence, reverse=True)
-        final: list[StockPick] = []
+        final: list[StockPick] = list(free_picks)   # free picks 永遠保留
         remaining = capital
         for pick in candidates_ok:
             price = price_map.get(pick.code, 0.0)
