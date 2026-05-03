@@ -48,6 +48,7 @@ from sim_plan_store import (
     list_sim_plans,
     load_sim_plan,
     save_sim_plan,
+    delete_sim_plan,
 )
 from daily_tracker import (
     DailyTrackRecord,
@@ -55,6 +56,8 @@ from daily_tracker import (
     load_day_record,
     save_day_record,
     update_plan_result,
+    list_day_records,
+    delete_day_record,
 )
 from sim_engine import (
     compare_plans,
@@ -1306,7 +1309,7 @@ def _render_strategy_tracker():
         with st.expander(f"📂 歷史計劃（共 {len(_saved_plans)} 份）", expanded=False):
             st.caption("可載入舊計劃繼續檢視，或以其收盤資金為基準重新生成下一天的三套計劃。")
             for entry in _saved_plans:
-                col_info, col_load, col_regen = st.columns([3, 1, 2])
+                col_info, col_load, col_regen, col_del = st.columns([3, 1, 2, 1])
                 col_info.markdown(
                     f"**{entry['day_label']}**　📅 {entry['plan_date']}"
                 )
@@ -1318,6 +1321,13 @@ def _render_strategy_tracker():
                         st.rerun()
                     else:
                         st.error("載入失敗")
+                if col_del.button("🗑️", key=f"del_plan_{entry['filename']}", use_container_width=True, help="刪除此計劃"):
+                    try:
+                        delete_sim_plan(entry["filename"], plan_dir=_sim_plan_dir)
+                        st.toast(f"已刪除 {entry['day_label']}", icon="🗑️")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"刪除失敗：{e}")
 
                 # 重新生成：讓使用者輸入當天收盤後的資金，以此作為下一天的起始資金
                 regen_key = f"regen_cap_{entry['filename']}"
@@ -1367,6 +1377,26 @@ def _render_strategy_tracker():
                 if col_cancel.button("取消", use_container_width=True):
                     st.session_state.pop("_regen_from", None)
                     st.rerun()
+
+    # ── AI 策略追蹤記錄（DailyTrackRecord）──────────────────────────
+    _track_records = list_day_records()
+    if _track_records:
+        with st.expander(f"📊 AI 策略追蹤記錄（共 {len(_track_records)} 天）", expanded=False):
+            st.caption("每日選擇計劃後自動記錄，可刪除錯誤或測試資料。")
+            for rec in _track_records[:30]:  # 最多顯示 30 筆
+                actual = next((r for r in rec.results if r.is_actual), None)
+                pnl_str = f"{actual.pnl:+,.0f} 元" if (actual and actual.pnl is not None) else "待結算"
+                col_info, col_del = st.columns([5, 1])
+                col_info.markdown(
+                    f"**{rec.date}**　選 `{rec.chosen_plan_type}`　損益 {pnl_str}"
+                )
+                if col_del.button("🗑️", key=f"del_track_{rec.date}", use_container_width=True, help="刪除此日追蹤記錄"):
+                    try:
+                        delete_day_record(rec.date)
+                        st.toast(f"已刪除 {rec.date} 追蹤記錄", icon="🗑️")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"刪除失敗：{e}")
 
     st.divider()
 

@@ -147,3 +147,9 @@ def list_sim_plans(plan_dir: str = _DEFAULT_DIR) -> list[dict]:
     for r in results:
         del r["_day_num"]
     return results
+
+
+def delete_sim_plan(filename: str, plan_dir: str = _DEFAULT_DIR) -> None:
+    """Delete a saved plan JSON. Raises FileNotFoundError if not found."""
+    fpath = Path(plan_dir) / filename
+    fpath.unlink()  # raises FileNotFoundError if missing

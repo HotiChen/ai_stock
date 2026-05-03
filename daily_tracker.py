@@ -146,3 +146,8 @@ def update_plan_result(
             res.loss_trades     = loss_trades
             break
     save_day_record(record, track_dir)
+
+
+def delete_day_record(day: date, track_dir: str = _DEFAULT_DIR) -> None:
+    """Delete a day's tracking record. Raises FileNotFoundError if not found."""
+    _fpath(day, track_dir).unlink()  # raises FileNotFoundError if missing
