@@ -18,6 +18,7 @@ Or via start.sh as a background process.
 import os
 import time
 from datetime import date, datetime
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -31,6 +32,9 @@ from research_db import (
     reject_pick_from_plan, reject_all_picks_from_plan,
 )
 from daily_tracker import DailyTrackRecord, PlanResult, save_day_record
+from portfolio import SimulatedPortfolio
+from sim_plan_store import planset_to_dict, planset_from_dict
+import json
 
 log = get_logger(__name__)
 
@@ -262,6 +266,114 @@ def handle_liquidate_all(chat_id: str) -> None:
     )
 
 
+_PORTFOLIO_PATH    = "data/portfolio.json"
+_PENDING_PLAN_PATH = "data/pending_planset.json"
+
+
+# ── Pending planset: save / load ───────────────────────────────────────────────
+
+def save_pending_planset(plan_set, path: str = _PENDING_PLAN_PATH) -> None:
+    """早晨推播時把 PlanSet 存起來，等使用者選擇後執行。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        json.dumps(planset_to_dict(plan_set), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_pending_planset(path: str = _PENDING_PLAN_PATH):
+    """載入今日待執行的 PlanSet。找不到回傳 None。"""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return planset_from_dict(data)
+    except Exception:
+        return None
+
+
+# ── Price fetch ────────────────────────────────────────────────────────────────
+
+def _fetch_stock_price(code: str) -> float:
+    """用 yfinance 抓台股現價（code.TW）。失敗回傳 0.0（模擬模式繼續執行）。"""
+    try:
+        import yfinance as yf  # type: ignore
+        ticker = yf.Ticker(f"{code}.TW")
+        hist   = ticker.history(period="2d")
+        if not hist.empty:
+            return round(float(hist["Close"].iloc[-1]), 2)
+    except Exception:
+        pass
+    return 0.0
+
+
+# ── Plan execution ────────────────────────────────────────────────────────────
+
+def execute_plan(plan, portfolio: SimulatedPortfolio, entry_date) -> list[str]:
+    """把 StrategyPlan 的 picks 執行進 SimulatedPortfolio。
+    回傳每一筆的執行結果文字（成功 / 失敗）。
+    """
+    messages: list[str] = []
+
+    for pick in plan.picks:
+        # hold：不動作
+        if pick.action == "hold":
+            messages.append(f"⚪ {pick.code} {pick.name} — 維持持倉不動")
+            continue
+
+        try:
+            price = _fetch_stock_price(pick.code)
+            qty_str = f"{pick.quantity}張" if not pick.is_fractional else f"{pick.shares}股"
+            price_str = f"@{price:.1f}" if price > 0 else "@模擬價"
+
+            if pick.action in ("open", "buy"):
+                portfolio.open_position(
+                    code=pick.code, name=pick.name,
+                    quantity=pick.quantity, price=price,
+                    is_fractional=pick.is_fractional, shares=pick.shares,
+                    reason=pick.reason, entry_date=entry_date,
+                )
+                messages.append(f"🟢 {pick.code} {pick.name} 建倉 {qty_str} {price_str}")
+
+            elif pick.action == "add":
+                portfolio.add_position(
+                    code=pick.code, quantity=pick.quantity, price=price,
+                    is_fractional=pick.is_fractional, shares=pick.shares,
+                )
+                messages.append(f"🔵 {pick.code} {pick.name} 加碼 {qty_str} {price_str}")
+
+            elif pick.action == "close":
+                portfolio.close_position(code=pick.code, price=price)
+                messages.append(f"🔴 {pick.code} {pick.name} 全部平倉 {price_str}")
+
+            elif pick.action == "reduce":
+                portfolio.reduce_position(
+                    code=pick.code, quantity=pick.quantity, price=price,
+                    is_fractional=pick.is_fractional, shares=pick.shares,
+                )
+                messages.append(f"🟡 {pick.code} {pick.name} 減碼 {qty_str} {price_str}")
+
+            elif pick.action == "switch":
+                if pick.switch_from:
+                    from_price = _fetch_stock_price(pick.switch_from)
+                    try:
+                        portfolio.close_position(code=pick.switch_from, price=from_price)
+                        messages.append(f"🔄 {pick.switch_from} 換出 @{from_price:.1f}")
+                    except Exception as e:
+                        messages.append(f"⚠️ {pick.switch_from} 換出失敗：{e}")
+                portfolio.open_position(
+                    code=pick.code, name=pick.name,
+                    quantity=pick.quantity, price=price,
+                    is_fractional=pick.is_fractional, shares=pick.shares,
+                    reason=pick.reason, entry_date=entry_date,
+                )
+                messages.append(f"🔄 {pick.code} {pick.name} 換入 {qty_str} {price_str}")
+
+        except Exception as e:
+            messages.append(f"⚠️ {pick.code} 執行失敗：{e}")
+
+    return messages
+
+
 # ── Morning push: briefing + 3 strategy plans ─────────────────────────────────
 
 _PLAN_EMOJI = {
@@ -347,6 +459,9 @@ def format_plan_card(plan) -> str:
 
 def send_morning_push(briefing, plan_set, starting_capital: float = 0.0) -> None:
     """推送早晨簡報 + 三套策略到 Telegram，附 Inline Keyboard 讓使用者選擇。"""
+    # 0. 把 PlanSet 存起來，等使用者選擇後執行
+    save_pending_planset(plan_set)
+
     # 1. 早晨簡報
     _post("sendMessage", {
         "chat_id": CHAT_ID,
@@ -397,9 +512,9 @@ def send_morning_push(briefing, plan_set, starting_capital: float = 0.0) -> None
 
 
 def handle_select_plan(callback_query: dict) -> None:
-    """處理使用者點選策略的 callback。記錄到 daily_tracker。"""
-    chat_id  = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
-    data     = callback_query.get("data", "")
+    """處理使用者點選策略的 callback：記錄到 daily_tracker + 執行 picks。"""
+    chat_id   = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+    data      = callback_query.get("data", "")
     plan_type = data.split(":", 1)[1] if ":" in data else ""
 
     valid_plans = {"aggressive", "balanced", "conservative"}
@@ -410,10 +525,24 @@ def handle_select_plan(callback_query: dict) -> None:
     label = _PLAN_LABEL.get(plan_type, plan_type)
     emoji = _PLAN_EMOJI.get(plan_type, "📋")
 
-    # 記錄到 daily_tracker
+    # 1. 載入今日 PlanSet（找不到時不中斷，改為警告）
+    plan_set = load_pending_planset()
+
+    # 2. 執行 picks（有計劃才執行）
+    exec_lines: list[str] = []
+    portfolio = SimulatedPortfolio.load(_PORTFOLIO_PATH)
+
+    if plan_set is None:
+        exec_lines.append("⚠️ 找不到今日策略計劃，無法執行（僅記錄選擇）")
+    else:
+        plan = getattr(plan_set, plan_type)
+        exec_lines = execute_plan(plan, portfolio, date.today())
+        portfolio.save(_PORTFOLIO_PATH)
+
+    # 3. 記錄到 daily_tracker
     record = DailyTrackRecord(
         date=date.today(),
-        starting_capital=0.0,    # 呼叫端可補充正確資金
+        starting_capital=portfolio.get_available_capital(),
         chosen_plan_type=plan_type,
         results=[
             PlanResult(plan_type=pt, pnl=None, pnl_pct=None,
@@ -423,12 +552,21 @@ def handle_select_plan(callback_query: dict) -> None:
     )
     save_day_record(record)
 
+    # 4. 回傳確認訊息
+    exec_summary = "\n".join(exec_lines) if exec_lines else "（無需執行任何動作）"
+    try:
+        cash_str = f"{portfolio.get_available_capital():,.0f}"
+    except (TypeError, ValueError):
+        cash_str = str(portfolio.get_available_capital())
+
     send_text(
         chat_id,
-        f"{emoji} <b>已選擇{label}（{plan_type}）</b>\n"
+        f"{emoji} <b>已選擇並執行{label}（{plan_type}）</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"✅ 今日策略已記錄。\n"
-        f"盤後將自動追蹤此計劃的損益表現。",
+        f"{exec_summary}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"💰 剩餘現金：{cash_str} 元\n"
+        f"✅ 今日策略已記錄，盤後追蹤損益。",
     )
 
 
