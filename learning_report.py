@@ -4,14 +4,16 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Optional
 
 from ai_client import call_gemini
 from daily_tracker import DailyTrackRecord, list_day_records
 
-_PLAN_TYPES   = ("aggressive", "balanced", "conservative")
+_PLAN_TYPES    = ("aggressive", "balanced", "conservative")
 _VALID_PERIODS = (7, 14, 28)
 _DEFAULT_DIR   = "data/daily_tracking"
+_DEFAULT_BRIEFING_DIR = "data/morning_briefings"
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -26,6 +28,44 @@ class PlanPerformanceSummary:
 
 
 @dataclass
+class BriefingDayAccuracy:
+    date:               date
+    predicted_outlook:  str            # "bullish" | "bearish" | "neutral"
+    actual_pnl_pct:     float          # actual PnL% from chosen plan result
+    correct:            bool           # True if prediction matched outcome
+    vix:                Optional[float] = None
+
+
+@dataclass
+class BriefingAccuracyReport:
+    per_day: list[BriefingDayAccuracy] = field(default_factory=list)
+
+    @property
+    def total_days(self) -> int:
+        return len(self.per_day)
+
+    @property
+    def accuracy_rate(self) -> float:
+        if not self.per_day:
+            return 0.0
+        return sum(1 for d in self.per_day if d.correct) / len(self.per_day)
+
+    @property
+    def bullish_accuracy(self) -> float:
+        bullish = [d for d in self.per_day if d.predicted_outlook == "bullish"]
+        if not bullish:
+            return 0.0
+        return sum(1 for d in bullish if d.correct) / len(bullish)
+
+    @property
+    def bearish_accuracy(self) -> float:
+        bearish = [d for d in self.per_day if d.predicted_outlook == "bearish"]
+        if not bearish:
+            return 0.0
+        return sum(1 for d in bearish if d.correct) / len(bearish)
+
+
+@dataclass
 class LearningReport:
     generated_at: date
     period_days: int                            # 7 / 14 / 28
@@ -36,6 +76,7 @@ class LearningReport:
     system_recommendation: str                  # "aggressive" | "balanced" | "conservative"
     ai_analysis: str                            # Gemini 全文分析
     key_insights: list[str] = field(default_factory=list)
+    briefing_accuracy: Optional[BriefingAccuracyReport] = None
 
 
 # ── Core functions ────────────────────────────────────────────────────────────
@@ -204,15 +245,113 @@ def _parse_recommendation(ai_text: str) -> tuple[str, list[str]]:
     return "balanced", []
 
 
+# ── Briefing accuracy functions ───────────────────────────────────────────────
+
+def load_briefings_for_period(
+    start: date,
+    end: date,
+    briefing_dir: str = _DEFAULT_BRIEFING_DIR,
+) -> list:
+    """
+    讀取 briefing_dir 中 start ~ end 範圍內的所有 MorningBriefing。
+    檔名格式：YYYY-MM-DD.json
+    """
+    from morning_briefing import load_briefing
+
+    briefings = []
+    current = start
+    while current <= end:
+        b = load_briefing(current, briefing_dir=briefing_dir)
+        if b is not None:
+            briefings.append(b)
+        current = date.fromordinal(current.toordinal() + 1)
+    return briefings
+
+
+def compute_briefing_accuracy(
+    records:   list[DailyTrackRecord],
+    briefings: list,
+) -> BriefingAccuracyReport:
+    """
+    交叉比對每天的 briefing 預測 vs 實際 PnL，
+    計算簡報預測的正確率。
+    """
+    briefing_map = {b.date: b for b in briefings}
+    record_map   = {r.date: r for r in records}
+
+    per_day: list[BriefingDayAccuracy] = []
+
+    for d, briefing in briefing_map.items():
+        rec = record_map.get(d)
+        if rec is None:
+            continue
+
+        # 取 is_actual=True 的結果拿 pnl_pct
+        actual_result = next((r for r in rec.results if r.is_actual), None)
+        if actual_result is None or actual_result.pnl_pct is None:
+            continue
+
+        outlook = (briefing.market_outlook or "").lower()
+        pnl_pct = actual_result.pnl_pct
+
+        # 判定是否正確：bullish→正獲利, bearish→負獲利, neutral→不算
+        if outlook == "bullish":
+            correct = pnl_pct > 0
+        elif outlook == "bearish":
+            correct = pnl_pct < 0
+        else:
+            correct = False  # neutral 不算對
+
+        vix = briefing.market_data.vix if briefing.market_data else None
+
+        per_day.append(BriefingDayAccuracy(
+            date=d,
+            predicted_outlook=outlook,
+            actual_pnl_pct=pnl_pct,
+            correct=correct,
+            vix=vix,
+        ))
+
+    per_day.sort(key=lambda x: x.date)
+    return BriefingAccuracyReport(per_day=per_day)
+
+
+def build_briefing_section(accuracy: BriefingAccuracyReport) -> str:
+    """生成 briefing 準確率摘要，用於注入 Gemini 分析 prompt。"""
+    if not accuracy.per_day:
+        return "## 早晨簡報預測準確度\n\n（無資料）\n"
+
+    lines = [
+        "## 早晨簡報預測準確度（Gemini 市場展望 vs 實際損益）",
+        "",
+        f"- 分析天數：{accuracy.total_days} 天",
+        f"- 整體準確率：{accuracy.accuracy_rate:.1%}",
+        f"- 看多（bullish）準確率：{accuracy.bullish_accuracy:.1%}",
+        f"- 看空（bearish）準確率：{accuracy.bearish_accuracy:.1%}",
+        "",
+        "| 日期 | 預測 | 實際 PnL% | 是否正確 |",
+        "|------|------|-----------|--------|",
+    ]
+    for d in accuracy.per_day:
+        ok_str = "✅" if d.correct else "❌"
+        lines.append(
+            f"| {d.date} | {d.predicted_outlook} | {d.actual_pnl_pct:+.2f}% | {ok_str} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def generate_learning_report(
     days: int = 7,
     track_dir: str = _DEFAULT_DIR,
+    briefing_dir: Optional[str] = None,
 ) -> Optional[LearningReport]:
     """
     生成學習報告。
     - days 必須是 7 / 14 / 28
     - 若資料筆數不足 days，回傳 None
     - 若 Gemini 失敗，回傳 None
+    - briefing_dir: 若提供，加入簡報準確率分析
     """
     if days not in _VALID_PERIODS:
         raise ValueError(f"days must be one of {_VALID_PERIODS}, got {days}")
@@ -221,8 +360,21 @@ def generate_learning_report(
     if len(records) < days:
         return None
 
-    prompt   = build_report_prompt(records, days)
-    ai_text  = call_gemini(prompt, max_tokens=16_384)
+    # Compute briefing accuracy if dir given
+    briefing_accuracy: Optional[BriefingAccuracyReport] = None
+    if briefing_dir and records:
+        briefings = load_briefings_for_period(
+            records[0].date, records[-1].date, briefing_dir
+        )
+        briefing_accuracy = compute_briefing_accuracy(records, briefings)
+
+    # Build prompt, optionally inject briefing section
+    prompt = build_report_prompt(records, days)
+    if briefing_accuracy and briefing_accuracy.total_days > 0:
+        briefing_section = build_briefing_section(briefing_accuracy)
+        prompt = prompt + "\n\n" + briefing_section
+
+    ai_text = call_gemini(prompt, max_tokens=16_384)
     if not ai_text:
         return None
 
@@ -241,4 +393,5 @@ def generate_learning_report(
         system_recommendation=recommendation,
         ai_analysis=ai_text,
         key_insights=insights,
+        briefing_accuracy=briefing_accuracy,
     )

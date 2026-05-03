@@ -403,15 +403,20 @@ def _briefing_from_dict(d: dict) -> MorningBriefing:
 def save_briefing(
     briefing: MorningBriefing,
     briefing_dir: str = _DEFAULT_DIR,
+    path: Optional[str] = None,
 ) -> str:
-    """存到 briefing_dir/YYYY-MM-DD.json，回傳完整路徑。"""
-    path = _briefing_path(briefing.date, briefing_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    """存到 briefing_dir/YYYY-MM-DD.json，回傳完整路徑。
+    若提供 path，直接寫入該路徑（忽略 briefing_dir）。"""
+    if path is not None:
+        target = Path(path)
+    else:
+        target = _briefing_path(briefing.date, briefing_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
         json.dumps(_briefing_to_dict(briefing), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    return str(path)
+    return str(target)
 
 
 def load_briefing(
