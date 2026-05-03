@@ -96,14 +96,11 @@ class SimulatedPortfolio:
         reason: str,
         entry_date: date,
     ) -> None:
-        """新建倉位。"""
+        """新建倉位。SimulatedPortfolio 不強制資金上限（模擬 / 匯入現有持倉用）。"""
         if code in self._positions:
             raise ValueError(f"已持有 {code}，請使用 add_position 加碼")
 
         cost = self._calc_cost(price, quantity, is_fractional, shares)
-        if cost > self._cash:
-            raise ValueError(f"資金不足：需要 {cost:,.0f}，可用 {self._cash:,.0f}")
-
         self._cash -= cost
         self._positions[code] = Position(
             code=code, name=name,
@@ -125,9 +122,6 @@ class SimulatedPortfolio:
             raise ValueError(f"未持有 {code}，請使用 open_position 建倉")
 
         cost = self._calc_cost(price, quantity, is_fractional, shares)
-        if cost > self._cash:
-            raise ValueError(f"資金不足：需要 {cost:,.0f}，可用 {self._cash:,.0f}")
-
         add_shares = shares if is_fractional else quantity * 1_000
         old_shares = pos.total_shares
         new_shares  = old_shares + add_shares

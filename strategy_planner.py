@@ -12,6 +12,7 @@ from ai_client import call_haiku, call_sonnet
 
 log = logging.getLogger(__name__)
 from strategy_tracker import StrategyGoal
+from portfolio import SimulatedPortfolio
 
 
 def _extract_json(raw: str) -> dict:
@@ -121,11 +122,41 @@ def filter_affordable_candidates(
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
+def _build_positions_section(portfolio: Optional[SimulatedPortfolio]) -> str:
+    """持倉區段文字，供 prompt 使用。無持倉回傳空字串。"""
+    if portfolio is None:
+        return ""
+    positions = portfolio.get_positions()
+    if not positions:
+        return ""
+
+    lines = ["=== 現有持倉（請針對這些持倉給出 hold/add/reduce/close/switch 建議）==="]
+    for pos in positions:
+        pnl     = pos.unrealized_pnl(pos.current_price) if pos.current_price > 0 else 0.0
+        pnl_pct = pos.unrealized_pnl_pct(pos.current_price) if pos.current_price > 0 else 0.0
+        hold_tag = "整張" if not pos.is_fractional else "零股"
+        qty_str  = f"{pos.quantity}張" if not pos.is_fractional else f"{pos.shares}股"
+        lines.append(
+            f"- {pos.code} {pos.name}　{qty_str}（{hold_tag}）　"
+            f"成本 {pos.avg_cost:,.1f}/股　"
+            f"現價 {pos.current_price:,.1f}/股　"
+            f"未實現損益 {pnl:+,.0f} TWD（{pnl_pct:+.1f}%）\n"
+            f"  進場理由：{pos.entry_reason}"
+        )
+    lines.append(f"\n可用現金：{portfolio.get_available_capital():,.0f} TWD")
+    lines.append(
+        "（新建倉 open/加碼 add 只能使用上方可用現金，"
+        "持有 hold/減碼 reduce/平倉 close/換股 switch 不需額外資金）"
+    )
+    return "\n".join(lines)
+
+
 def build_planner_prompt(
     goal: StrategyGoal,
     current_value: float,
     candidates: list[dict],
     market_summary: str = "",
+    portfolio: Optional[SimulatedPortfolio] = None,
 ) -> str:
     days_left = (goal.end_date - date.today()).days
     target_pnl = goal.target_value - current_value
@@ -155,7 +186,12 @@ def build_planner_prompt(
     if not stocks_text:
         stocks_text = f"（目前無本金 {current_value:,.0f} 元以內可買的候選股票）\n"
 
-    market_section = f"\n=== 總體環境 ===\n{market_summary}\n" if market_summary else ""
+    market_section    = f"\n=== 總體環境 ===\n{market_summary}\n" if market_summary else ""
+    positions_section = _build_positions_section(portfolio)
+    available_capital = (
+        portfolio.get_available_capital() if portfolio is not None
+        else current_value
+    )
 
     return f"""你是一位有野心的台股投資策略師，擅長把總體環境、產業趨勢、個股催化劑整合成具體可執行的投資計劃。
 
@@ -167,7 +203,9 @@ def build_planner_prompt(
 剩餘天數：{days_left} 天
 策略方向：{goal.approach}
 {market_section}
-=== AI 分析過的候選股票 ===
+{positions_section}
+
+=== AI 分析過的候選股票（可用現金：{available_capital:,.0f} 元）===
 {stocks_text}
 === 任務 ===
 生成三套計劃（aggressive 衝刺 / balanced 均衡 / conservative 保守）。
@@ -404,11 +442,17 @@ def build_plan_prompt(
     capital: float,
     candidates: list[dict],
     market_summary: str = "",
+    portfolio: Optional[SimulatedPortfolio] = None,
 ) -> str:
     """生成單一策略類型的獨立 prompt。"""
     cfg = _STYLE_CONFIGS.get(plan_type, _STYLE_CONFIGS["balanced"])
     days_left  = (goal.end_date - date.today()).days
     target_pnl = goal.target_value - capital
+    positions_section = _build_positions_section(portfolio)
+    available_capital = (
+        portfolio.get_available_capital() if portfolio is not None
+        else capital
+    )
 
     stocks_text = ""
     for c in candidates:
@@ -441,6 +485,8 @@ def build_plan_prompt(
 剩餘天數：{days_left} 天
 策略方向：{goal.approach}
 {market_section}
+{positions_section}
+
 === 五維度選股框架（適用所有策略）===
 {_SELECTION_FRAMEWORK}
 === 候選股票（含零股資訊）===
@@ -674,10 +720,15 @@ def generate_strategy_plans(
     goal: StrategyGoal,
     current_value: float,
     candidates: list[dict],
+    portfolio: Optional[SimulatedPortfolio] = None,
 ) -> Optional[PlanSet]:
+    # 若傳入 portfolio，以實際可用現金作為資金上限
+    effective_capital = (
+        portfolio.get_available_capital() if portfolio is not None else current_value
+    )
     # 只把有真實報價且本金買得起的股票傳給 AI，防止 AI 選買不起的股票
-    affordable = filter_affordable_candidates(candidates, current_value)
-    prompt = build_planner_prompt(goal, current_value, affordable)
+    affordable = filter_affordable_candidates(candidates, effective_capital)
+    prompt = build_planner_prompt(goal, current_value, affordable, portfolio=portfolio)
     try:
         raw = call_sonnet(prompt)
         if not raw:
@@ -688,7 +739,7 @@ def generate_strategy_plans(
             log.error("generate_strategy_plans: parse_plan_response failed, raw[:200]=%s", raw[:200])
             return None
         # 最後再 clamp 一次，防止 AI 忽視上限
-        return _clamp_quantities(plan_set, affordable, current_value)
+        return _clamp_quantities(plan_set, affordable, effective_capital)
     except Exception as e:
         log.error("generate_strategy_plans exception: %s", e)
         return None
