@@ -168,6 +168,22 @@ def _build_positions_section(portfolio: Optional[SimulatedPortfolio]) -> str:
     return "\n".join(lines)
 
 
+def _fractional_rule(goal) -> str:
+    """依 allow_fractional 決定零股買法的 prompt 說明。"""
+    allow = getattr(goal, "allow_fractional", False)
+    if allow:
+        return (
+            "- **零股買法**：標記【零股】的股票用 is_fractional = true，"
+            "shares = 股數（不超過上方最多可買股數），quantity = 0\n"
+            "- 整張買不起時，**請優先考慮零股**（is_fractional=true）而非直接跳過"
+        )
+    else:
+        return (
+            "- **不使用零股**：所有 picks 的 is_fractional 必須為 false，shares 必須為 0\n"
+            "- 整張買不起的股票請直接跳過，不要用零股方式買入"
+        )
+
+
 def _goal_constraint_section(goal) -> str:
     """從 goal 抽取停損/最大持倉/零股等限制，生成 prompt 段落。"""
     lines = []
@@ -272,8 +288,7 @@ def build_planner_prompt(
 - 所有計劃的所有 picks 花費加總不得超過本金 {current_value:,.0f} 元
 - 若候選清單為空，則三套計劃的 picks 都給空陣列 []
 - **整張買法**：quantity = 張數，is_fractional = false，shares = 0
-- **零股買法**：標記【零股】的股票用 is_fractional = true，shares = 股數（不超過上方最多可買股數），quantity = 0
-- 若整張買不起，優先考慮零股（is_fractional=true）而非直接跳過
+{_fractional_rule(goal)}
 
 **每套計劃都必須寫出清楚的投資論述，包含：**
 - 為什麼現在進場？（總體環境、美股影響、政策利多）
