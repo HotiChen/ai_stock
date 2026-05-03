@@ -30,6 +30,7 @@ from research_db import (
     init_db, load_daily_plan, load_daily_trades,
     reject_pick_from_plan, reject_all_picks_from_plan,
 )
+from daily_tracker import DailyTrackRecord, PlanResult, save_day_record
 
 log = get_logger(__name__)
 
@@ -261,12 +262,187 @@ def handle_liquidate_all(chat_id: str) -> None:
     )
 
 
+# ── Morning push: briefing + 3 strategy plans ─────────────────────────────────
+
+_PLAN_EMOJI = {
+    "aggressive":   "🚀",
+    "balanced":     "⚖️",
+    "conservative": "🛡️",
+}
+_PLAN_LABEL = {
+    "aggressive":   "衝刺版",
+    "balanced":     "均衡版",
+    "conservative": "保守版",
+}
+_OUTLOOK_LABEL = {
+    "bullish": "📈 偏多",
+    "bearish": "📉 偏空",
+    "neutral": "↔️ 中性",
+}
+
+
+def format_briefing_message(briefing) -> str:
+    """把 MorningBriefing 轉為 Telegram HTML 訊息。"""
+    md = briefing.market_data
+    outlook = _OUTLOOK_LABEL.get(briefing.market_outlook, briefing.market_outlook)
+
+    def _f(val, fmt=",.0f", suffix=""):
+        return f"{val:{fmt}}{suffix}" if val is not None else "N/A"
+
+    lines = [
+        f"🌅 <b>{briefing.date} 早晨市場簡報</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "【台灣大盤】",
+        f"  加權指數：<b>{_f(md.twse_index)}</b> 點",
+        f"  外資淨買：<b>{_f(md.foreign_net, '+.1f', ' 億')}</b>" if md.foreign_net is not None else "  外資淨買：N/A",
+        f"  投信淨買：<b>{_f(md.trust_net, '+.1f', ' 億')}</b>" if md.trust_net is not None else "  投信淨買：N/A",
+        "",
+        "【美股 & 恐慌指標】",
+        f"  S&P 500：{_f(md.sp500, ',.2f')}　NASDAQ：{_f(md.nasdaq, ',.2f')}",
+        f"  SOX 費半：{_f(md.sox, ',.2f')}　VIX：{_f(md.vix, '.2f')}",
+        "",
+        f"【Gemini 分析】{outlook}",
+        briefing.ai_analysis,
+        "",
+        "⚠️ 主要風險：" + "、".join(briefing.key_risks[:3]),
+        "📌 今日重點：" + " / ".join(briefing.sector_focus[:3]),
+    ]
+    return "\n".join(lines)
+
+
+def format_plan_card(plan) -> str:
+    """把單一 StrategyPlan 轉為 Telegram HTML 訊息。"""
+    emoji = _PLAN_EMOJI.get(plan.plan_type, "📋")
+    label = _PLAN_LABEL.get(plan.plan_type, plan.plan_type)
+    deployed = f"{plan.capital_deployed_pct * 100:.0f}%"
+
+    lines = [
+        f"{emoji} <b>{label}（{plan.plan_type}）</b>",
+        f"預期報酬：<b>+{plan.expected_return_pct:.1f}%</b>　"
+        f"資金部署：{deployed}",
+        f"風險：{plan.risk_note}",
+        "",
+        f"📖 論述：{plan.thesis[:100]}{'…' if len(plan.thesis) > 100 else ''}",
+        "",
+    ]
+
+    if not plan.picks:
+        lines.append("📭 空手觀望（無進場標的）")
+    else:
+        lines.append("📋 選股：")
+        for p in plan.picks:
+            action_tag = {
+                "open": "🟢新倉", "add": "🔵加碼", "hold": "⚪持有",
+                "reduce": "🟡減碼", "close": "🔴平倉", "switch": "🔄換股",
+            }.get(p.action, p.action)
+            qty_str = f"{p.quantity}張" if not p.is_fractional else f"{p.shares}股"
+            lines.append(
+                f"  • {p.code} {p.name}｜{action_tag} {qty_str}｜"
+                f"目標+{p.expected_return_pct:.1f}%　{p.reason}"
+            )
+
+    return "\n".join(lines)
+
+
+def send_morning_push(briefing, plan_set, starting_capital: float = 0.0) -> None:
+    """推送早晨簡報 + 三套策略到 Telegram，附 Inline Keyboard 讓使用者選擇。"""
+    # 1. 早晨簡報
+    _post("sendMessage", {
+        "chat_id": CHAT_ID,
+        "text": format_briefing_message(briefing),
+        "parse_mode": "HTML",
+    })
+
+    # 2. 三套策略 card（各一則）
+    for plan in (plan_set.aggressive, plan_set.balanced, plan_set.conservative):
+        _post("sendMessage", {
+            "chat_id": CHAT_ID,
+            "text": format_plan_card(plan),
+            "parse_mode": "HTML",
+        })
+
+    # 3. 選擇訊息 + Inline Keyboard
+    agg = plan_set.aggressive
+    bal = plan_set.balanced
+    con = plan_set.conservative
+
+    selection_text = (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "👆 請選擇今日執行的策略\n"
+        "（點選後系統自動記錄，不執行實際下單）"
+    )
+    keyboard = {
+        "inline_keyboard": [[
+            {
+                "text": f"🚀 衝刺 +{agg.expected_return_pct:.0f}%",
+                "callback_data": "select_plan:aggressive",
+            },
+            {
+                "text": f"⚖️ 均衡 +{bal.expected_return_pct:.0f}%",
+                "callback_data": "select_plan:balanced",
+            },
+            {
+                "text": f"🛡️ 保守 +{con.expected_return_pct:.0f}%",
+                "callback_data": "select_plan:conservative",
+            },
+        ]]
+    }
+    _post("sendMessage", {
+        "chat_id": CHAT_ID,
+        "text": selection_text,
+        "parse_mode": "HTML",
+        "reply_markup": keyboard,
+    })
+
+
+def handle_select_plan(callback_query: dict) -> None:
+    """處理使用者點選策略的 callback。記錄到 daily_tracker。"""
+    chat_id  = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+    data     = callback_query.get("data", "")
+    plan_type = data.split(":", 1)[1] if ":" in data else ""
+
+    valid_plans = {"aggressive", "balanced", "conservative"}
+    if plan_type not in valid_plans:
+        send_text(chat_id, f"❌ 錯誤：未知的策略類型「{plan_type}」")
+        return
+
+    label = _PLAN_LABEL.get(plan_type, plan_type)
+    emoji = _PLAN_EMOJI.get(plan_type, "📋")
+
+    # 記錄到 daily_tracker
+    record = DailyTrackRecord(
+        date=date.today(),
+        starting_capital=0.0,    # 呼叫端可補充正確資金
+        chosen_plan_type=plan_type,
+        results=[
+            PlanResult(plan_type=pt, pnl=None, pnl_pct=None,
+                       closing_capital=None, is_actual=(pt == plan_type))
+            for pt in ("aggressive", "balanced", "conservative")
+        ],
+    )
+    save_day_record(record)
+
+    send_text(
+        chat_id,
+        f"{emoji} <b>已選擇{label}（{plan_type}）</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"✅ 今日策略已記錄。\n"
+        f"盤後將自動追蹤此計劃的損益表現。",
+    )
+
+
 def handle_callback(callback_query: dict) -> None:
     chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
     data    = callback_query.get("data", "")
     cq_id   = callback_query.get("id", "")
 
     _post("answerCallbackQuery", {"callback_query_id": cq_id})
+
+    # ── 早晨策略選擇 ──
+    if data.startswith("select_plan:"):
+        handle_select_plan(callback_query)
+        return
 
     # ── 盤前選股確認（user_confirm.py 送出的 inline keyboard）──
     if data == "approve_all":
