@@ -958,6 +958,30 @@ def _render_strategy_tracker():
                 value=goal.approach if goal else "短線技術分析 + AI 輔助決策",
                 height=80,
             )
+
+            st.divider()
+            st.caption("🔧 進階風控設定（選填）")
+            col5, col6, col7 = st.columns(3)
+            stop_loss_pct_val = col5.number_input(
+                "停損 %（0=不設）",
+                min_value=0.0, max_value=50.0,
+                value=float(goal.stop_loss_pct or 0.0) if goal else 0.0,
+                step=0.5, format="%.1f",
+                help="每筆持倉虧損超過此 % 時停損，0 表示不設停損",
+            )
+            max_pos_val = col6.number_input(
+                "最多持倉檔數（0=不限）",
+                min_value=0, max_value=20,
+                value=int(goal.max_positions or 0) if goal else 0,
+                step=1,
+                help="同時持有的最大股票數量，0 表示不限",
+            )
+            allow_frac_val = col7.checkbox(
+                "允許零股",
+                value=bool(goal.allow_fractional) if goal else False,
+                help="整張買不起時可使用零股方式進場",
+            )
+
             if st.form_submit_button("💾 儲存目標", use_container_width=True):
                 if end <= start:
                     st.error("結束日必須晚於開始日")
@@ -968,6 +992,9 @@ def _render_strategy_tracker():
                         end_date=end,
                         initial_capital=init_cap,
                         approach=approach,
+                        stop_loss_pct=stop_loss_pct_val if stop_loss_pct_val > 0 else None,
+                        max_positions=int(max_pos_val) if max_pos_val > 0 else None,
+                        allow_fractional=allow_frac_val,
                     )
                     save_goal(new_goal, _GOAL_PATH)
                     st.success("目標已儲存")

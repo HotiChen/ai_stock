@@ -15,6 +15,23 @@ from strategy_tracker import StrategyGoal
 from portfolio import SimulatedPortfolio
 
 
+# ── StrategyPlannerGoal ───────────────���───────────────────────────────────────
+
+@dataclass
+class StrategyPlannerGoal:
+    """輕量的計劃生成參數，供 build_planner_prompt 使用。
+    與 StrategyGoal 並存；當不需要追蹤目標時可直接使用此類別。
+    """
+    initial_capital:   float
+    target_return_pct: float          # 目標報酬 %
+    max_drawdown_pct:  float          # 最大容忍回撤 %
+    holding_days:      int            # 預計持有天數
+    risk_level:        str            # "aggressive" | "moderate" | "conservative"
+    stop_loss_pct:     Optional[float] = None  # 停損觸發 % (e.g. 5.0 = -5%)
+    max_positions:     Optional[int]   = None  # 最多同時持有幾支
+    allow_fractional:  bool            = False  # 是否允許零股
+
+
 def _extract_json(raw: str) -> dict:
     """Try json.loads first; if that fails, find the outermost {...} block."""
     try:
@@ -151,15 +168,49 @@ def _build_positions_section(portfolio: Optional[SimulatedPortfolio]) -> str:
     return "\n".join(lines)
 
 
+def _goal_constraint_section(goal) -> str:
+    """從 goal 抽取停損/最大持倉/零股等限制，生成 prompt 段落。"""
+    lines = []
+
+    # 支援 StrategyGoal (stop_loss_pct, max_positions, allow_fractional) 及 StrategyPlannerGoal
+    stop_loss = getattr(goal, "stop_loss_pct", None)
+    max_pos   = getattr(goal, "max_positions", None)
+    allow_frac = getattr(goal, "allow_fractional", False)
+
+    if stop_loss is not None:
+        lines.append(f"- **停損規則**：每筆持倉虧損超過 {stop_loss:.1f}% 時必須停損出場")
+    if max_pos is not None:
+        lines.append(f"- **最多持倉**：同時持有不超過 {max_pos} 支股票")
+    if allow_frac:
+        lines.append("- **允許零股**：整張買不起時，請優先考慮零股（is_fractional=true）")
+    else:
+        lines.append("- **不使用零股**：僅考慮整張買賣（is_fractional=false）")
+
+    return "\n".join(lines) if lines else ""
+
+
 def build_planner_prompt(
-    goal: StrategyGoal,
+    goal,
     current_value: float,
     candidates: list[dict],
     market_summary: str = "",
     portfolio: Optional[SimulatedPortfolio] = None,
 ) -> str:
-    days_left = (goal.end_date - date.today()).days
-    target_pnl = goal.target_value - current_value
+    # 支援 StrategyGoal 和 StrategyPlannerGoal 兩種傳入方式
+    if hasattr(goal, "end_date"):
+        days_left = (goal.end_date - date.today()).days
+    else:
+        days_left = getattr(goal, "holding_days", 5)
+
+    if hasattr(goal, "target_value"):
+        target_pnl = goal.target_value - current_value
+        target_str = f"{goal.target_value:,.0f} 元（{goal.target_multiplier}x）"
+    else:
+        target_pct = getattr(goal, "target_return_pct", 10.0)
+        target_pnl = current_value * target_pct / 100
+        target_str = f"報酬率 {target_pct:.1f}%（目標獲利 {target_pnl:,.0f} 元）"
+
+    approach = getattr(goal, "approach", None) or getattr(goal, "risk_level", "moderate")
 
     stocks_text = ""
     for c in candidates:
@@ -186,11 +237,16 @@ def build_planner_prompt(
     if not stocks_text:
         stocks_text = f"（目前無本金 {current_value:,.0f} 元以內可買的候選股票）\n"
 
-    market_section    = f"\n=== 總體環境 ===\n{market_summary}\n" if market_summary else ""
-    positions_section = _build_positions_section(portfolio)
-    available_capital = (
+    market_section     = f"\n=== 總體環境 ===\n{market_summary}\n" if market_summary else ""
+    positions_section  = _build_positions_section(portfolio)
+    available_capital  = (
         portfolio.get_available_capital() if portfolio is not None
         else current_value
+    )
+    constraint_section = _goal_constraint_section(goal)
+    constraint_block   = (
+        f"\n=== 使用者自訂限制 ===\n{constraint_section}\n"
+        if constraint_section else ""
     )
 
     return f"""你是一位有野心的台股投資策略師，擅長把總體環境、產業趨勢、個股催化劑整合成具體可執行的投資計劃。
@@ -198,13 +254,13 @@ def build_planner_prompt(
 === 投資目標 ===
 初始本金：{goal.initial_capital:,.0f} 元
 目前資產：{current_value:,.0f} 元
-目標資產：{goal.target_value:,.0f} 元（{goal.target_multiplier}x）
+目標：{target_str}
 還需獲利：{target_pnl:,.0f} 元
 剩餘天數：{days_left} 天
-策略方向：{goal.approach}
+策略方向：{approach}
 {market_section}
 {positions_section}
-
+{constraint_block}
 === AI 分析過的候選股票（可用現金：{available_capital:,.0f} 元）===
 {stocks_text}
 === 任務 ===

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
@@ -19,6 +19,10 @@ class StrategyGoal:
     end_date:          date
     initial_capital:   float
     approach:          str
+    # Extended fields (optional, backward-compatible)
+    stop_loss_pct:    Optional[float] = None   # e.g. 5.0 means stop at -5%
+    max_positions:    Optional[int]   = None   # max number of concurrent positions
+    allow_fractional: bool            = False  # allow fractional (零股) trades
 
     @property
     def total_days(self) -> int:
@@ -61,6 +65,9 @@ def save_goal(goal: StrategyGoal, path: str) -> None:
         "end_date":          goal.end_date.isoformat(),
         "initial_capital":   goal.initial_capital,
         "approach":          goal.approach,
+        "stop_loss_pct":     goal.stop_loss_pct,
+        "max_positions":     goal.max_positions,
+        "allow_fractional":  goal.allow_fractional,
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -76,6 +83,9 @@ def load_goal(path: str) -> Optional[StrategyGoal]:
             end_date=date.fromisoformat(data["end_date"]),
             initial_capital=data["initial_capital"],
             approach=data["approach"],
+            stop_loss_pct=data.get("stop_loss_pct"),
+            max_positions=data.get("max_positions"),
+            allow_fractional=bool(data.get("allow_fractional", False)),
         )
     except Exception:
         return None
