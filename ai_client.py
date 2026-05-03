@@ -69,19 +69,29 @@ def call_sonnet(prompt: str, max_tokens: int = 8192) -> str:
 
 
 def call_gemini(prompt: str, max_tokens: int = 32_768) -> str:
-    """大 context 分析：7/14/28 天學習報告、長歷史策略回顧。失敗回傳空字串。"""
-    try:
-        resp = _get_gemini_client().models.generate_content(
-            model=_GEMINI_PRO_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=max_tokens,
-            ),
-        )
-        return resp.text or ""
-    except Exception as e:
-        log.error("call_gemini failed: %s", e)
-        return ""
+    """大 context 分析：7/14/28 天學習報告、長歷史策略回顧。
+    Pro 額度滿時自動 fallback 到 Flash。失敗回傳空字串。"""
+    for model in (_GEMINI_PRO_MODEL, _GEMINI_FLASH_MODEL):
+        try:
+            resp = _get_gemini_client().models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=max_tokens,
+                ),
+            )
+            if model != _GEMINI_PRO_MODEL:
+                log.warning("call_gemini: Pro quota exceeded, used Flash instead")
+            return resp.text or ""
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err or "quota" in err.lower():
+                log.warning("call_gemini %s quota exceeded, trying fallback...", model)
+                continue
+            log.error("call_gemini failed: %s", e)
+            return ""
+    log.error("call_gemini: all models exhausted")
+    return ""
 
 
 def call_gemini_with_search(prompt: str) -> str:

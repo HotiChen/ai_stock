@@ -90,78 +90,113 @@ def _fetch_rss_news(feeds: Optional[list[str]] = None) -> list[str]:
     return items
 
 
-def _fetch_twse_institutional(target_date: date) -> dict:
-    """TWSE 三大法人買賣超（外資 + 投信）。"""
-    result: dict = {"foreign_net": None, "trust_net": None}
+def _find_latest_trading_date(max_lookback: int = 7) -> Optional[date]:
+    """往前找最近的 TWSE 交易日（最多往前 max_lookback 天）。"""
     try:
         import requests  # type: ignore
+        for i in range(max_lookback):
+            d = date.today() - __import__("datetime").timedelta(days=i)
+            date_str = d.strftime("%Y%m%d")
+            url = (
+                f"https://www.twse.com.tw/rwd/zh/fund/BFI82U"
+                f"?response=json&dayDate={date_str}&type=day"
+            )
+            resp = requests.get(url, timeout=8, verify=False)
+            data = resp.json()
+            if data.get("stat") == "OK":
+                return d
+    except Exception as e:
+        log.warning("_find_latest_trading_date failed: %s", e)
+    return None
+
+
+def _fetch_twse_institutional(target_date: Optional[date] = None) -> dict:
+    """TWSE 三大法人買賣超彙總（BFI82U）。
+    target_date 為 None 時自動找最近交易日。
+    回傳：foreign_net / trust_net（億元，正=買超）、trading_date。
+    """
+    result: dict = {"foreign_net": None, "trust_net": None, "trading_date": None}
+    try:
+        import requests  # type: ignore
+        if target_date is None:
+            target_date = _find_latest_trading_date()
+        if target_date is None:
+            return result
+
         date_str = target_date.strftime("%Y%m%d")
         url = (
-            "https://www.twse.com.tw/rwd/zh/fund/T86"
-            f"?response=json&date={date_str}&selectType=ALL"
+            f"https://www.twse.com.tw/rwd/zh/fund/BFI82U"
+            f"?response=json&dayDate={date_str}&type=day"
         )
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        rows = data.get("data", [])
-        # 最後一列通常是合計
-        if rows:
-            total_row = rows[-1]
-            # 外資欄位（第 4 欄）+ 投信欄位（第 10 欄）—— 去除逗號並轉換為億
+        resp  = requests.get(url, timeout=10, verify=False)
+        data  = resp.json()
+        rows  = data.get("data", [])
+        result["trading_date"] = target_date.isoformat()
+
+        for row in rows:
+            name  = str(row[0])
+            net_s = str(row[3]).replace(",", "").replace(" ", "")
             try:
-                foreign_str = str(total_row[4]).replace(",", "").replace(" ", "")
-                result["foreign_net"] = round(float(foreign_str) / 1e8, 2)
+                net_val = round(float(net_s) / 1e8, 2)   # 元 → 億
             except Exception:
-                pass
-            try:
-                trust_str = str(total_row[10]).replace(",", "").replace(" ", "")
-                result["trust_net"] = round(float(trust_str) / 1e8, 2)
-            except Exception:
-                pass
+                continue
+            if name.startswith("外資及陸資"):
+                result["foreign_net"] = net_val
+            elif name == "投信":
+                result["trust_net"] = net_val
     except Exception as e:
         log.warning("TWSE institutional fetch failed: %s", e)
     return result
 
 
 def _fetch_us_market() -> dict:
-    """美股指數 + VIX via yfinance。"""
-    result: dict = {"sp500": None, "nasdaq": None, "sox": None, "vix": None}
+    """美股指數 + VIX + 台股大盤 via yfinance。"""
+    result: dict = {
+        "twse_index": None, "twse_volume": None,
+        "sp500": None, "nasdaq": None, "sox": None, "vix": None,
+    }
     try:
         import yfinance as yf  # type: ignore
         symbols = {
-            "sp500":  "^GSPC",
-            "nasdaq": "^IXIC",
-            "sox":    "^SOX",
-            "vix":    "^VIX",
+            "twse_index": "^TWII",   # 台股加權指數
+            "sp500":      "^GSPC",
+            "nasdaq":     "^IXIC",
+            "sox":        "^SOX",
+            "vix":        "^VIX",
         }
         for key, symbol in symbols.items():
             try:
                 ticker = yf.Ticker(symbol)
-                hist   = ticker.history(period="2d")
+                hist   = ticker.history(period="5d")
                 if not hist.empty:
                     result[key] = round(float(hist["Close"].iloc[-1]), 2)
+                    # 台股成交量（單位：張）→ 換算為億元（近似）
+                    if key == "twse_index" and "Volume" in hist.columns:
+                        # TWII Volume 是股數，不是金額，先留空由 TWSE API 提供
+                        pass
             except Exception as e:
                 log.warning("yfinance %s failed: %s", symbol, e)
     except ImportError:
-        log.warning("yfinance not installed, skipping US market data")
+        log.warning("yfinance not installed, skipping market data")
     return result
 
 
 def collect_market_data(target_date: Optional[date] = None) -> MarketData:
-    """整合 RSS + TWSE + 美股，回傳 MarketData。"""
+    """整合 RSS + TWSE + 美股（含台股大盤），回傳 MarketData。"""
     if target_date is None:
         target_date = date.today()
 
     news  = _fetch_rss_news()
-    twse  = _fetch_twse_institutional(target_date)
+    twse  = _fetch_twse_institutional()   # 自動找最近交易日
     us    = _fetch_us_market()
 
     return MarketData(
         date=target_date,
-        twse_index=None,      # 大盤收盤指數需另外抓（盤後才有）
-        twse_volume=None,
+        twse_index=us.get("twse_index"),   # ^TWII via yfinance
+        twse_volume=us.get("twse_volume"),
         foreign_net=twse.get("foreign_net"),
         trust_net=twse.get("trust_net"),
-        margin_balance=None,
+        margin_balance=None,               # 融資餘額需另外抓
         sp500=us.get("sp500"),
         nasdaq=us.get("nasdaq"),
         sox=us.get("sox"),
