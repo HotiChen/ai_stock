@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from typing import Callable
 
@@ -273,3 +274,99 @@ def filter_margin_risk(
             result.append(code)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 月營收 (MOPS)
+# ---------------------------------------------------------------------------
+
+MOPS_REVENUE_URL = "https://mops.twse.com.tw/mops/web/ajax_t05st10_ifrs"
+
+
+def fetch_monthly_revenue(year: int, month: int) -> dict[str, dict]:
+    """取得指定年月的上市公司月營收資料（MOPS）。
+
+    Args:
+        year: 西元年（例如 2025）。
+        month: 月份（1-12）。
+
+    Returns:
+        以股票代號為 key 的 dict，每筆包含：
+        - revenue: 當月營收（千元）
+        - prev_month_revenue: 上月營收（千元）
+        - prev_year_revenue: 去年同月營收（千元）
+        - mom_pct: 月增率 %
+        - yoy_pct: 年增率 %
+        網路錯誤或解析失敗時回傳空 dict。
+    """
+    roc_year = str(year - 1911)
+    month_str = f"{month:02d}"
+
+    try:
+        resp = requests.post(
+            MOPS_REVENUE_URL,
+            data={
+                "encodeURIComponent": 1,
+                "step": 1,
+                "firstin": 1,
+                "off": 1,
+                "TYPEK": "sii",
+                "year": roc_year,
+                "month": month_str,
+            },
+            timeout=15,
+        )
+        html = resp.text
+    except Exception:
+        return {}
+
+    result: dict[str, dict] = {}
+    # 找出每一個 <tr>...</tr> 區塊
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL)
+    for row in rows:
+        # 抽出每個 <td> 的文字內容
+        cells = re.findall(r"<td[^>]*>\s*([^<]*?)\s*</td>", row)
+        if len(cells) < 7:
+            continue
+        try:
+            code = cells[0].strip()
+            # 股票代號必須為純數字
+            if not code.isdigit():
+                continue
+            revenue = _parse_number(cells[2])
+            prev_month_revenue = _parse_number(cells[3])
+            prev_year_revenue = _parse_number(cells[4])
+            mom_pct = float(cells[5].replace(",", ""))
+            yoy_pct = float(cells[6].replace(",", ""))
+            result[code] = {
+                "revenue": revenue,
+                "prev_month_revenue": prev_month_revenue,
+                "prev_year_revenue": prev_year_revenue,
+                "mom_pct": mom_pct,
+                "yoy_pct": yoy_pct,
+            }
+        except (ValueError, IndexError, AttributeError):
+            continue
+
+    return result
+
+
+def filter_revenue_growth(
+    data: dict,
+    min_yoy_pct: float = 10.0,
+) -> list[str]:
+    """篩選年增率達到門檻的股票代號。
+
+    Args:
+        data: fetch_monthly_revenue 的回傳值。
+        min_yoy_pct: 年增率門檻（%），預設 10.0。
+
+    Returns:
+        yoy_pct >= min_yoy_pct 的股票代號清單。
+    """
+    if not data:
+        return []
+    return [
+        code for code, info in data.items()
+        if info.get("yoy_pct", 0) >= min_yoy_pct
+    ]

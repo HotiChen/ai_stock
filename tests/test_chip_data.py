@@ -8,8 +8,10 @@ import pytest
 from chip_data import (
     fetch_institutional_investors,
     fetch_margin_trading,
+    fetch_monthly_revenue,
     filter_institutional_strong,
     filter_margin_risk,
+    filter_revenue_growth,
     get_continuous_buy_days,
 )
 
@@ -362,3 +364,123 @@ class TestFilterMarginRisk:
         """空資料回傳 []"""
         result = filter_margin_risk({})
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# fetch_monthly_revenue
+# ---------------------------------------------------------------------------
+
+# 模擬 MOPS 回傳的 HTML 片段（含兩筆正常資料與一筆無效資料）
+SAMPLE_MOPS_HTML = """
+<html><body>
+<table>
+<tr>
+  <td>2330</td><td>台積電</td><td>250,000,000</td>
+  <td>240,000,000</td><td>220,000,000</td><td>4.17</td><td>13.64</td><td>extra</td>
+</tr>
+<tr>
+  <td>2454</td><td>聯發科</td><td>50,000,000</td>
+  <td>48,000,000</td><td>60,000,000</td><td>4.17</td><td>-16.67</td><td>extra</td>
+</tr>
+<tr>
+  <td>INVALID</td><td>壞資料</td><td>not_a_number</td>
+  <td>48,000,000</td><td>60,000,000</td><td>4.17</td><td>-16.67</td><td>extra</td>
+</tr>
+</table>
+</body></html>
+"""
+
+
+class TestFetchMonthlyRevenue:
+    def test_normal_parse(self):
+        """正常解析 MOPS HTML，含 revenue/mom_pct/yoy_pct"""
+        with patch("chip_data.requests.post") as mock_post:
+            mock_resp = MagicMock()
+            mock_resp.text = SAMPLE_MOPS_HTML
+            mock_post.return_value = mock_resp
+
+            result = fetch_monthly_revenue(2025, 3)
+
+        assert "2330" in result
+        assert result["2330"]["revenue"] == 250_000_000.0
+        assert result["2330"]["prev_month_revenue"] == 240_000_000.0
+        assert result["2330"]["prev_year_revenue"] == 220_000_000.0
+        assert result["2330"]["mom_pct"] == pytest.approx(4.17)
+        assert result["2330"]["yoy_pct"] == pytest.approx(13.64)
+
+        assert "2454" in result
+        assert result["2454"]["yoy_pct"] == pytest.approx(-16.67)
+
+    def test_invalid_rows_skipped(self):
+        """無效列（非數字營收）直接跳過，不影響其他資料"""
+        with patch("chip_data.requests.post") as mock_post:
+            mock_resp = MagicMock()
+            mock_resp.text = SAMPLE_MOPS_HTML
+            mock_post.return_value = mock_resp
+
+            result = fetch_monthly_revenue(2025, 3)
+
+        assert "INVALID" not in result
+        assert len(result) == 2
+
+    def test_roc_year_and_month_padding(self):
+        """民國年轉換正確（西元-1911），月份補零"""
+        with patch("chip_data.requests.post") as mock_post:
+            mock_resp = MagicMock()
+            mock_resp.text = SAMPLE_MOPS_HTML
+            mock_post.return_value = mock_resp
+
+            fetch_monthly_revenue(2025, 3)
+
+            call_kwargs = mock_post.call_args
+            posted_data = call_kwargs[1].get("data") or call_kwargs[0][1]
+            assert posted_data["year"] == "114"   # 2025 - 1911
+            assert posted_data["month"] == "03"   # 補零
+
+    def test_network_error_returns_empty(self):
+        """網路錯誤時回傳空 dict，不 raise"""
+        with patch("chip_data.requests.post") as mock_post:
+            mock_post.side_effect = Exception("Network error")
+
+            result = fetch_monthly_revenue(2025, 3)
+
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# filter_revenue_growth
+# ---------------------------------------------------------------------------
+
+
+class TestFilterRevenueGrowth:
+    def _sample_data(self):
+        return {
+            "2330": {"revenue": 250_000_000.0, "prev_month_revenue": 240_000_000.0,
+                     "prev_year_revenue": 220_000_000.0, "mom_pct": 4.17, "yoy_pct": 13.64},
+            "2454": {"revenue": 50_000_000.0, "prev_month_revenue": 48_000_000.0,
+                     "prev_year_revenue": 60_000_000.0, "mom_pct": 4.17, "yoy_pct": -16.67},
+            "6505": {"revenue": 80_000_000.0, "prev_month_revenue": 75_000_000.0,
+                     "prev_year_revenue": 70_000_000.0, "mom_pct": 6.67, "yoy_pct": 14.29},
+        }
+
+    def test_above_threshold_returned(self):
+        """年增率 >= 門檻的股票回傳"""
+        result = filter_revenue_growth(self._sample_data(), min_yoy_pct=10.0)
+        assert "2330" in result   # yoy=13.64 >= 10
+        assert "6505" in result   # yoy=14.29 >= 10
+        assert "2454" not in result  # yoy=-16.67 < 10
+
+    def test_below_threshold_excluded(self):
+        """年增率 < 門檻不回傳"""
+        result = filter_revenue_growth(self._sample_data(), min_yoy_pct=20.0)
+        assert result == []
+
+    def test_default_threshold_is_10(self):
+        """預設門檻 10%"""
+        result = filter_revenue_growth(self._sample_data())
+        assert "2330" in result
+        assert "2454" not in result
+
+    def test_empty_data_returns_empty(self):
+        """空資料回傳 []"""
+        assert filter_revenue_growth({}) == []
