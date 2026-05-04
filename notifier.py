@@ -252,6 +252,40 @@ def notify_snapshot(code: str, name: str, price: float, change_price: float) -> 
 
 # ── 收盤 ──────────────────────────────────────────────────────────────────────
 
+def notify_settlement(
+    plan_type: str,
+    settlement: dict,
+    entry_date: str = "",
+) -> None:
+    """推播模擬結算結果到 Telegram。"""
+    total_pnl     = settlement.get("total_pnl", 0.0)
+    total_pnl_pct = settlement.get("total_pnl_pct", 0.0)
+    per_stock     = settlement.get("per_stock", [])
+    pnl_emoji     = "📈" if total_pnl >= 0 else "📉"
+    plan_zh       = {"aggressive": "積極版", "balanced": "均衡版", "conservative": "保守版"}.get(plan_type, plan_type)
+
+    lines = [
+        f"{pnl_emoji} <b>模擬結算結果</b>  {_ts()}",
+        f"━━━━━━━━━━━━━━━━",
+        f"策略：{plan_zh}",
+        f"買入日：{entry_date}" if entry_date else "",
+        f"總損益：<b>{total_pnl:+,.0f} 元（{total_pnl_pct:+.2f}%）</b>",
+        f"",
+        f"<b>個股明細：</b>",
+    ]
+    lines = [l for l in lines if l != ""]
+
+    for s in per_stock:
+        icon = "🟢" if s["pnl"] >= 0 else "🔴"
+        lines.append(
+            f"{icon} {s['code']} {s['name']}"
+            f"　{s['entry_price']:.1f}→{s['closing_price']:.1f}"
+            f"　{s['pnl']:+,.0f}元"
+        )
+
+    _send("\n".join(lines))
+
+
 def notify_market_close(
     total_pnl: float,
     trade_count: int,

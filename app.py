@@ -79,6 +79,10 @@ from strategy_tracker import (
     save_daily_entry,
     save_goal,
 )
+from sim_position_store import SimPosition, save_sim_positions, load_sim_positions, clear_sim_positions
+from sim_settlement import settle_positions, fetch_closing_prices
+from notifier import notify_settlement
+from telegram_bot import send_morning_push
 
 load_dotenv()
 
@@ -183,6 +187,7 @@ def fetch_positions() -> list[dict]:
 
 @st.cache_data(ttl=300)
 def fetch_theme_snaps(theme: str) -> dict[str, dict]:
+    import threading
     api = get_api()
     name_map = get_name_map()
     codes = THEME_GROUPS.get(theme, [])
@@ -190,17 +195,28 @@ def fetch_theme_snaps(theme: str) -> dict[str, dict]:
     if not contracts:
         return {}
     result = {}
-    try:
-        snaps = api.snapshots(contracts)
-        for snap in snaps:
+    _snaps: list = []
+
+    def _fetch():
+        try:
+            _snaps.extend(api.snapshots(contracts))
+        except Exception as e:
+            print(f"fetch_theme_snaps error {theme}: {e}")
+
+    t = threading.Thread(target=_fetch, daemon=True)  # daemon=True：主程式不等它
+    t.start()
+    t.join(timeout=6)   # 最多等 6 秒，之後不管它繼續跑
+    if not t.is_alive():
+        # thread 正常完成
+        for snap in _snaps:
             result[snap.code] = {
                 "name": name_map.get(snap.code, snap.code),
                 "close": snap.close, "change_rate": snap.change_rate,
                 "change_price": snap.change_price, "total_volume": snap.total_volume,
                 "open": snap.open, "high": snap.high, "low": snap.low,
             }
-    except Exception as e:
-        print(f"Failed to fetch theme snaps for {theme}: {e}")
+    else:
+        print(f"fetch_theme_snaps timeout: {theme}（超過 6 秒，略過）")
     return result
 
 
@@ -981,6 +997,11 @@ def _render_strategy_tracker():
                 value=bool(goal.allow_fractional) if goal else False,
                 help="整張買不起時可使用零股方式進場",
             )
+            allow_day_trade_val = col7.checkbox(
+                "允許當沖",
+                value=bool(goal.allow_day_trade) if goal else False,
+                help="允許 AI 建議當日沖銷操作（買進當天即賣出）",
+            )
 
             if st.form_submit_button("💾 儲存目標", use_container_width=True):
                 if end <= start:
@@ -995,6 +1016,7 @@ def _render_strategy_tracker():
                         stop_loss_pct=stop_loss_pct_val if stop_loss_pct_val > 0 else None,
                         max_positions=int(max_pos_val) if max_pos_val > 0 else None,
                         allow_fractional=allow_frac_val,
+                        allow_day_trade=allow_day_trade_val,
                     )
                     save_goal(new_goal, _GOAL_PATH)
                     st.success("目標已儲存")
@@ -1121,8 +1143,11 @@ def _render_strategy_tracker():
     st.caption("AI 會分析候選股票後，生成衝刺版 / 均衡版 / 保守版三套計劃")
 
     def _build_candidates() -> list[dict]:
-        """從 ai_log 抓候選股票，去重補價，最多 10 支。"""
+        """從 ai_log 抓候選股票 + 隨機 20 支主題股，去重補價。"""
+        import random
         raw: list[dict] = []
+
+        # ── 1. 從 ai_log 抓最近紀錄 ──────────────────────────────
         log_path = Path("data/ai_log.jsonl")
         if log_path.exists():
             with log_path.open(encoding="utf-8") as f:
@@ -1140,6 +1165,7 @@ def _render_strategy_tracker():
                             })
                     except Exception:
                         pass
+
         seen: set[str] = set()
         deduped = []
         for c in reversed(raw):
@@ -1148,6 +1174,26 @@ def _render_strategy_tracker():
                 deduped.append(c)
             if len(deduped) >= 10:
                 break
+
+        # ── 2. 從所有主題池隨機補 20 支 ──────────────────────────
+        all_theme_codes = list({
+            code
+            for codes in THEME_GROUPS.values()
+            for code in codes
+        })
+        random.shuffle(all_theme_codes)
+        for code in all_theme_codes:
+            if code not in seen and len(deduped) < 30:
+                seen.add(code)
+                deduped.append({
+                    "code":        code,
+                    "name":        code,
+                    "close":       0.0,
+                    "change_rate": 0.0,
+                    "analysis":    "主題池補充（無個股分析，請依技術面自行評估）",
+                })
+
+        # ── 3. 補齊名稱與即時股價 ────────────────────────────────
         nm   = get_name_map()
         _api = get_api()
         for c in deduped:
@@ -1161,27 +1207,41 @@ def _render_strategy_tracker():
                         c["change_rate"] = float(snaps[0].change_rate)
             except Exception:
                 pass
+        print(f"[_build_candidates] ai_log={len([c for c in deduped if c['analysis'] != '隨機主題候選'])} 支，隨機主題={len([c for c in deduped if c['analysis'] == '隨機主題候選'])} 支，共 {len(deduped)} 支", flush=True)
         return deduped
 
     col_gen, col_clear = st.columns([3, 1])
     if col_gen.button("🚀 生成三套投資計劃", use_container_width=True, type="primary"):
+        print("開始執行 ai 策略生成", flush=True)
+        st.components.v1.html('<script>console.log("開始執行 ai 策略生成")</script>', height=0)
         deduped = _build_candidates()
+        print(f"[策略生成] 開始｜current_value={current_value:,.0f}｜候選股 {len(deduped)} 支：{[c['code'] for c in deduped]}")
 
         with st.spinner("AI 分析中，約需 30–60 秒..."):
+            print("[策略生成] 呼叫 Claude API...")
             plan_set = generate_strategy_plans(goal, current_value, deduped)
         if plan_set is None:
+            print("[策略生成] ❌ generate_strategy_plans 回傳 None")
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
             if not api_key:
                 st.error("生成失敗，請確認 ANTHROPIC_API_KEY 已設定")
             else:
                 st.error(f"生成失敗（API Key 已設定，但 AI 回應解析失敗）。請查看終端機 log 取得詳細錯誤。")
         else:
+            picks = {pt: len(getattr(plan_set, pt).picks) for pt in ("aggressive", "balanced", "conservative")}
+            print(f"[策略生成] ✅ 成功｜picks={picks}")
             st.session_state["_plan_set"] = plan_set
             try:
                 saved_path = save_sim_plan(plan_set)
                 st.toast(f"計劃已存檔：{saved_path.name}", icon="💾")
             except Exception:
                 pass
+            # 推播三套策略到 Telegram，讓使用者選擇
+            try:
+                send_morning_push(briefing=None, plan_set=plan_set, starting_capital=current_value)
+                st.toast("📨 三套策略已推播到 Telegram，請在 Telegram 選擇執行哪套", icon="📨")
+            except Exception as _te:
+                print(f"[Telegram] 推播失敗：{_te}", flush=True)
             st.rerun()
 
     if col_clear.button("🗑️ 清除", use_container_width=True):
@@ -1256,10 +1316,11 @@ def _render_strategy_tracker():
                 # 計算本套計劃總成本
                 _plan_total = 0
                 _pick_costs = {}
+                _BUY_ACTIONS = {"buy", "open", "add"}
                 for pick in plan.picks:
                     _, _snap = fetch_snapshot(pick.code)
                     _px = float(_snap.close) if _snap else 0.0
-                    if pick.action == "buy":
+                    if pick.action in _BUY_ACTIONS:
                         _cost = _px * 1000 * pick.quantity if pick.quantity else _px * (pick.shares or 0)
                         _pick_costs[pick.code] = (_px, _cost)
                         _plan_total += _cost
@@ -1273,7 +1334,7 @@ def _render_strategy_tracker():
                     f"📌 **這是三套方案之一，選其中一套執行。**\n執行後系統會**同時買進**此套計劃內所有股票。"
                 )
                 for pick in plan.picks:
-                    action_icon = "🟢" if pick.action == "buy" else "⬜"
+                    action_icon = {"buy": "🟢", "open": "🟢", "add": "🔵", "reduce": "🟡", "close": "🔴", "switch": "🔄"}.get(pick.action, "⬜")
                     _px, _cost = _pick_costs.get(pick.code, (0.0, 0.0))
                     price_text = f"現價 {_px:.2f}" if _px else "無報價"
                     cost_text  = f"需 {_cost:,.0f} 元" if _cost else ""
@@ -1326,6 +1387,46 @@ def _render_strategy_tracker():
                     except Exception:
                         pass
 
+                    # ── 記錄模擬持倉（抓當前股價作為買入價）──
+                    try:
+                        _api = get_api()
+                        _nm  = get_name_map()
+                        _sim_positions: list[SimPosition] = []
+                        for _pick in plan.picks:
+                            _entry_price = _pick.entry_price if hasattr(_pick, "entry_price") and _pick.entry_price else 0.0
+                            try:
+                                _contract = _api.Contracts.Stocks.get(_pick.code)
+                                if _contract:
+                                    import threading as _th
+                                    _snap_result: list = []
+                                    def _snap_fetch():
+                                        try:
+                                            _snap_result.extend(_api.snapshots([_contract]))
+                                        except Exception:
+                                            pass
+                                    _t = _th.Thread(target=_snap_fetch, daemon=True)
+                                    _t.start()
+                                    _t.join(timeout=6)
+                                    if _snap_result:
+                                        _entry_price = float(_snap_result[0].close)
+                            except Exception:
+                                pass
+                            _sim_positions.append(SimPosition(
+                                code=_pick.code,
+                                name=_nm.get(_pick.code, _pick.name),
+                                entry_price=_entry_price,
+                                shares=getattr(_pick, "shares", 0),
+                                quantity=getattr(_pick, "quantity", 0),
+                                is_fractional=getattr(_pick, "is_fractional", False),
+                                plan_type=plan.plan_type,
+                                entry_date=date.today().isoformat(),
+                            ))
+                        save_sim_positions(_sim_positions)
+                        print(f"[模擬持倉] 已記錄 {len(_sim_positions)} 支股票買入價", flush=True)
+                        st.toast(f"📌 已記錄 {len(_sim_positions)} 支模擬持倉", icon="📌")
+                    except Exception as _e:
+                        print(f"[模擬持倉] 記錄失敗：{_e}", flush=True)
+
                     st.success(f"✅ 已啟動！ID: {exec_id}")
                     st.rerun()
 
@@ -1336,10 +1437,18 @@ def _render_strategy_tracker():
         with st.expander(f"📂 歷史計劃（共 {len(_saved_plans)} 份）", expanded=False):
             st.caption("可載入舊計劃繼續檢視，或以其收盤資金為基準重新生成下一天的三套計劃。")
             for entry in _saved_plans:
-                col_info, col_load, col_regen, col_del = st.columns([3, 1, 2, 1])
+                col_info, col_preview, col_load, col_regen, col_del = st.columns([3, 1, 1, 2, 1])
                 col_info.markdown(
                     f"**{entry['day_label']}**　📅 {entry['plan_date']}"
                 )
+                preview_key = f"_preview_{entry['filename']}"
+                if col_preview.button("👁", key=f"prev_{entry['filename']}", use_container_width=True, help="預覽策略內容"):
+                    if st.session_state.get(preview_key):
+                        st.session_state.pop(preview_key)
+                    else:
+                        prev_plan = load_sim_plan(entry["filename"], plan_dir=_sim_plan_dir)
+                        if prev_plan:
+                            st.session_state[preview_key] = prev_plan
                 if col_load.button("載入", key=f"load_{entry['filename']}", use_container_width=True):
                     loaded = load_sim_plan(entry["filename"], plan_dir=_sim_plan_dir)
                     if loaded:
@@ -1355,6 +1464,24 @@ def _render_strategy_tracker():
                         st.rerun()
                     except Exception as e:
                         st.error(f"刪除失敗：{e}")
+
+                # 預覽展開
+                if st.session_state.get(preview_key):
+                    _prev = st.session_state[preview_key]
+                    for _pt, _label in [("aggressive", "🔴 積極版"), ("balanced", "⚖️ 均衡版"), ("conservative", "🟢 保守版")]:
+                        _plan = getattr(_prev, _pt, None)
+                        if _plan is None:
+                            continue
+                        with st.expander(f"{_label}　{_plan.description[:30]}...", expanded=False):
+                            for _pick in _plan.picks:
+                                st.markdown(
+                                    f"**{_pick.code} {_pick.name}**　"
+                                    f"預期 +{_pick.expected_return_pct:.0f}%　"
+                                    f"持有 {_pick.hold_days} 天　"
+                                    f"信心 {_pick.confidence}/10"
+                                )
+                                st.caption(_pick.reason)
+                    st.divider()
 
                 # 重新生成：讓使用者輸入當天收盤後的資金，以此作為下一天的起始資金
                 regen_key = f"regen_cap_{entry['filename']}"
@@ -1383,14 +1510,23 @@ def _render_strategy_tracker():
                 if col_ok.button("✅ 確認，重新生成", use_container_width=True, type="primary"):
                     regen_goal = StrategyGoal(
                         initial_capital=new_cap,
-                        target_return_pct=goal.target_return_pct,
-                        max_drawdown_pct=goal.max_drawdown_pct,
-                        holding_days=goal.holding_days,
-                        risk_level=goal.risk_level,
+                        target_multiplier=goal.target_multiplier,
+                        start_date=goal.start_date,
+                        end_date=goal.end_date,
+                        approach=goal.approach,
+                        stop_loss_pct=goal.stop_loss_pct,
+                        max_positions=goal.max_positions,
+                        allow_fractional=goal.allow_fractional,
+                        allow_day_trade=goal.allow_day_trade,
                     )
+                    print(f"[策略重新生成] 開始｜new_cap={new_cap:,.0f}")
                     with st.spinner("AI 分析中，約需 30–60 秒..."):
-                        plan_set = generate_strategy_plans(regen_goal, new_cap, _build_candidates())
+                        _cands = _build_candidates()
+                        print(f"[策略重新生成] 候選股 {len(_cands)} 支：{[c['code'] for c in _cands]}")
+                        print("[策略重新生成] 呼叫 Claude API...")
+                        plan_set = generate_strategy_plans(regen_goal, new_cap, _cands)
                     if plan_set:
+                        print(f"[策略重新生成] ✅ 成功")
                         st.session_state["_plan_set"] = plan_set
                         try:
                             sp = save_sim_plan(plan_set)
@@ -1429,9 +1565,43 @@ def _render_strategy_tracker():
 
     # ── 今日紀錄 ──────────────────────────────────────────────────
     st.markdown("#### 📝 今日紀錄")
+
+    # 自動結算按鈕
+    _sim_pos_path = "data/sim_positions.json"
+    _sim_positions = load_sim_positions(_sim_pos_path)
+    if _sim_positions:
+        st.caption(f"📌 有 {len(_sim_positions)} 支模擬持倉（{_sim_positions[0].plan_type}，買入日：{_sim_positions[0].entry_date}）")
+        if st.button("📊 自動結算（抓收盤價計算損益）", use_container_width=True):
+            with st.spinner("抓收盤價中..."):
+                _api = get_api()
+                _codes = [p.code for p in _sim_positions]
+                _price_map = fetch_closing_prices(_api, _codes)
+            if not _price_map:
+                st.warning("收盤價抓取失敗或超時，請稍後再試")
+            else:
+                _settlement = settle_positions(_sim_positions, _price_map)
+                st.session_state["_auto_pnl"] = _settlement["total_pnl"]
+                st.success(f"結算完成！總損益：{_settlement['total_pnl']:+,.0f} 元（{_settlement['total_pnl_pct']:+.2f}%）")
+                for _s in _settlement["per_stock"]:
+                    _icon = "🟢" if _s["pnl"] >= 0 else "🔴"
+                    st.caption(f"{_icon} {_s['code']} {_s['name']}　買入 {_s['entry_price']:.1f} → 收盤 {_s['closing_price']:.1f}　損益 {_s['pnl']:+,.0f} 元")
+                # 推播到 Telegram
+                try:
+                    notify_settlement(
+                        plan_type=_sim_positions[0].plan_type,
+                        settlement=_settlement,
+                        entry_date=_sim_positions[0].entry_date,
+                    )
+                    st.toast("📨 已推播到 Telegram", icon="📨")
+                except Exception as _ne:
+                    print(f"[Telegram] 推播失敗：{_ne}", flush=True)
+                st.rerun()
+    _auto_pnl = st.session_state.pop("_auto_pnl", None)
+
     with st.form("daily_form"):
         col_p, col_t = st.columns(2)
-        pnl_input    = col_p.number_input("今日損益（元）", value=float(today_entry.pnl if today_entry else 0.0), step=100.0, format="%.0f")
+        _pnl_default = float(_auto_pnl if _auto_pnl is not None else (today_entry.pnl if today_entry else 0.0))
+        pnl_input    = col_p.number_input("今日損益（元）", value=_pnl_default, step=100.0, format="%.0f")
         trades_input = col_t.number_input("今日交易次數", min_value=0, value=int(today_entry.trades_count if today_entry else 0))
         review_input = st.text_area("今日檢討（手動填寫，或點下方讓 AI 生成）",
                                     value=today_entry.review if today_entry else "", height=80)

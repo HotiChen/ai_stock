@@ -34,6 +34,7 @@ from research_db import (
 from daily_tracker import DailyTrackRecord, PlanResult, save_day_record
 from portfolio import SimulatedPortfolio
 from sim_plan_store import planset_to_dict, planset_from_dict
+from sim_position_store import SimPosition, save_sim_positions
 import json
 
 log = get_logger(__name__)
@@ -42,6 +43,24 @@ BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID     = os.getenv("TELEGRAM_CHAT_ID", "")
 DB_PATH     = os.getenv("DB_PATH", "data/research.db")
 _POLL_TIMEOUT = 30  # long polling seconds
+
+# ── Shioaji singleton（避免在 callback 裡重複 login）─────────────────────────
+_sj_api = None
+
+def _get_sj_api():
+    """取得（或建立）Shioaji singleton，避免每次 callback 都重新 login。"""
+    global _sj_api
+    if _sj_api is not None:
+        return _sj_api
+    try:
+        import shioaji as _sj
+        _sj_api = _sj.Shioaji(simulation=True)
+        _sj_api.login(os.getenv("SHIOAJI_API_KEY", ""), os.getenv("SHIOAJI_SECRET_KEY", ""))
+        log.info("Shioaji singleton initialized")
+    except Exception as e:
+        log.warning("Shioaji singleton init failed: %s", e)
+        _sj_api = None
+    return _sj_api
 
 
 # ── Telegram API helpers ───────────────────────────────────────────────────────
@@ -169,7 +188,9 @@ def handle_stop_loss(chat_id: str) -> None:
         "🛡️ <b>停損設定</b>\n━━━━━━━━━━━━━━━━\n"
         "請輸入停損指令，格式：\n\n"
         "<code>停損 2330 540</code>\n\n"
-        "（代號 + 停損價格）"
+        "（代號 + 停損價格）\n\n"
+        "⚠️ <b>重要提醒</b>：目前停損為<b>提醒功能</b>，系統不會自動賣出。\n"
+        "觸發停損時會推播通知，請手動執行賣出操作。"
     )
 
 
@@ -462,12 +483,13 @@ def send_morning_push(briefing, plan_set, starting_capital: float = 0.0) -> None
     # 0. 把 PlanSet 存起來，等使用者選擇後執行
     save_pending_planset(plan_set)
 
-    # 1. 早晨簡報
-    _post("sendMessage", {
-        "chat_id": CHAT_ID,
-        "text": format_briefing_message(briefing),
-        "parse_mode": "HTML",
-    })
+    # 1. 早晨簡報（沒有 briefing 時跳過）
+    if briefing is not None:
+        _post("sendMessage", {
+            "chat_id": CHAT_ID,
+            "text": format_briefing_message(briefing),
+            "parse_mode": "HTML",
+        })
 
     # 2. 三套策略 card（各一則）
     for plan in (plan_set.aggressive, plan_set.balanced, plan_set.conservative):
@@ -552,22 +574,135 @@ def handle_select_plan(callback_query: dict) -> None:
     )
     save_day_record(record)
 
-    # 4. 回傳確認訊息
-    exec_summary = "\n".join(exec_lines) if exec_lines else "（無需執行任何動作）"
-    try:
-        cash_str = f"{portfolio.get_available_capital():,.0f}"
-    except (TypeError, ValueError):
-        cash_str = str(portfolio.get_available_capital())
+    # 4. 抓即時股價，組詳細確認訊息
+    import threading as _th
+    import shioaji as _sj
+
+    stock_lines: list[str] = []
+    sim_positions: list[SimPosition] = []
+    total_cost = 0.0
+
+    if plan_set is not None:
+        plan = getattr(plan_set, plan_type)
+        try:
+            _api = _get_sj_api()
+            if _api is None:
+                raise RuntimeError("Shioaji 無法連線")
+            for p in plan.picks:
+                try:
+                    contract = _api.Contracts.Stocks.get(p.code)
+                    _result: list = []
+                    def _fetch(_c=contract, _r=_result):
+                        try: _r.extend(_api.snapshots([_c]))
+                        except: pass
+                    _t = _th.Thread(target=_fetch, daemon=True)
+                    _t.start(); _t.join(timeout=6)
+                    price = float(_result[0].close) if _result else 0.0
+                except Exception:
+                    price = 0.0
+                qty_str = f"{p.shares} 股（零股）" if p.is_fractional else f"{p.quantity} 張"
+                cost = p.shares * price if p.is_fractional else p.quantity * 1000 * price
+                total_cost += cost
+                stock_lines.append(
+                    f"  • {p.code} {p.name}｜{qty_str}｜@{price:.1f} 元｜≈ {cost:,.0f} 元"
+                )
+                sim_positions.append(SimPosition(
+                    code=p.code,
+                    name=p.name,
+                    entry_price=price,
+                    shares=getattr(p, "shares", 0),
+                    quantity=getattr(p, "quantity", 0),
+                    is_fractional=getattr(p, "is_fractional", False),
+                    plan_type=plan_type,
+                    entry_date=date.today().isoformat(),
+                ))
+            # 儲存模擬持倉
+            if sim_positions:
+                try:
+                    save_sim_positions(sim_positions)
+                    log.info("sim_positions saved: %d stocks", len(sim_positions))
+                except Exception as _se:
+                    log.warning("save_sim_positions failed: %s", _se)
+        except Exception:
+            pass
+
+    stock_section = "\n".join(stock_lines) if stock_lines else "  （無股票明細）"
+    total_str = f"{total_cost:,.0f}" if total_cost > 0 else "—"
 
     send_text(
         chat_id,
-        f"{emoji} <b>已選擇並執行{label}（{plan_type}）</b>\n"
+        f"✅ <b>{emoji} {label}策略已確認執行</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"{exec_summary}\n"
+        f"📅 {date.today()}　{emoji} {label}\n\n"
+        f"<b>模擬買入明細：</b>\n"
+        f"{stock_section}\n\n"
+        f"💰 <b>合計投入：{total_str} 元</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"💰 剩餘現金：{cash_str} 元\n"
-        f"✅ 今日策略已記錄，盤後追蹤損益。",
+        f"收盤後點下方按鈕結算損益 👇",
+        reply_markup={
+            "inline_keyboard": [[
+                {"text": "📊 收盤結算", "callback_data": "settle_now"},
+            ]]
+        },
     )
+
+
+def handle_settle_now(chat_id: str) -> None:
+    """抓收盤價結算模擬持倉，推播結果到 Telegram。"""
+    import threading as _th
+    import shioaji as _sj
+    from sim_position_store import load_sim_positions
+    from sim_settlement import settle_positions, fetch_closing_prices
+    from notifier import notify_settlement
+
+    positions = load_sim_positions()
+    if not positions:
+        send_text(chat_id, "⚠️ 沒有模擬持倉紀錄，請先選擇今日策略。")
+        return
+
+    send_text(chat_id, "⏳ 抓取收盤價中，請稍候...")
+
+    try:
+        _api = _get_sj_api()
+        if _api is None:
+            raise RuntimeError("Shioaji 無法連線")
+        codes = [p.code for p in positions]
+        price_map = fetch_closing_prices(_api, codes)
+    except Exception as e:
+        send_text(chat_id, f"❌ 收盤價抓取失敗：{e}")
+        return
+
+    if not price_map:
+        send_text(chat_id, "❌ 收盤價抓取超時，請稍後再試。")
+        return
+
+    settlement = settle_positions(positions, price_map)
+    total_pnl     = settlement["total_pnl"]
+    total_pnl_pct = settlement["total_pnl_pct"]
+    per_stock     = settlement["per_stock"]
+    plan_type     = positions[0].plan_type
+    entry_date    = positions[0].entry_date
+
+    pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+    plan_zh   = {"aggressive": "積極版", "balanced": "均衡版", "conservative": "保守版"}.get(plan_type, plan_type)
+
+    lines = [
+        f"{pnl_emoji} <b>收盤結算結果</b>",
+        f"━━━━━━━━━━━━━━━━",
+        f"策略：{plan_zh}　買入日：{entry_date}",
+        f"總損益：<b>{total_pnl:+,.0f} 元（{total_pnl_pct:+.2f}%）</b>",
+        "",
+        "<b>個股明細：</b>",
+    ]
+    for s in per_stock:
+        icon = "🟢" if s["pnl"] >= 0 else "🔴"
+        lines.append(
+            f"{icon} {s['code']} {s['name']}"
+            f"　{s['entry_price']:.1f}→{s['closing_price']:.1f}"
+            f"　{s['pnl']:+,.0f} 元"
+        )
+
+    send_text(chat_id, "\n".join(lines))
 
 
 def handle_callback(callback_query: dict) -> None:
@@ -580,6 +715,11 @@ def handle_callback(callback_query: dict) -> None:
     # ── 早晨策略選擇 ──
     if data.startswith("select_plan:"):
         handle_select_plan(callback_query)
+        return
+
+    # ── 收盤結算 ──
+    if data == "settle_now":
+        handle_settle_now(chat_id)
         return
 
     # ── 盤前選股確認（user_confirm.py 送出的 inline keyboard）──

@@ -202,6 +202,12 @@ def _goal_constraint_section(goal) -> str:
     else:
         lines.append("- **不使用零股**：僅考慮整張買賣（is_fractional=false）")
 
+    allow_day_trade = getattr(goal, "allow_day_trade", False)
+    if allow_day_trade:
+        lines.append("- **允許當沖**：可建議當日沖銷操作，同一天買進賣出即可，不需隔夜持倉")
+    else:
+        lines.append("- **不做當沖**：所有持倉須隔夜，不建議當日沖銷")
+
     return "\n".join(lines) if lines else ""
 
 

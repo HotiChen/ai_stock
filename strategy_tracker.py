@@ -23,6 +23,7 @@ class StrategyGoal:
     stop_loss_pct:    Optional[float] = None   # e.g. 5.0 means stop at -5%
     max_positions:    Optional[int]   = None   # max number of concurrent positions
     allow_fractional: bool            = False  # allow fractional (零股) trades
+    allow_day_trade:  bool            = False  # allow intraday day trading (當沖)
 
     @property
     def total_days(self) -> int:
@@ -68,6 +69,7 @@ def save_goal(goal: StrategyGoal, path: str) -> None:
         "stop_loss_pct":     goal.stop_loss_pct,
         "max_positions":     goal.max_positions,
         "allow_fractional":  goal.allow_fractional,
+        "allow_day_trade":   goal.allow_day_trade,
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -86,6 +88,7 @@ def load_goal(path: str) -> Optional[StrategyGoal]:
             stop_loss_pct=data.get("stop_loss_pct"),
             max_positions=data.get("max_positions"),
             allow_fractional=bool(data.get("allow_fractional", False)),
+            allow_day_trade=bool(data.get("allow_day_trade", False)),
         )
     except Exception:
         return None
