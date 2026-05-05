@@ -104,82 +104,126 @@ def send_main_menu(chat_id: str, text: str = "請選擇功能：") -> None:
 # ── Handlers ───────────────────────────────────────────────────────────────────
 
 def handle_status(chat_id: str) -> None:
-    now = datetime.now()
-    trades = load_daily_trades(date.today(), DB_PATH)
+    from sim_position_store import load_sim_positions
+    from daily_tracker import load_day_record
 
-    total_amount = sum(t.get("amount", 0) or 0 for t in trades if t.get("action") == "buy")
-    total_pnl    = sum(t.get("pnl", 0) or 0 for t in trades)
+    now = datetime.now()
+    positions = load_sim_positions()
+    record    = load_day_record(date.today())
+
+    plan_zh   = {"aggressive": "🚀 衝刺版", "balanced": "⚖️ 均衡版", "conservative": "🛡️ 保守版"}
+    plan_str  = plan_zh.get(record.chosen_plan_type, "—") if record else "尚未選擇策略"
+
+    total_cost = 0.0
+    for p in positions:
+        total_cost += (p.shares * (p.entry_price or 0)) if p.is_fractional else (p.quantity * 1000 * (p.entry_price or 0))
 
     lines = [
         f"📊 <b>今日狀態</b>",
         f"━━━━━━━━━━━━━━━━",
         f"🗓 {now.strftime('%Y-%m-%d %H:%M')}",
         f"",
-        f"💸 今日委託金額：<b>{total_amount:,.0f}</b> 元",
-        f"📈 今日損益：<b>{total_pnl:+,.0f}</b> 元",
-        f"📋 今日委託筆數：{len(trades)} 筆",
+        f"📋 今日策略：<b>{plan_str}</b>",
+        f"💼 模擬持倉：{len(positions)} 檔",
+        f"💸 合計投入：<b>{total_cost:,.0f}</b> 元",
+        f"",
+        f"（損益請按 <b>收盤結算</b> 計算）",
     ]
     send_text(chat_id, "\n".join(lines))
 
 
 def handle_holdings(chat_id: str) -> None:
-    trades = load_daily_trades(date.today(), DB_PATH)
-    buys = [t for t in trades if t.get("action") == "buy"]
+    from sim_position_store import load_sim_positions
 
-    if not buys:
-        send_text(chat_id, "💼 今日尚無持倉記錄。")
+    positions = load_sim_positions()
+
+    if not positions:
+        send_text(chat_id, "💼 今日尚無模擬持倉。\n\n請先選擇今日策略（等 08:30 推播或點「選股計劃」）。")
         return
 
-    lines = ["💼 <b>今日持倉</b>", "━━━━━━━━━━━━━━━━"]
-    for t in buys:
-        pnl = t.get("pnl") or 0
+    lines = ["💼 <b>今日模擬持倉</b>", "━━━━━━━━━━━━━━━━"]
+    for p in positions:
+        qty_str  = f"{p.shares} 股（零股）" if p.is_fractional else f"{p.quantity} 張"
+        cost     = (p.shares * p.entry_price) if p.is_fractional else (p.quantity * 1000 * p.entry_price)
         lines.append(
-            f"• {t.get('code')} {t.get('name', '')}｜"
-            f"{t.get('quantity')} 股｜"
-            f"成本 {t.get('price', 0):.2f}｜"
-            f"損益 {pnl:+,.0f}"
+            f"• <b>{p.code}</b> {p.name}｜{qty_str}｜"
+            f"成本 {p.entry_price:.1f}｜≈ {cost:,.0f} 元"
         )
     send_text(chat_id, "\n".join(lines))
 
 
 def handle_plan(chat_id: str) -> None:
-    picks = load_daily_plan(date.today(), DB_PATH)
+    # 優先顯示今日三套策略（新流程）
+    plan_set = load_pending_planset()
 
-    if not picks:
-        send_text(chat_id, "📈 今日尚無選股計劃（盤前分析於 08:30 執行）。")
+    if plan_set is None:
+        send_text(chat_id, "📈 今日尚無選股計劃。\n\n策略將於 08:30 自動推播，或在 Streamlit 手動生成。")
         return
 
-    lines = ["📈 <b>今日選股計劃</b>", "━━━━━━━━━━━━━━━━"]
-    for i, p in enumerate(picks, 1):
+    # 顯示三套計劃摘要 + 選擇按鈕
+    agg = plan_set.aggressive
+    bal = plan_set.balanced
+    con = plan_set.conservative
+
+    lines = ["📈 <b>今日三套策略計劃</b>", "━━━━━━━━━━━━━━━━"]
+    for plan, emoji, label in [
+        (agg, "🚀", "衝刺版"),
+        (bal, "⚖️", "均衡版"),
+        (con, "🛡️", "保守版"),
+    ]:
+        picks_str = "、".join(f"{p.code}" for p in plan.picks[:3]) if plan.picks else "空手觀望"
+        if len(plan.picks) > 3:
+            picks_str += f"…等 {len(plan.picks)} 檔"
         lines.append(
-            f"{i}. <b>{p['code']}</b> {p.get('name', '')}｜"
-            f"信心 {p.get('confidence', '?')}/10｜"
-            f"預算 {p.get('budget', 0):,.0f} 元\n"
-            f"   目標價 {p.get('target_price', '-')}｜"
-            f"停損 {p.get('stop_loss_price', '-')}｜"
-            f"[{p.get('sector', '')}]"
+            f"\n{emoji} <b>{label}</b>　預期 +{plan.expected_return_pct:.1f}%\n"
+            f"  選股：{picks_str}"
         )
-    send_text(chat_id, "\n".join(lines))
-
-
-def handle_quick_order(chat_id: str) -> None:
-    picks = load_daily_plan(date.today(), DB_PATH)
-
-    if not picks:
-        send_text(chat_id, "⚡ 今日無待下單計劃。\n\n請等待 08:30 盤前分析完成。")
-        return
-
-    text = "⚡ <b>快速下單</b>\n━━━━━━━━━━━━━━━━\n請確認是否執行今日計劃：\n\n"
-    for p in picks:
-        text += f"• {p['code']} {p.get('name', '')}｜預算 {p.get('budget', 0):,.0f} 元\n"
 
     keyboard = {
         "inline_keyboard": [[
-            {"text": "✅ 確認下單", "callback_data": "order_confirm"},
-            {"text": "❌ 取消",     "callback_data": "order_cancel"},
+            {"text": f"🚀 衝刺 +{agg.expected_return_pct:.0f}%", "callback_data": "select_plan:aggressive"},
+            {"text": f"⚖️ 均衡 +{bal.expected_return_pct:.0f}%", "callback_data": "select_plan:balanced"},
+            {"text": f"🛡️ 保守 +{con.expected_return_pct:.0f}%", "callback_data": "select_plan:conservative"},
         ]]
     }
-    send_text(chat_id, text, reply_markup=keyboard)
+    send_text(chat_id, "\n".join(lines), reply_markup=keyboard)
+
+
+def handle_quick_order(chat_id: str) -> None:
+    """快速下單 → 引導使用者透過「選股計劃」選擇策略。"""
+    from sim_position_store import load_sim_positions
+    positions = load_sim_positions()
+
+    if positions:
+        # 已有持倉，提示去結算
+        send_text(
+            chat_id,
+            "⚡ <b>今日策略已執行</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"目前有 {len(positions)} 檔模擬持倉。\n\n"
+            "收盤後請按「📊 收盤結算」計算損益。",
+            reply_markup={"inline_keyboard": [[
+                {"text": "📊 收盤結算", "callback_data": "settle_now"},
+            ]]}
+        )
+    else:
+        # 尚未選策略，引導去選股計劃
+        plan_set = load_pending_planset()
+        if plan_set is None:
+            send_text(chat_id, "⚡ 今日尚無策略計劃。\n\n策略將於 08:30 自動推播。")
+            return
+        agg = plan_set.aggressive
+        bal = plan_set.balanced
+        con = plan_set.conservative
+        send_text(
+            chat_id,
+            "⚡ <b>請選擇今日策略</b>\n━━━━━━━━━━━━━━━━\n選擇後系統將記錄模擬持倉：",
+            reply_markup={"inline_keyboard": [[
+                {"text": f"🚀 衝刺 +{agg.expected_return_pct:.0f}%", "callback_data": "select_plan:aggressive"},
+                {"text": f"⚖️ 均衡 +{bal.expected_return_pct:.0f}%", "callback_data": "select_plan:balanced"},
+                {"text": f"🛡️ 保守 +{con.expected_return_pct:.0f}%", "callback_data": "select_plan:conservative"},
+            ]]}
+        )
 
 
 def handle_stop_loss(chat_id: str) -> None:
@@ -662,18 +706,30 @@ def handle_settle_now(chat_id: str) -> None:
 
     send_text(chat_id, "⏳ 抓取收盤價中，請稍候...")
 
+    codes = [p.code for p in positions]
+    price_map: dict[str, float] = {}
+
+    # 先嘗試 Shioaji
     try:
         _api = _get_sj_api()
-        if _api is None:
-            raise RuntimeError("Shioaji 無法連線")
-        codes = [p.code for p in positions]
-        price_map = fetch_closing_prices(_api, codes)
+        if _api is not None:
+            price_map = fetch_closing_prices(_api, codes)
     except Exception as e:
-        send_text(chat_id, f"❌ 收盤價抓取失敗：{e}")
-        return
+        log.warning("Shioaji fetch_closing_prices failed: %s", e)
+
+    # Shioaji 失敗或資料不完整 → yfinance fallback
+    missing = [c for c in codes if c not in price_map or price_map[c] == 0]
+    if missing:
+        for code in missing:
+            try:
+                p = _fetch_stock_price(code)
+                if p > 0:
+                    price_map[code] = p
+            except Exception:
+                pass
 
     if not price_map:
-        send_text(chat_id, "❌ 收盤價抓取超時，請稍後再試。")
+        send_text(chat_id, "❌ 無法取得收盤價（Shioaji 與 yfinance 均失敗），請稍後再試。")
         return
 
     settlement = settle_positions(positions, price_map)
