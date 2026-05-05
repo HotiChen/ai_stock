@@ -6,6 +6,8 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+from utils.atomic_json import atomic_write_json
+
 _DEFAULT_CAPITAL = 30_000.0
 
 
@@ -192,7 +194,7 @@ class SimulatedPortfolio:
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(self, path: str) -> None:
-        """存檔到 JSON。"""
+        """存檔到 JSON（C3: 原子寫入，防止寫到一半時損壞）。"""
         data = {
             "initial_capital": self._initial_capital,
             "cash":            self._cash,
@@ -211,10 +213,7 @@ class SimulatedPortfolio:
                 for pos in self._positions.values()
             ],
         }
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        atomic_write_json(path, data)
 
     @classmethod
     def load(

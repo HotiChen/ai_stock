@@ -329,6 +329,37 @@ class TestUpdatePrices:
 # ── persistence ───────────────────────────────────────────────────────────────
 
 class TestPersistence:
+    # ── C3: 原子寫入 ──────────────────────────────────────────────────────────
+
+    def test_save_no_tmp_file_left(self, tmp_path):
+        """save() 完成後不應留下 .tmp 暫存檔（原子寫入）。"""
+        p = SimulatedPortfolio(30_000.0)
+        fpath = tmp_path / "portfolio.json"
+        p.save(str(fpath))
+        tmp_files = list(tmp_path.glob("*.tmp"))
+        assert tmp_files == [], f"找到殘留 .tmp 檔：{tmp_files}"
+
+    def test_save_uses_atomic_write(self, tmp_path):
+        """save() 必須先寫入 .tmp 再 rename（驗證原子性路徑）。"""
+        import os
+        from unittest.mock import patch, call as mcall
+
+        p = SimulatedPortfolio(30_000.0)
+        fpath = tmp_path / "portfolio.json"
+
+        with patch("os.replace") as mock_replace:
+            p.save(str(fpath))
+            assert mock_replace.called, "save() 沒有呼叫 os.replace()（非原子寫入）"
+            dest = mock_replace.call_args[0][1]
+            assert str(dest) == str(fpath), "os.replace 目標路徑不符"
+
+    def test_save_creates_parent_dirs(self, tmp_path):
+        """save() 可以自動建立不存在的父目錄。"""
+        p = SimulatedPortfolio(30_000.0)
+        fpath = tmp_path / "nested" / "deep" / "portfolio.json"
+        p.save(str(fpath))
+        assert fpath.exists()
+
     def test_save_creates_file(self, tmp_path):
         p = SimulatedPortfolio(30_000.0)
         fpath = tmp_path / "portfolio.json"
