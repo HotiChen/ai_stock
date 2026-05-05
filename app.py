@@ -1296,7 +1296,13 @@ def _render_strategy_tracker():
 
         with st.spinner("AI 分析中，約需 30–60 秒..."):
             print("[策略生成] 呼叫 Claude API...")
-            plan_set = generate_strategy_plans(goal, current_value, deduped)
+            # 載入現有持倉，讓 AI 針對持倉給出 hold/add/reduce/close/switch 建議
+            from portfolio import SimulatedPortfolio
+            _portfolio_path = "data/portfolio.json"
+            _portfolio = SimulatedPortfolio.load(_portfolio_path) if Path(_portfolio_path).exists() else None
+            if _portfolio and _portfolio.get_positions():
+                print(f"[策略生成] 傳入持倉 {len(_portfolio.get_positions())} 檔，AI 將考慮換股建議", flush=True)
+            plan_set = generate_strategy_plans(goal, current_value, deduped, portfolio=_portfolio)
         if plan_set is None:
             print("[策略生成] ❌ generate_strategy_plans 回傳 None")
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")

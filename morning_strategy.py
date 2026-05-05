@@ -262,12 +262,19 @@ def run() -> None:
         current_value = goal.initial_capital
     log.info("current_value=%.0f", current_value)
 
+    # ── 載入現有持倉 ─────────────────────────────────────────
+    from portfolio import SimulatedPortfolio
+    _portfolio_path = Path("data/portfolio.json")
+    portfolio = SimulatedPortfolio.load(str(_portfolio_path)) if _portfolio_path.exists() else None
+    if portfolio and portfolio.get_positions():
+        log.info("傳入持倉 %d 檔，AI 將考慮 hold/add/reduce/close/switch", len(portfolio.get_positions()))
+
     # ── 建立候選股 + 生成策略 ─────────────────────────────────
     api = _get_api()
     try:
         candidates = build_candidates(api)
         log.info("開始生成三套策略計劃...")
-        plan_set = generate_strategy_plans(goal, current_value, candidates)
+        plan_set = generate_strategy_plans(goal, current_value, candidates, portfolio=portfolio)
         log.info("策略生成完成，推播到 Telegram...")
         send_morning_push(briefing=None, plan_set=plan_set, starting_capital=current_value)
         log.info("=== morning_strategy 完成 ===")
