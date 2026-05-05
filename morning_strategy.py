@@ -7,9 +7,10 @@ morning_strategy.py — 每日 08:30 自動執行的策略生成腳本
   2. 呼叫 generate_strategy_plans 產生三套策略
   3. 透過 send_morning_push 推播到 Telegram
 
-排程方式（macOS cron）：
-  crontab -e
-  30 8 * * 1-5 cd /Volumes/Tim\ 1TB\ SSD/03_開發與自動化腳本/claude/project/ai_stock && /usr/local/bin/python3 morning_strategy.py >> /tmp/morning_strategy.log 2>&1
+排程方式（macOS launchd）：
+  已設定 ~/Library/LaunchAgents/com.aistock.morning_strategy.plist
+  每日 08:30 週一至週五自動執行
+  Log: /tmp/morning_strategy.log
 """
 from __future__ import annotations
 
