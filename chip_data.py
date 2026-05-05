@@ -10,10 +10,14 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Callable
 
 import requests
+
+_REQUEST_TIMEOUT = 10       # TWSE API 連線/讀取 timeout（秒）
+_RATE_LIMIT_SLEEP = 0.3     # 連續請求之間的最小間隔（秒）
 
 TWSE_API_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
 
@@ -55,7 +59,7 @@ def fetch_institutional_investors(date: str) -> dict[str, dict]:
     url = f"{TWSE_API_URL}?response=json&date={date_str}&selectType=ALL"
 
     try:
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
         payload = resp.json()
     except Exception:
         return {}
@@ -120,7 +124,9 @@ def get_continuous_buy_days(
     foreign_done = False
     trust_done = False
 
-    for date_str in dates:
+    for i, date_str in enumerate(dates):
+        if i > 0:
+            time.sleep(_RATE_LIMIT_SLEEP)   # H2: 避免連續打 TWSE API 觸發限流
         day_data = data_fetcher(date_str)
         stock = day_data.get(code)
 
@@ -214,7 +220,7 @@ def fetch_margin_trading(date: str) -> dict[str, dict]:
     url = f"{TWSE_MARGIN_URL}?response=json&date={date_str}&selectType=ALL"
 
     try:
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
         payload = resp.json()
     except Exception:
         return {}

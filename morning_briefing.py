@@ -101,7 +101,7 @@ def _find_latest_trading_date(max_lookback: int = 7) -> Optional[date]:
                 f"https://www.twse.com.tw/rwd/zh/fund/BFI82U"
                 f"?response=json&dayDate={date_str}&type=day"
             )
-            resp = requests.get(url, timeout=8, verify=False)
+            resp = requests.get(url, timeout=8, verify=True)
             data = resp.json()
             if data.get("stat") == "OK":
                 return d
@@ -128,7 +128,7 @@ def _fetch_twse_institutional(target_date: Optional[date] = None) -> dict:
             f"https://www.twse.com.tw/rwd/zh/fund/BFI82U"
             f"?response=json&dayDate={date_str}&type=day"
         )
-        resp  = requests.get(url, timeout=10, verify=False)
+        resp  = requests.get(url, timeout=10, verify=True)
         data  = resp.json()
         rows  = data.get("data", [])
         result["trading_date"] = target_date.isoformat()

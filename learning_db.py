@@ -67,8 +67,11 @@ class LearningDB:
     # ── internal ────────────────────────────────────────────────────────────
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
+        # H4: WAL mode 讓讀寫不互相 block；busy_timeout 避免 "database is locked"
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _init_schema(self) -> None:
@@ -219,6 +222,28 @@ class LearningDB:
                 "SELECT * FROM stock_prediction_log WHERE date = ? ORDER BY code",
                 (self._date_str(d),),
             ).fetchall()
+        return [self._row_to_pred(r) for r in rows]
+
+    def get_predictions_by_date_range(
+        self,
+        start: date,
+        end: date,
+        only_completed: bool = False,
+    ) -> list[StockPredictionLog]:
+        """H6: 公開 API — 取得指定日期區間的所有個股預測紀錄。
+
+        Args:
+            start: 起始日期（含）。
+            end:   結束日期（含）。
+            only_completed: True 時只回傳已有 was_correct 的紀錄（盤後結果已更新）。
+        """
+        sql = "SELECT * FROM stock_prediction_log WHERE date BETWEEN ? AND ?"
+        params: list = [self._date_str(start), self._date_str(end)]
+        if only_completed:
+            sql += " AND was_correct IS NOT NULL"
+        sql += " ORDER BY date, code"
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return [self._row_to_pred(r) for r in rows]
 
     def _row_to_pred(self, row) -> StockPredictionLog:

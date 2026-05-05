@@ -14,11 +14,9 @@ morning_strategy.py — 每日 08:30 自動執行的策略生成腳本
 """
 from __future__ import annotations
 
-import json
 import os
-import random
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -76,173 +74,10 @@ def _get_api():
         return None
 
 
-def _get_name_map(api) -> dict[str, str]:
-    """從 Shioaji 取得股票名稱對照表。"""
-    import config
-    result = dict(config.STOCK_NAMES)
-    if api is None:
-        return result
-    for exchange in ("TSE", "OTC", "OES"):
-        try:
-            for c in getattr(api.Contracts.Stocks, exchange, []):
-                result[c.code] = c.name
-        except Exception:
-            pass
-    return result
-
-
 def build_candidates(api=None) -> list[dict]:
-    """建立候選股清單，邏輯與 app.py 的 _build_candidates 相同。"""
-    from themes import THEME_GROUPS
-    from chip_data import (
-        fetch_institutional_investors,
-        fetch_margin_trading,
-        get_continuous_buy_days,
-    )
-
-    raw: list[dict] = []
-
-    # ── 1. 從 ai_log 抓最近紀錄 ──────────────────────────────
-    log_path = Path("data/ai_log.jsonl")
-    if log_path.exists():
-        with log_path.open(encoding="utf-8") as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                    d = e.get("decision", {})
-                    if d.get("stock_code"):
-                        raw.append({
-                            "code":        d["stock_code"],
-                            "name":        d.get("stock_code"),
-                            "close":       0.0,
-                            "change_rate": 0.0,
-                            "analysis":    d.get("reason", ""),
-                        })
-                except Exception:
-                    pass
-
-    seen: set[str] = set()
-    deduped: list[dict] = []
-    for c in reversed(raw):
-        if c["code"] not in seen:
-            seen.add(c["code"])
-            deduped.append(c)
-        if len(deduped) >= 10:
-            break
-
-    # ── 2. 從所有主題池隨機補 20 支 ──────────────────────────
-    all_theme_codes = list({
-        code
-        for codes in THEME_GROUPS.values()
-        for code in codes
-    })
-    random.shuffle(all_theme_codes)
-    for code in all_theme_codes:
-        if code not in seen and len(deduped) < 30:
-            seen.add(code)
-            deduped.append({
-                "code":        code,
-                "name":        code,
-                "close":       0.0,
-                "change_rate": 0.0,
-                "analysis":    "主題池補充（無個股分析，請依技術面自行評估）",
-            })
-
-    # ── 3. 補齊名稱與即時股價 ────────────────────────────────
-    nm = _get_name_map(api)
-    for c in deduped:
-        c["name"] = nm.get(c["code"], c["code"])
-        if api:
-            try:
-                import threading
-                result_holder = {}
-
-                def _fetch(code=c["code"]):
-                    try:
-                        contract = api.Contracts.Stocks.get(code)
-                        if contract:
-                            snaps = api.snapshots([contract])
-                            if snaps:
-                                result_holder["close"]       = float(snaps[0].close)
-                                result_holder["change_rate"] = float(snaps[0].change_rate)
-                    except Exception:
-                        pass
-
-                t = threading.Thread(target=_fetch, daemon=True)
-                t.start()
-                t.join(timeout=6)
-                c["close"]       = result_holder.get("close", 0.0)
-                c["change_rate"] = result_holder.get("change_rate", 0.0)
-            except Exception:
-                pass
-
-    # ── 4. 抓籌碼資料 ────────────────────────────────────────
-    today_str = date.today().strftime("%Y%m%d")
-    try:
-        inst_data   = fetch_institutional_investors(today_str)
-        margin_data = fetch_margin_trading(today_str)
-        log.info("籌碼資料：三大法人 %d 筆，融資融券 %d 筆", len(inst_data), len(margin_data))
-    except Exception as e:
-        log.warning("籌碼資料取得失敗：%s", e)
-        inst_data   = {}
-        margin_data = {}
-
-    # ── 5. 標注籌碼 + 計算排序分數 ───────────────────────────
-    for c in deduped:
-        code = c["code"]
-        chip_parts: list[str] = []
-        chip_score = 0
-
-        inst = inst_data.get(code)
-        if inst:
-            foreign_net = inst.get("foreign_net", 0)
-            trust_net   = inst.get("investment_trust_net", 0)
-            if foreign_net != 0:
-                chip_parts.append(f"外資{'+' if foreign_net > 0 else ''}{foreign_net:.0f}張")
-                chip_score += min(foreign_net / 500, 5)
-            if trust_net != 0:
-                chip_parts.append(f"投信{'+' if trust_net > 0 else ''}{trust_net:.0f}張")
-                chip_score += min(trust_net / 100, 3)
-            if inst.get("total_net", 0) > 0:
-                chip_score += 1
-
-        try:
-            cont = get_continuous_buy_days(code, today_str, days=5)
-            foreign_days = cont.get("foreign_continuous_buy", 0)
-            trust_days   = cont.get("investment_trust_continuous_buy", 0)
-            if foreign_days >= 2:
-                chip_parts.append(f"外資連買{foreign_days}天")
-                chip_score += foreign_days * 1.5
-            if trust_days >= 2:
-                chip_parts.append(f"投信連買{trust_days}天")
-                chip_score += trust_days * 1.0
-        except Exception:
-            pass
-
-        margin = margin_data.get(code)
-        if margin:
-            margin_prev   = margin.get("margin_prev", 0)
-            margin_change = margin.get("margin_change", 0)
-            if margin_prev > 0:
-                margin_pct = margin_change / margin_prev * 100
-                if abs(margin_pct) >= 3:
-                    chip_parts.append(f"融資{'↑' if margin_pct > 0 else '↓'}{abs(margin_pct):.1f}%")
-                if margin_pct > 10:
-                    chip_score -= 2
-
-        if chip_parts:
-            chip_summary = "｜".join(chip_parts)
-            orig = c.get("analysis", "")
-            c["analysis"]   = f"【籌碼】{chip_summary}　{orig}".strip()
-        c["chip_score"] = chip_score
-
-    # ── 6. 依籌碼分數排序 ────────────────────────────────────
-    deduped.sort(key=lambda x: x.get("chip_score", 0), reverse=True)
-
-    n_chip  = len([c for c in deduped if c.get("chip_score", 0) > 0])
-    n_theme = len([c for c in deduped if "主題池補充" in c.get("analysis", "")])
-    log.info("候選股建立完成：共 %d 支｜有籌碼=%d｜主題補充=%d", len(deduped), n_chip, n_theme)
-    return deduped
+    """建立候選股清單。H11: 委派到 candidate_builder 統一入口。"""
+    from candidate_builder import build_candidates as _build
+    return _build(api=api)
 
 
 def run() -> None:

@@ -33,25 +33,15 @@ log = get_logger("weekly_report_runner")
 
 
 def _call_claude(prompt: str) -> str:
-    """呼叫 Anthropic Claude API，回傳原始文字。"""
-    import anthropic
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    message = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=2048,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "你是一位專業的台股 AI 量化交易分析師。"
-                    "以下是本週 AI 選股系統的績效數據，"
-                    "請根據數據進行深入分析，找出策略優缺點，並給出下週改進建議。\n\n"
-                    + prompt
-                ),
-            }
-        ],
+    """呼叫 Claude API，回傳原始文字。H7: 改走 ai_client 統一入口（含 retry）。"""
+    from ai_client import call_sonnet
+    full_prompt = (
+        "你是一位專業的台股 AI 量化交易分析師。"
+        "以下是本週 AI 選股系統的績效數據，"
+        "請根據數據進行深入分析，找出策略優缺點，並給出下週改進建議。\n\n"
+        + prompt
     )
-    return message.content[0].text
+    return call_sonnet(full_prompt, max_tokens=2048)
 
 
 def _format_telegram_report(parsed: dict, data) -> str:

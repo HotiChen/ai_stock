@@ -46,19 +46,10 @@ def collect_weekly_data(db: LearningDB, end_date: date) -> WeeklyReportData:
     n_trading_days = len(daily_logs)
     total_pnl = sum(l.total_pnl for l in daily_logs)
 
-    # ── 個股預測 ──────────────────────────────────────────────
-    # 從 analytics 方法取得這 7 天所有有結果的預測
-    with db._conn() as conn:
-        rows = conn.execute("""
-            SELECT code, name, date, action, confidence,
-                   actual_return_pct, was_correct, entry_price, closing_price,
-                   expected_return_pct
-            FROM stock_prediction_log
-            WHERE date BETWEEN ? AND ?
-              AND was_correct IS NOT NULL
-        """, (db._date_str(start_date), db._date_str(end_date))).fetchall()
-
-    predictions = [db._row_to_pred(r) for r in rows]
+    # ── 個股預測（H6: 改用公開 API，不再直接存取 _conn）────────
+    predictions = db.get_predictions_by_date_range(
+        start_date, end_date, only_completed=True
+    )
 
     total = len(predictions)
     wins = sum(1 for p in predictions if p.was_correct)

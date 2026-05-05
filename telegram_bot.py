@@ -44,6 +44,8 @@ log = get_logger(__name__)
 
 BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID     = os.getenv("TELEGRAM_CHAT_ID", "")
+# H9: 雙重驗證 — TELEGRAM_USER_ID 設定後，訊息發送者的 user_id 也必須吻合
+USER_ID     = os.getenv("TELEGRAM_USER_ID", "")
 DB_PATH     = os.getenv("DB_PATH", "data/research.db")
 _POLL_TIMEOUT = 30  # long polling seconds
 
@@ -261,8 +263,29 @@ def handle_stop_loss(chat_id: str) -> None:
     )
 
 
+_STOP_LOSS_PATH = Path("data/stop_loss.json")
+
+
+def _load_stop_losses() -> dict[str, float]:
+    """H5: 從磁碟讀取所有停損設定（{code: price}）。"""
+    from utils.atomic_json import atomic_read_json
+    data = atomic_read_json(_STOP_LOSS_PATH)
+    if isinstance(data, dict):
+        return {k: float(v) for k, v in data.items()}
+    return {}
+
+
+def _save_stop_loss(code: str, price: float) -> None:
+    """H5: 原子寫入停損設定，重啟後依然保留。"""
+    from utils.atomic_json import atomic_write_json, atomic_read_json
+    data = atomic_read_json(_STOP_LOSS_PATH)
+    stops = data if isinstance(data, dict) else {}
+    stops[code] = price
+    atomic_write_json(_STOP_LOSS_PATH, stops)
+
+
 def _handle_set_stop_loss(chat_id: str, text: str) -> None:
-    """Parse '停損 CODE PRICE' and confirm back to the user."""
+    """Parse '停損 CODE PRICE' and persist to disk."""
     _FORMAT_HINT = (
         "⚠️ 格式錯誤，請輸入：\n\n"
         "<code>停損 2330 540</code>\n\n"
@@ -278,6 +301,9 @@ def _handle_set_stop_loss(chat_id: str, text: str) -> None:
     except ValueError:
         send_text(chat_id, _FORMAT_HINT)
         return
+
+    _save_stop_loss(code, price)   # H5: 持久化到 data/stop_loss.json
+
     send_text(
         chat_id,
         f"🛡️ <b>停損已設定</b>\n"
@@ -1012,9 +1038,22 @@ _HANDLER_NAMES: dict[str, str] = {
 
 
 def _is_authorized(update: dict) -> bool:
+    """H9: 雙重驗證 — chat_id + user_id（若 TELEGRAM_USER_ID 已設定）。"""
     msg     = update.get("message") or update.get("callback_query", {}).get("message", {})
     chat_id = str((msg or {}).get("chat", {}).get("id", ""))
-    return chat_id == CHAT_ID
+    if chat_id != CHAT_ID:
+        return False
+
+    # 額外驗證發送者 user_id（防止同群組內其他成員操控 Bot）
+    if USER_ID:
+        sender = (
+            update.get("message", {}).get("from", {})
+            or update.get("callback_query", {}).get("from", {})
+        )
+        if str(sender.get("id", "")) != USER_ID:
+            return False
+
+    return True
 
 
 def process_update(update: dict) -> None:

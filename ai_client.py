@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import anthropic
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+
+_RETRY_MAX    = 3       # 最多嘗試次數（含首次）
+_RETRY_BASE_S = 2.0     # 指數退避基礎秒數：2s, 4s, 8s
 
 load_dotenv(override=True)  # override=True: .env wins even if shell set the var empty
 
@@ -40,32 +44,48 @@ def _get_gemini_client() -> genai.Client:
     return _gemini_client
 
 
+def _call_with_retry(model: str, max_tokens: int, prompt: str) -> str:
+    """共用 retry 邏輯：exponential backoff，最多 _RETRY_MAX 次。"""
+    last_err: Exception | None = None
+    for attempt in range(_RETRY_MAX):
+        try:
+            resp = _get_client().messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text
+        except anthropic.RateLimitError as e:
+            wait = _RETRY_BASE_S * (2 ** attempt)
+            log.warning("Claude API rate limit (attempt %d/%d), retry in %.0fs: %s",
+                        attempt + 1, _RETRY_MAX, wait, e)
+            last_err = e
+            time.sleep(wait)
+        except anthropic.APIStatusError as e:
+            if e.status_code and e.status_code >= 500:
+                wait = _RETRY_BASE_S * (2 ** attempt)
+                log.warning("Claude API server error %d (attempt %d/%d), retry in %.0fs",
+                            e.status_code, attempt + 1, _RETRY_MAX, wait)
+                last_err = e
+                time.sleep(wait)
+            else:
+                log.error("Claude API client error: %s", e)
+                return ""
+        except Exception as e:
+            log.error("Claude API unexpected error: %s", e)
+            return ""
+    log.error("Claude API failed after %d attempts: %s", _RETRY_MAX, last_err)
+    return ""
+
+
 def call_haiku(prompt: str) -> str:
     """輕量分析：候選股初篩、盤中訊號確認。失敗回傳空字串。"""
-    try:
-        resp = _get_client().messages.create(
-            model=_HAIKU_MODEL,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text
-    except Exception as e:
-        log.error("call_haiku failed: %s", e)
-        return ""
+    return _call_with_retry(_HAIKU_MODEL, 1024, prompt)
 
 
 def call_sonnet(prompt: str, max_tokens: int = 8192) -> str:
     """深度推理：三套策略生成。失敗回傳空字串。"""
-    try:
-        resp = _get_client().messages.create(
-            model=_SONNET_MODEL,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text
-    except Exception as e:
-        log.error("call_sonnet failed: %s", e)
-        return ""
+    return _call_with_retry(_SONNET_MODEL, max_tokens, prompt)
 
 
 def call_gemini(prompt: str, max_tokens: int = 32_768) -> str:
