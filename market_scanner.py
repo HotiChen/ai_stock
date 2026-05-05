@@ -156,3 +156,68 @@ def run_full_market_scan(
     log.info(f"篩選後候選：{len(candidates)} 支 → 進行深度分析")
 
     return run_deep_analysis(candidates, indicators_map={}, progress_cb=progress_cb)
+
+
+# ── Candidate builder (lightweight, no deep analysis) ─────────────────────────
+
+def build_market_candidates(
+    api=None,
+    name_map: dict[str, str] = None,
+    manual_codes: list[str] = None,
+    criteria: ScanCriteria = None,
+) -> list[dict]:
+    """Build a flat list of candidate dicts from scan and/or manual codes.
+
+    Fields guaranteed on every row:
+        code, name, close, change_rate, total_volume, source, analysis
+
+    Rules:
+    - api=None and no manual_codes → []
+    - api=None and manual_codes → manual entries with close=0.0
+    - api provided → scan path; manual_codes also included but scan wins on dedup
+    """
+    if name_map is None:
+        name_map = {}
+    if criteria is None:
+        criteria = ScanCriteria()
+
+    scan_rows: list[dict] = []
+    manual_rows: list[dict] = []
+
+    # ── Scan path ──────────────────────────────────────────────────────────────
+    if api is not None:
+        all_codes   = get_all_stock_codes(api)
+        snapshots   = batch_fetch_snapshots(api, all_codes)
+        # Enrich snapshots with name
+        for code, snap in snapshots.items():
+            snap["name"] = name_map.get(code, code)
+        candidates = screen_candidates(snapshots, criteria)
+        for row in candidates:
+            code = row.get("code", "")
+            scan_rows.append({
+                "code":         code,
+                "name":         name_map.get(code, row.get("name", code)),
+                "close":        row.get("close", 0.0),
+                "change_rate":  row.get("change_rate", 0.0),
+                "total_volume": row.get("total_volume", 0),
+                "source":       "scan",
+                "analysis":     "",
+            })
+
+    # ── Manual path ────────────────────────────────────────────────────────────
+    if manual_codes:
+        for code in manual_codes:
+            manual_rows.append({
+                "code":         code,
+                "name":         name_map.get(code, code),
+                "close":        0.0,
+                "change_rate":  0.0,
+                "total_volume": 0,
+                "source":       "manual",
+                "analysis":     "manual",
+            })
+
+    # ── Dedup: scan wins over manual ───────────────────────────────────────────
+    scan_codes = {r["code"] for r in scan_rows}
+    combined = scan_rows + [r for r in manual_rows if r["code"] not in scan_codes]
+    return combined

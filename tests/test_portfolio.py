@@ -367,3 +367,34 @@ class TestPersistence:
                                     default_capital=30_000.0)
         assert p.get_available_capital() == pytest.approx(30_000.0)
         assert p.get_positions() == []
+
+
+# ── C1+C2: 資金驗證 ───────────────────────────────────────────────────────────
+
+class TestCapitalValidation:
+    def test_open_position_raises_when_insufficient_cash(self):
+        p = SimulatedPortfolio(initial_capital=1000.0)
+        with pytest.raises(ValueError, match="資金不足"):
+            p.open_position(
+                code="2330", name="台積電",
+                quantity=1, price=900.0,       # cost = 900*1000 = 900_000 >> 1000
+                is_fractional=False, shares=0,
+                reason="test", entry_date=date.today()
+            )
+
+    def test_open_position_succeeds_when_sufficient(self):
+        p = SimulatedPortfolio(initial_capital=1_000_000.0)
+        p.open_position(
+            code="2330", name="台積電",
+            quantity=1, price=800.0,
+            is_fractional=False, shares=0,
+            reason="test", entry_date=date.today()
+        )
+        assert p.get_available_capital() == pytest.approx(1_000_000 - 800 * 1000)
+
+    def test_repair_cash_resets_to_initial(self):
+        p = SimulatedPortfolio(initial_capital=30_000.0)
+        p._cash = -2_000_000.0   # 手動弄爆
+        p.repair_to_initial()
+        assert p._cash == pytest.approx(30_000.0)
+        assert p.get_positions() == []   # 清掉不合理的持倉

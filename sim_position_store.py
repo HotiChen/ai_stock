@@ -5,6 +5,8 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from utils.atomic_json import atomic_write_json
+
 
 @dataclass
 class SimPosition:
@@ -22,10 +24,8 @@ def save_sim_positions(
     positions: list[SimPosition],
     path: str = "data/sim_positions.json",
 ) -> None:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
     data = [asdict(pos) for pos in positions]
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(path, data)
 
 
 def load_sim_positions(
@@ -41,6 +41,4 @@ def load_sim_positions(
 def clear_sim_positions(
     path: str = "data/sim_positions.json",
 ) -> None:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+    atomic_write_json(path, [])

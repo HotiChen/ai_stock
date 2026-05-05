@@ -6,6 +6,8 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+from utils.atomic_json import atomic_write_json
+
 _DEFAULT_DIR = "data/daily_tracking"
 
 
@@ -85,13 +87,8 @@ def save_day_record(
     track_dir: str = _DEFAULT_DIR,
 ) -> Path:
     """Save (or overwrite) today's tracking record. Returns the saved path."""
-    dirpath = Path(track_dir)
-    dirpath.mkdir(parents=True, exist_ok=True)
     fpath = _fpath(record.date, track_dir)
-    fpath.write_text(
-        json.dumps(record_to_dict(record), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_json(str(fpath), record_to_dict(record))
     return fpath
 
 

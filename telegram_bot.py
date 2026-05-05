@@ -37,6 +37,9 @@ from sim_plan_store import planset_to_dict, planset_from_dict
 from sim_position_store import SimPosition, save_sim_positions
 import json
 
+from utils.atomic_json import atomic_write_json
+from market_index import fetch_market_index_change
+
 log = get_logger(__name__)
 
 BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -110,6 +113,7 @@ def handle_status(chat_id: str) -> None:
     now = datetime.now()
     positions = load_sim_positions()
     record    = load_day_record(date.today())
+    trades    = load_daily_trades()
 
     plan_zh   = {"aggressive": "🚀 衝刺版", "balanced": "⚖️ 均衡版", "conservative": "🛡️ 保守版"}
     plan_str  = plan_zh.get(record.chosen_plan_type, "—") if record else "尚未選擇策略"
@@ -117,6 +121,8 @@ def handle_status(chat_id: str) -> None:
     total_cost = 0.0
     for p in positions:
         total_cost += (p.shares * (p.entry_price or 0)) if p.is_fractional else (p.quantity * 1000 * (p.entry_price or 0))
+
+    net_pnl = sum(t.get("pnl", 0) or 0 for t in trades)
 
     lines = [
         f"📊 <b>今日狀態</b>",
@@ -126,28 +132,32 @@ def handle_status(chat_id: str) -> None:
         f"📋 今日策略：<b>{plan_str}</b>",
         f"💼 模擬持倉：{len(positions)} 檔",
         f"💸 合計投入：<b>{total_cost:,.0f}</b> 元",
+        f"📈 今日損益：<b>{net_pnl:+,.0f}</b> 元",
         f"",
-        f"（損益請按 <b>收盤結算</b> 計算）",
+        f"（詳細損益請按 <b>收盤結算</b> 計算）",
     ]
     send_text(chat_id, "\n".join(lines))
 
 
 def handle_holdings(chat_id: str) -> None:
-    from sim_position_store import load_sim_positions
+    trades = load_daily_trades()
 
-    positions = load_sim_positions()
-
-    if not positions:
-        send_text(chat_id, "💼 今日尚無模擬持倉。\n\n請先選擇今日策略（等 08:30 推播或點「選股計劃」）。")
+    if not trades:
+        send_text(chat_id, "💼 今日尚無交易紀錄。\n\n請先選擇今日策略（等 08:30 推播或點「選股計劃」）。")
         return
 
-    lines = ["💼 <b>今日模擬持倉</b>", "━━━━━━━━━━━━━━━━"]
-    for p in positions:
-        qty_str  = f"{p.shares} 股（零股）" if p.is_fractional else f"{p.quantity} 張"
-        cost     = (p.shares * p.entry_price) if p.is_fractional else (p.quantity * 1000 * p.entry_price)
+    lines = ["💼 <b>今日交易紀錄</b>", "━━━━━━━━━━━━━━━━"]
+    for t in trades:
+        code     = t.get("code", "")
+        name     = t.get("name", "")
+        action   = t.get("action", "")
+        quantity = t.get("quantity", 0)
+        price    = t.get("price", 0.0)
+        pnl      = t.get("pnl", 0) or 0
+        action_zh = {"buy": "買入", "sell": "賣出"}.get(action, action)
         lines.append(
-            f"• <b>{p.code}</b> {p.name}｜{qty_str}｜"
-            f"成本 {p.entry_price:.1f}｜≈ {cost:,.0f} 元"
+            f"• <b>{code}</b> {name}｜{action_zh}｜"
+            f"{quantity} 股｜@{price:.1f}｜損益 {pnl:+.0f}"
         )
     send_text(chat_id, "\n".join(lines))
 
@@ -156,37 +166,50 @@ def handle_plan(chat_id: str) -> None:
     # 優先顯示今日三套策略（新流程）
     plan_set = load_pending_planset()
 
-    if plan_set is None:
+    if plan_set is not None:
+        # 顯示三套計劃摘要 + 選擇按鈕
+        agg = plan_set.aggressive
+        bal = plan_set.balanced
+        con = plan_set.conservative
+
+        lines = ["📈 <b>今日三套策略計劃</b>", "━━━━━━━━━━━━━━━━"]
+        for plan, emoji, label in [
+            (agg, "🚀", "衝刺版"),
+            (bal, "⚖️", "均衡版"),
+            (con, "🛡️", "保守版"),
+        ]:
+            picks_str = "、".join(f"{p.code}" for p in plan.picks[:3]) if plan.picks else "空手觀望"
+            if len(plan.picks) > 3:
+                picks_str += f"…等 {len(plan.picks)} 檔"
+            lines.append(
+                f"\n{emoji} <b>{label}</b>　預期 +{plan.expected_return_pct:.1f}%\n"
+                f"  選股：{picks_str}"
+            )
+
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": f"🚀 衝刺 +{agg.expected_return_pct:.0f}%", "callback_data": "select_plan:aggressive"},
+                {"text": f"⚖️ 均衡 +{bal.expected_return_pct:.0f}%", "callback_data": "select_plan:balanced"},
+                {"text": f"🛡️ 保守 +{con.expected_return_pct:.0f}%", "callback_data": "select_plan:conservative"},
+            ]]
+        }
+        send_text(chat_id, "\n".join(lines), reply_markup=keyboard)
+        return
+
+    # Fallback: 使用 legacy daily_plan
+    picks = load_daily_plan()
+
+    if not picks:
         send_text(chat_id, "📈 今日尚無選股計劃。\n\n策略將於 08:30 自動推播，或在 Streamlit 手動生成。")
         return
 
-    # 顯示三套計劃摘要 + 選擇按鈕
-    agg = plan_set.aggressive
-    bal = plan_set.balanced
-    con = plan_set.conservative
-
-    lines = ["📈 <b>今日三套策略計劃</b>", "━━━━━━━━━━━━━━━━"]
-    for plan, emoji, label in [
-        (agg, "🚀", "衝刺版"),
-        (bal, "⚖️", "均衡版"),
-        (con, "🛡️", "保守版"),
-    ]:
-        picks_str = "、".join(f"{p.code}" for p in plan.picks[:3]) if plan.picks else "空手觀望"
-        if len(plan.picks) > 3:
-            picks_str += f"…等 {len(plan.picks)} 檔"
-        lines.append(
-            f"\n{emoji} <b>{label}</b>　預期 +{plan.expected_return_pct:.1f}%\n"
-            f"  選股：{picks_str}"
-        )
-
-    keyboard = {
-        "inline_keyboard": [[
-            {"text": f"🚀 衝刺 +{agg.expected_return_pct:.0f}%", "callback_data": "select_plan:aggressive"},
-            {"text": f"⚖️ 均衡 +{bal.expected_return_pct:.0f}%", "callback_data": "select_plan:balanced"},
-            {"text": f"🛡️ 保守 +{con.expected_return_pct:.0f}%", "callback_data": "select_plan:conservative"},
-        ]]
-    }
-    send_text(chat_id, "\n".join(lines), reply_markup=keyboard)
+    lines = ["📈 <b>今日選股計劃</b>", "━━━━━━━━━━━━━━━━"]
+    for p in picks:
+        code = p.get("code", "")
+        name = p.get("name", "")
+        conf = p.get("confidence", "")
+        lines.append(f"• <b>{code}</b> {name}　信心度 {conf}")
+    send_text(chat_id, "\n".join(lines))
 
 
 def handle_quick_order(chat_id: str) -> None:
@@ -339,19 +362,23 @@ _PENDING_PLAN_PATH = "data/pending_planset.json"
 
 def save_pending_planset(plan_set, path: str = _PENDING_PLAN_PATH) -> None:
     """早晨推播時把 PlanSet 存起來，等使用者選擇後執行。"""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(
-        json.dumps(planset_to_dict(plan_set), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    data = planset_to_dict(plan_set)
+    data["created_at"] = datetime.now().isoformat()
+    atomic_write_json(path, data)
 
 
 def load_pending_planset(path: str = _PENDING_PLAN_PATH):
     """載入今日待執行的 PlanSet。找不到回傳 None。"""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        return planset_from_dict(data)
+        plan_set = planset_from_dict(data)
+        # 把 created_at 附加到 plan_set 物件（若原本不含此屬性）
+        if plan_set is not None and not hasattr(plan_set, "created_at"):
+            plan_set.created_at = data.get("created_at")
+        elif plan_set is not None and data.get("created_at"):
+            # 覆寫（若物件有預設值）
+            plan_set.created_at = data.get("created_at")
+        return plan_set
     except Exception:
         return None
 
@@ -577,11 +604,21 @@ def send_morning_push(briefing, plan_set, starting_capital: float = 0.0) -> None
     })
 
 
-def handle_select_plan(callback_query: dict) -> None:
-    """處理使用者點選策略的 callback：記錄到 daily_tracker + 執行 picks。"""
-    chat_id   = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
-    data      = callback_query.get("data", "")
-    plan_type = data.split(":", 1)[1] if ":" in data else ""
+def handle_select_plan(callback_query_or_chat_id, plan_type_arg: str = "") -> None:
+    """處理使用者點選策略的 callback：記錄到 daily_tracker + 執行 picks。
+
+    支援兩種呼叫方式：
+        handle_select_plan(callback_query_dict)
+        handle_select_plan(chat_id_str, plan_type_str)   # 測試用
+    """
+    if isinstance(callback_query_or_chat_id, dict):
+        callback_query = callback_query_or_chat_id
+        chat_id   = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+        data      = callback_query.get("data", "")
+        plan_type = data.split(":", 1)[1] if ":" in data else ""
+    else:
+        chat_id   = str(callback_query_or_chat_id)
+        plan_type = plan_type_arg
 
     valid_plans = {"aggressive", "balanced", "conservative"}
     if plan_type not in valid_plans:
@@ -591,8 +628,20 @@ def handle_select_plan(callback_query: dict) -> None:
     label = _PLAN_LABEL.get(plan_type, plan_type)
     emoji = _PLAN_EMOJI.get(plan_type, "📋")
 
-    # 1. 載入今日 PlanSet（找不到時不中斷，改為警告）
+    # 1. 載入今日 PlanSet
     plan_set = load_pending_planset()
+
+    # 過期檢查
+    if plan_set is not None:
+        created_at_str = getattr(plan_set, "created_at", None)
+        if created_at_str:
+            try:
+                created = datetime.fromisoformat(created_at_str)
+                if created.date() < datetime.now().date():
+                    send_text(chat_id, "⚠️ 策略計劃已過期，請等待今日 08:30 新策略推播。")
+                    return
+            except Exception:
+                pass
 
     # 2. 執行 picks（有計劃才執行）
     exec_lines: list[str] = []
@@ -796,7 +845,7 @@ def handle_settle_now(chat_id: str) -> None:
             plan_type=plan_type,
             total_pnl=total_pnl,
             pnl_pct=total_pnl_pct,
-            market_index_change=0.0,   # TODO: 串接大盤指數
+            market_index_change=fetch_market_index_change(),
             n_win=n_win,
             n_loss=n_loss,
         ))

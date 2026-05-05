@@ -96,11 +96,15 @@ class SimulatedPortfolio:
         reason: str,
         entry_date: date,
     ) -> None:
-        """新建倉位。SimulatedPortfolio 不強制資金上限（模擬 / 匯入現有持倉用）。"""
+        """新建倉位。資金不足時 raise ValueError。"""
         if code in self._positions:
             raise ValueError(f"已持有 {code}，請使用 add_position 加碼")
 
         cost = self._calc_cost(price, quantity, is_fractional, shares)
+        if self._cash < cost:
+            raise ValueError(
+                f"資金不足：需要 {cost:,.0f} 元，可用 {self._cash:,.0f} 元"
+            )
         self._cash -= cost
         self._positions[code] = Position(
             code=code, name=name,
@@ -116,12 +120,16 @@ class SimulatedPortfolio:
         is_fractional: bool,
         shares: int,
     ) -> None:
-        """加碼現有持倉，更新加權平均成本。"""
+        """加碼現有持倉，更新加權平均成本。資金不足時 raise ValueError。"""
         pos = self._positions.get(code)
         if pos is None:
             raise ValueError(f"未持有 {code}，請使用 open_position 建倉")
 
         cost = self._calc_cost(price, quantity, is_fractional, shares)
+        if self._cash < cost:
+            raise ValueError(
+                f"資金不足：需要 {cost:,.0f} 元，可用 {self._cash:,.0f} 元"
+            )
         add_shares = shares if is_fractional else quantity * 1_000
         old_shares = pos.total_shares
         new_shares  = old_shares + add_shares
@@ -247,3 +255,46 @@ class SimulatedPortfolio:
         if is_fractional:
             return price * shares
         return price * quantity * 1_000
+
+    def repair_to_initial(self) -> None:
+        """重置現金為初始資本，清空異常持倉。緊急修復用。"""
+        self._cash = self._initial_capital
+        self._positions.clear()
+
+
+# ── Conversion helper ─────────────────────────────────────────────────────────
+
+def positions_to_portfolio(
+    positions: list[dict],
+    available_cash: float = 0.0,
+) -> SimulatedPortfolio:
+    """Convert a list of position dicts (from fetch_positions) into SimulatedPortfolio.
+
+    Each dict should have:
+        stock_code, name, cost (avg price), current (current price), quantity (張數)
+    """
+    portfolio = SimulatedPortfolio(initial_capital=available_cash)
+    # Set cash directly — positions are already held, not "bought" from this capital
+    portfolio._cash = available_cash
+
+    for pos in positions:
+        code     = pos["stock_code"]
+        name     = pos.get("name", code)
+        avg_cost = float(pos.get("cost", 0.0))
+        current  = float(pos.get("current", 0.0))
+        quantity = int(pos.get("quantity", 0))
+
+        # Directly insert without cash deduction (importing existing positions)
+        portfolio._positions[code] = Position(
+            code=code,
+            name=name,
+            quantity=quantity,
+            is_fractional=False,
+            shares=0,
+            avg_cost=avg_cost,
+            entry_date=date.today(),
+            entry_reason="imported",
+            current_price=current,
+        )
+
+    return portfolio
