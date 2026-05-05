@@ -1,27 +1,5 @@
-"""Atomic JSON read/write helpers.
-
-atomic_write_json writes to a .tmp file then os.replace() to avoid partial writes.
-"""
-from __future__ import annotations
-
-import json
-import os
-from pathlib import Path
-
-
-def atomic_write_json(path: str, data, indent: int = 2) -> None:
-    """Write *data* to *path* atomically (via a .tmp file)."""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = str(p) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=indent)
-    os.replace(tmp, str(p))
-
-
-def atomic_read_json(path: str):
-    """Read and parse JSON from *path*. Returns None if file missing or corrupt."""
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
+# Re-export from root-level atomic_json for backward compatibility.
+# The canonical implementation lives at atomic_json.py (project root)
+# to avoid CWD-dependent import issues when Streamlit or scripts run
+# from a different working directory.
+from atomic_json import atomic_write_json, atomic_read_json  # noqa: F401

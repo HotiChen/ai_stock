@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from utils.atomic_json import atomic_write_json
+from atomic_json import atomic_write_json
 
 _DEFAULT_DIR = "data/daily_tracking"
 

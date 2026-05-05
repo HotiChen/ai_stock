@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from utils.atomic_json import atomic_read_json, atomic_write_json
+from atomic_json import atomic_read_json, atomic_write_json
 
 
 def test_write_and_read_back(tmp_path):

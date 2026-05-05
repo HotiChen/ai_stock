@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from utils.atomic_json import atomic_write_json
+from atomic_json import atomic_write_json
 
 
 @dataclass

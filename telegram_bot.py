@@ -37,7 +37,7 @@ from sim_plan_store import planset_to_dict, planset_from_dict
 from sim_position_store import SimPosition, save_sim_positions
 import json
 
-from utils.atomic_json import atomic_write_json
+from atomic_json import atomic_write_json
 from market_index import fetch_market_index_change
 
 log = get_logger(__name__)
@@ -268,7 +268,7 @@ _STOP_LOSS_PATH = Path("data/stop_loss.json")
 
 def _load_stop_losses() -> dict[str, float]:
     """H5: 從磁碟讀取所有停損設定（{code: price}）。"""
-    from utils.atomic_json import atomic_read_json
+    from atomic_json import atomic_read_json
     data = atomic_read_json(_STOP_LOSS_PATH)
     if isinstance(data, dict):
         return {k: float(v) for k, v in data.items()}
@@ -277,7 +277,7 @@ def _load_stop_losses() -> dict[str, float]:
 
 def _save_stop_loss(code: str, price: float) -> None:
     """H5: 原子寫入停損設定，重啟後依然保留。"""
-    from utils.atomic_json import atomic_write_json, atomic_read_json
+    from atomic_json import atomic_write_json, atomic_read_json
     data = atomic_read_json(_STOP_LOSS_PATH)
     stops = data if isinstance(data, dict) else {}
     stops[code] = price
