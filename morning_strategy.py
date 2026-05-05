@@ -35,6 +35,24 @@ from logger import get_logger
 log = get_logger("morning_strategy")
 
 
+def _load_last_weekly_hint() -> list[str]:
+    """讀取最新一份週報的 next_week 建議（僅週一使用）。"""
+    import json
+    data_dir = Path("data")
+    reports = sorted(data_dir.glob("weekly_report_*.json"), reverse=True)
+    if not reports:
+        return []
+    try:
+        with reports[0].open(encoding="utf-8") as f:
+            report = json.load(f)
+        hints = report.get("ai_report", {}).get("next_week", [])
+        log.info("載入週報建議來源：%s，共 %d 條", reports[0].name, len(hints))
+        return hints if isinstance(hints, list) else []
+    except Exception as e:
+        log.warning("讀取週報建議失敗：%s", e)
+        return []
+
+
 def _is_trading_day() -> bool:
     """週一到週五才執行（不含假日，未做完整節假日判斷）。"""
     return datetime.now().weekday() < 5
@@ -269,12 +287,22 @@ def run() -> None:
     if portfolio and portfolio.get_positions():
         log.info("傳入持倉 %d 檔，AI 將考慮 hold/add/reduce/close/switch", len(portfolio.get_positions()))
 
+    # ── 週一才載入上週 AI 複盤建議 ────────────────────────────
+    weekly_hint: list[str] | None = None
+    if datetime.now().weekday() == 0:   # 0 = 週一
+        weekly_hint = _load_last_weekly_hint()
+        if weekly_hint:
+            log.info("週一模式：載入上週複盤建議 %d 條", len(weekly_hint))
+
     # ── 建立候選股 + 生成策略 ─────────────────────────────────
     api = _get_api()
     try:
         candidates = build_candidates(api)
         log.info("開始生成三套策略計劃...")
-        plan_set = generate_strategy_plans(goal, current_value, candidates, portfolio=portfolio)
+        plan_set = generate_strategy_plans(
+            goal, current_value, candidates,
+            portfolio=portfolio, weekly_hint=weekly_hint,
+        )
         log.info("策略生成完成，推播到 Telegram...")
         send_morning_push(briefing=None, plan_set=plan_set, starting_capital=current_value)
         log.info("=== morning_strategy 完成 ===")

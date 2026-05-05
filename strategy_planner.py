@@ -217,6 +217,7 @@ def build_planner_prompt(
     candidates: list[dict],
     market_summary: str = "",
     portfolio: Optional[SimulatedPortfolio] = None,
+    weekly_hint: list[str] | None = None,
 ) -> str:
     # 支援 StrategyGoal 和 StrategyPlannerGoal 兩種傳入方式
     if hasattr(goal, "end_date"):
@@ -270,6 +271,10 @@ def build_planner_prompt(
         f"\n=== 使用者自訂限制 ===\n{constraint_section}\n"
         if constraint_section else ""
     )
+    weekly_hint_block = ""
+    if weekly_hint:
+        hints = "\n".join(f"• {h}" for h in weekly_hint)
+        weekly_hint_block = f"\n=== 上週 AI 複盤建議（請納入本週策略參考）===\n{hints}\n"
 
     return f"""你是一位有野心的台股投資策略師，擅長把總體環境、產業趨勢、個股催化劑整合成具體可執行的投資計劃。
 
@@ -282,6 +287,7 @@ def build_planner_prompt(
 策略方向：{approach}
 {market_section}
 {positions_section}
+{weekly_hint_block}
 {constraint_block}
 === AI 分析過的候選股票（可用現金：{available_capital:,.0f} 元）===
 {stocks_text}
@@ -798,6 +804,7 @@ def generate_strategy_plans(
     current_value: float,
     candidates: list[dict],
     portfolio: Optional[SimulatedPortfolio] = None,
+    weekly_hint: list[str] | None = None,
 ) -> Optional[PlanSet]:
     # 若傳入 portfolio，以實際可用現金作為資金上限
     effective_capital = (
@@ -805,7 +812,10 @@ def generate_strategy_plans(
     )
     # 只把有真實報價且本金買得起的股票傳給 AI，防止 AI 選買不起的股票
     affordable = filter_affordable_candidates(candidates, effective_capital)
-    prompt = build_planner_prompt(goal, current_value, affordable, portfolio=portfolio)
+    prompt = build_planner_prompt(
+        goal, current_value, affordable,
+        portfolio=portfolio, weekly_hint=weekly_hint,
+    )
     try:
         raw = call_sonnet(prompt)
         if not raw:
