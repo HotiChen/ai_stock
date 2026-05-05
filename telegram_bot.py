@@ -624,6 +624,7 @@ def handle_select_plan(callback_query: dict) -> None:
 
     stock_lines: list[str] = []
     sim_positions: list[SimPosition] = []
+    price_map_local: dict[str, float] = {}   # 供 learning_db 寫入用
     total_cost = 0.0
 
     if plan_set is not None:
@@ -644,6 +645,7 @@ def handle_select_plan(callback_query: dict) -> None:
                     price = float(_result[0].close) if _result else 0.0
                 except Exception:
                     price = 0.0
+                price_map_local[p.code] = price
                 qty_str = f"{p.shares} 股（零股）" if p.is_fractional else f"{p.quantity} 張"
                 cost = p.shares * price if p.is_fractional else p.quantity * 1000 * price
                 total_cost += cost
@@ -667,6 +669,47 @@ def handle_select_plan(callback_query: dict) -> None:
                     log.info("sim_positions saved: %d stocks", len(sim_positions))
                 except Exception as _se:
                     log.warning("save_sim_positions failed: %s", _se)
+
+            # 盤前寫入 learning_db（預測記錄 + 籌碼快照）
+            try:
+                from learning_db import LearningDB, StockPredictionLog, ChipSnapshot
+                from chip_data import fetch_institutional_investors, fetch_margin_trading
+                ldb   = LearningDB()
+                today = date.today()
+                today_str = today.strftime("%Y%m%d")
+                inst_data   = fetch_institutional_investors(today_str)
+                margin_data = fetch_margin_trading(today_str)
+
+                for p in plan.picks:
+                    # 預測記錄
+                    ldb.insert_prediction(StockPredictionLog(
+                        date=today,
+                        code=p.code,
+                        name=p.name,
+                        action=p.action,
+                        confidence=p.confidence,
+                        expected_return_pct=p.expected_return_pct,
+                        entry_price=price_map_local.get(p.code, 0.0),
+                        closing_price=None,
+                        actual_return_pct=None,
+                        was_correct=None,
+                    ))
+                    # 籌碼快照
+                    inst = inst_data.get(p.code, {})
+                    margin = margin_data.get(p.code, {})
+                    margin_prev = margin.get("margin_prev", 0)
+                    margin_change = margin.get("margin_change", 0)
+                    margin_pct = (margin_change / margin_prev * 100) if margin_prev else 0.0
+                    ldb.upsert_chip_snapshot(ChipSnapshot(
+                        date=today,
+                        code=p.code,
+                        foreign_net=inst.get("foreign_net", 0.0),
+                        trust_net=inst.get("investment_trust_net", 0.0),
+                        margin_change_pct=margin_pct,
+                    ))
+                log.info("learning_db predictions inserted: %d stocks", len(plan.picks))
+            except Exception as _le:
+                log.warning("learning_db pre-market write failed: %s", _le)
         except Exception:
             pass
 
@@ -739,6 +782,56 @@ def handle_settle_now(chat_id: str) -> None:
     plan_type     = positions[0].plan_type
     entry_date    = positions[0].entry_date
 
+    # ── 寫入 learning_db ─────────────────────────────────────
+    try:
+        from learning_db import LearningDB, DailyStrategyLog, StockPredictionLog
+        ldb = LearningDB()
+        today = date.today()
+        n_win  = sum(1 for s in per_stock if s["pnl"] >= 0)
+        n_loss = sum(1 for s in per_stock if s["pnl"] < 0)
+
+        # 日策略彙總
+        ldb.upsert_daily_log(DailyStrategyLog(
+            date=today,
+            plan_type=plan_type,
+            total_pnl=total_pnl,
+            pnl_pct=total_pnl_pct,
+            market_index_change=0.0,   # TODO: 串接大盤指數
+            n_win=n_win,
+            n_loss=n_loss,
+        ))
+
+        # 個股預測結果（先插入、再更新收盤價）
+        for s in per_stock:
+            entry_pct = s.get("expected_return_pct", 0.0)
+            was_correct = s["pnl"] >= 0
+            # 先確保有預測紀錄（盤前若未插入，在此補建）
+            ldb.insert_prediction(StockPredictionLog(
+                date=today,
+                code=s["code"],
+                name=s["name"],
+                action="open",
+                confidence=s.get("confidence", 0),
+                expected_return_pct=entry_pct,
+                entry_price=s["entry_price"],
+                closing_price=None,
+                actual_return_pct=None,
+                was_correct=None,
+            ))
+            ldb.update_closing_price(
+                date=today,
+                code=s["code"],
+                closing_price=s["closing_price"],
+                actual_return_pct=s.get("actual_return_pct",
+                    (s["closing_price"] - s["entry_price"]) / s["entry_price"] * 100
+                    if s["entry_price"] > 0 else 0.0),
+                was_correct=was_correct,
+            )
+        log.info("learning_db updated: %d stocks", len(per_stock))
+    except Exception as _le:
+        log.warning("learning_db write failed: %s", _le)
+
+    # ── 推播結算結果 ──────────────────────────────────────────
     pnl_emoji = "📈" if total_pnl >= 0 else "📉"
     plan_zh   = {"aggressive": "積極版", "balanced": "均衡版", "conservative": "保守版"}.get(plan_type, plan_type)
 
