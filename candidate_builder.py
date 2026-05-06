@@ -46,6 +46,55 @@ def _get_name_map(api) -> dict[str, str]:
     return result
 
 
+def _fetch_yfinance_prices(codes: list[str]) -> dict[str, float]:
+    """用 yfinance 批次取台股前一日收盤價，作為 Shioaji 盤前/模擬模式的 fallback。
+
+    台股代號規則：
+      - 純數字 4 碼 → 加 ".TW"（上市）
+      - 數字開頭含字母（如 00878B）→ 加 ".TWO"（上櫃）
+      - 已含 dot 的跳過
+    失敗時回傳空 dict（不影響主流程）。
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return {}
+
+    def _suffix(code: str) -> str:
+        if "." in code:
+            return code
+        # 零股 ETF 或上櫃標的常有字母結尾（如 00878B）
+        if code.isdigit():
+            return f"{code}.TW"
+        return f"{code}.TWO"
+
+    tickers = {code: _suffix(code) for code in codes}
+    symbols = list(tickers.values())
+
+    result: dict[str, float] = {}
+    try:
+        data = yf.download(
+            symbols,
+            period="2d",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+        close = data.get("Close", data)  # yfinance >= 0.2 returns MultiIndex
+
+        for code, symbol in tickers.items():
+            try:
+                col = close[symbol] if symbol in close.columns else close
+                last = col.dropna().iloc[-1]
+                if last > 0:
+                    result[code] = float(last)
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning("yfinance batch download failed: %s", e)
+    return result
+
+
 def _fetch_snapshot(api, code: str) -> dict:
     """執行緒安全的單支股票 snapshot，timeout 6 秒，失敗回傳空 dict。"""
     result: dict = {}
@@ -142,6 +191,15 @@ def build_candidates(api=None) -> list[dict]:
             snap = _fetch_snapshot(api, c["code"])
             c["close"]       = snap.get("close",       0.0)
             c["change_rate"] = snap.get("change_rate", 0.0)
+
+    # ── 3b. yfinance 補價（Shioaji 盤前/模擬模式拿不到即時價格時的 fallback）──
+    zero_codes = [c["code"] for c in deduped if c.get("close", 0.0) == 0.0]
+    if zero_codes:
+        yf_prices = _fetch_yfinance_prices(zero_codes)
+        for c in deduped:
+            if c.get("close", 0.0) == 0.0 and c["code"] in yf_prices:
+                c["close"] = yf_prices[c["code"]]
+                log.debug("yfinance fallback price: %s → %.2f", c["code"], c["close"])
 
     # ── 4. 抓籌碼資料 ────────────────────────────────────────────────────────
     today_str = date.today().strftime("%Y%m%d")
