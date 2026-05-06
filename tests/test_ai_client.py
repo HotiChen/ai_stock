@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
@@ -133,3 +133,93 @@ class TestBuildSafePrompt:
         result = build_safe_prompt("only system prompt")
         assert "only system prompt" in result
         assert "<external_data>" not in result
+
+
+# ── H3: _call_with_retry 重試邏輯 ─────────────────────────────────────────────
+
+class TestCallWithRetry:
+    """驗證 retry / backoff / 4xx 不重試 等行為。"""
+
+    @patch("ai_client.time.sleep")
+    @patch("ai_client._get_client")
+    def test_rate_limit_triggers_retry(self, mock_get, mock_sleep):
+        """RateLimitError 第一次後應重試，最終成功。"""
+        import anthropic
+        mock_client = mock_get.return_value
+        mock_client.messages.create.side_effect = [
+            anthropic.RateLimitError(
+                message="rate limit", response=MagicMock(status_code=429), body={}
+            ),
+            MagicMock(content=[MagicMock(text="成功")]),
+        ]
+        from ai_client import call_haiku
+        result = call_haiku("prompt")
+        assert result == "成功"
+        assert mock_client.messages.create.call_count == 2
+
+    @patch("ai_client.time.sleep")
+    @patch("ai_client._get_client")
+    def test_rate_limit_retries_up_to_max(self, mock_get, mock_sleep):
+        """連續 RateLimitError 超過上限後回傳空字串。"""
+        import anthropic
+        mock_client = mock_get.return_value
+        mock_client.messages.create.side_effect = anthropic.RateLimitError(
+            message="rate limit", response=MagicMock(status_code=429), body={}
+        )
+        from ai_client import call_haiku, _RETRY_MAX
+        result = call_haiku("prompt")
+        assert result == ""
+        assert mock_client.messages.create.call_count == _RETRY_MAX
+
+    @patch("ai_client.time.sleep")
+    @patch("ai_client._get_client")
+    def test_exponential_backoff_sleep_times(self, mock_get, mock_sleep):
+        """sleep 時間符合指數退避：2^0*base, 2^1*base ..."""
+        import anthropic
+        from ai_client import _RETRY_BASE_S, _RETRY_MAX
+        mock_client = mock_get.return_value
+        mock_client.messages.create.side_effect = anthropic.RateLimitError(
+            message="rate limit", response=MagicMock(status_code=429), body={}
+        )
+        from ai_client import call_haiku
+        call_haiku("prompt")
+        expected_sleeps = [_RETRY_BASE_S * (2 ** i) for i in range(_RETRY_MAX)]
+        actual_sleeps = [c.args[0] for c in mock_sleep.call_args_list]
+        assert actual_sleeps == expected_sleeps
+
+    @patch("ai_client.time.sleep")
+    @patch("ai_client._get_client")
+    def test_server_5xx_triggers_retry(self, mock_get, mock_sleep):
+        """5xx 伺服器錯誤也應重試。"""
+        import anthropic
+        mock_client = mock_get.return_value
+        err_resp = MagicMock(status_code=503)
+        server_err = anthropic.APIStatusError(
+            message="server error", response=err_resp, body={}
+        )
+        mock_client.messages.create.side_effect = [
+            server_err,
+            MagicMock(content=[MagicMock(text="recovered")]),
+        ]
+        from ai_client import call_sonnet
+        result = call_sonnet("prompt")
+        assert result == "recovered"
+        assert mock_client.messages.create.call_count == 2
+
+    @patch("ai_client.time.sleep")
+    @patch("ai_client._get_client")
+    def test_4xx_does_not_retry(self, mock_get, mock_sleep):
+        """4xx（非 429）不重試，立即回傳空字串。"""
+        import anthropic
+        mock_client = mock_get.return_value
+        err_resp = MagicMock(status_code=400)
+        client_err = anthropic.APIStatusError(
+            message="bad request", response=err_resp, body={}
+        )
+        mock_client.messages.create.side_effect = client_err
+        from ai_client import call_haiku
+        result = call_haiku("prompt")
+        assert result == ""
+        # 只呼叫一次，不重試
+        assert mock_client.messages.create.call_count == 1
+        mock_sleep.assert_not_called()

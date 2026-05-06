@@ -372,3 +372,135 @@ def test_send_text_reply_markup_passed_as_dict():
         bot.send_text("123", "test", reply_markup=keyboard)
         payload = mock_post.call_args[0][1]
         assert isinstance(payload["reply_markup"], dict)
+
+
+# ── H9: USER_ID 雙重驗證 ──────────────────────────────────────────────────────
+
+class TestUserIdDualAuth:
+    """_is_authorized() 在 USER_ID 設定後需同時驗證 chat_id 與 from_user.id。"""
+
+    def _make_update_with_user(self, chat_id: str, user_id: str) -> dict:
+        return {
+            "update_id": 1,
+            "message": {
+                "chat": {"id": chat_id},
+                "from": {"id": user_id},
+                "text": "📊 今日狀態",
+            },
+        }
+
+    def _make_callback_with_user(self, chat_id: str, user_id: str) -> dict:
+        return {
+            "update_id": 1,
+            "callback_query": {
+                "id": "cq1",
+                "data": "approve:2330",
+                "from": {"id": user_id},
+                "message": {"chat": {"id": chat_id}},
+            },
+        }
+
+    def test_user_id_not_set_only_checks_chat_id(self, monkeypatch):
+        """USER_ID 未設定時，任何 user_id 都通過（只查 chat_id）。"""
+        monkeypatch.setattr(bot, "CHAT_ID", "111")
+        monkeypatch.setattr(bot, "USER_ID", "")
+        with patch("telegram_bot.handle_status") as mock_h:
+            bot.process_update(self._make_update_with_user("111", "999"))
+            mock_h.assert_called_once()
+
+    def test_correct_user_id_passes(self, monkeypatch):
+        """CHAT_ID + USER_ID 都正確 → 通過。"""
+        monkeypatch.setattr(bot, "CHAT_ID", "111")
+        monkeypatch.setattr(bot, "USER_ID", "42")
+        with patch("telegram_bot.handle_status") as mock_h:
+            bot.process_update(self._make_update_with_user("111", "42"))
+            mock_h.assert_called_once()
+
+    def test_wrong_user_id_blocked(self, monkeypatch):
+        """CHAT_ID 正確但 USER_ID 不符 → 拒絕。"""
+        monkeypatch.setattr(bot, "CHAT_ID", "111")
+        monkeypatch.setattr(bot, "USER_ID", "42")
+        with patch("telegram_bot.handle_status") as mock_h, \
+             patch("telegram_bot.send_text") as mock_send:
+            bot.process_update(self._make_update_with_user("111", "999"))
+            mock_h.assert_not_called()
+            mock_send.assert_not_called()
+
+    def test_callback_wrong_user_id_blocked(self, monkeypatch):
+        """callback_query 發送者 user_id 不符 → 拒絕，send_text 不被呼叫。"""
+        monkeypatch.setattr(bot, "CHAT_ID", "111")
+        monkeypatch.setattr(bot, "USER_ID", "42")
+        with patch("telegram_bot.send_text") as mock_send:
+            bot.process_update(self._make_callback_with_user("111", "999"))
+            mock_send.assert_not_called()
+
+    def test_callback_correct_user_id_passes(self, monkeypatch):
+        """callback_query + 正確 USER_ID → 通過路由，回覆確認訊息。"""
+        monkeypatch.setattr(bot, "CHAT_ID", "111")
+        monkeypatch.setattr(bot, "USER_ID", "42")
+        with patch("telegram_bot.send_text") as mock_send:
+            bot.process_update(self._make_callback_with_user("111", "42"))
+            # approve:2330 callback 應回覆批准確認訊息
+            mock_send.assert_called()
+
+
+# ── H5: Stop-loss 持久化 ──────────────────────────────────────────────────────
+
+class TestStopLossPersistence:
+    """_save_stop_loss / _load_stop_losses 的 JSON 讀寫行為。"""
+
+    def test_save_and_load_roundtrip(self, tmp_path, monkeypatch):
+        """寫入後可以讀回相同數值。"""
+        sl_path = tmp_path / "stop_loss.json"
+        monkeypatch.setattr(bot, "_STOP_LOSS_PATH", sl_path)
+
+        bot._save_stop_loss("2330", 540.0)
+        result = bot._load_stop_losses()
+
+        assert result["2330"] == pytest.approx(540.0)
+
+    def test_save_multiple_stocks(self, tmp_path, monkeypatch):
+        """多支股票各自儲存，不互相覆蓋。"""
+        sl_path = tmp_path / "stop_loss.json"
+        monkeypatch.setattr(bot, "_STOP_LOSS_PATH", sl_path)
+
+        bot._save_stop_loss("2330", 540.0)
+        bot._save_stop_loss("2454", 800.0)
+        bot._save_stop_loss("6505", 95.5)
+
+        result = bot._load_stop_losses()
+        assert result["2330"] == pytest.approx(540.0)
+        assert result["2454"] == pytest.approx(800.0)
+        assert result["6505"] == pytest.approx(95.5)
+
+    def test_overwrite_existing_entry(self, tmp_path, monkeypatch):
+        """同一股票再次儲存會覆蓋舊值。"""
+        sl_path = tmp_path / "stop_loss.json"
+        monkeypatch.setattr(bot, "_STOP_LOSS_PATH", sl_path)
+
+        bot._save_stop_loss("2330", 540.0)
+        bot._save_stop_loss("2330", 520.0)
+
+        result = bot._load_stop_losses()
+        assert result["2330"] == pytest.approx(520.0)
+
+    def test_load_returns_empty_if_file_missing(self, tmp_path, monkeypatch):
+        """檔案不存在時回傳空 dict，不拋例外。"""
+        sl_path = tmp_path / "nonexistent.json"
+        monkeypatch.setattr(bot, "_STOP_LOSS_PATH", sl_path)
+
+        result = bot._load_stop_losses()
+        assert result == {}
+
+    def test_save_uses_atomic_write(self, tmp_path, monkeypatch):
+        """_save_stop_loss 透過 atomic_write_json 寫入（不遺留 .tmp 檔）。"""
+        import os
+        sl_path = tmp_path / "stop_loss.json"
+        monkeypatch.setattr(bot, "_STOP_LOSS_PATH", sl_path)
+
+        bot._save_stop_loss("2330", 540.0)
+
+        # .tmp 不應殘留
+        assert not (tmp_path / "stop_loss.json.tmp").exists()
+        # 正式檔案存在
+        assert sl_path.exists()

@@ -413,3 +413,48 @@ class TestFillPostMarket:
         with tempfile.TemporaryDirectory() as tmp:
             with pytest.raises(FileNotFoundError):
                 fill_post_market(TODAY, "analysis", tmp)
+
+
+# ── H8: requests.get 必須帶 verify=True ──────────────────────────────────────
+
+class TestRequestsVerifyTrue:
+    """確認 morning_briefing 的 HTTP 請求都帶 verify=True，不跳過 TLS 驗證。"""
+
+    def _mock_requests(self, json_return: dict):
+        """morning_briefing 在函數內 `import requests`，需透過 sys.modules mock。"""
+        mock_req = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = json_return
+        mock_req.get.return_value = mock_resp
+        return mock_req
+
+    def test_find_latest_trading_date_uses_verify_true(self):
+        """_find_latest_trading_date 的 requests.get 應傳 verify=True。"""
+        import morning_briefing as mb
+        mock_req = self._mock_requests({"stat": "OK", "data": [["合計", "", "", "5000000"]]})
+        with patch.dict("sys.modules", {"requests": mock_req}):
+            mb._find_latest_trading_date(max_lookback=1)
+        call_kwargs = mock_req.get.call_args.kwargs
+        assert call_kwargs.get("verify") is True, \
+            f"verify 應為 True，實際：{call_kwargs.get('verify')}"
+
+    def test_fetch_twse_institutional_uses_verify_true(self):
+        """_fetch_twse_institutional 的 requests.get 應傳 verify=True。"""
+        from datetime import date as _date
+        import morning_briefing as mb
+        mock_req = self._mock_requests({
+            "stat": "OK",
+            "data": [["外資及陸資", "", "", "50000000000"]],
+        })
+        with patch.dict("sys.modules", {"requests": mock_req}):
+            mb._fetch_twse_institutional(target_date=_date(2026, 5, 6))
+        call_kwargs = mock_req.get.call_args.kwargs
+        assert call_kwargs.get("verify") is True, \
+            f"verify 應為 True，實際：{call_kwargs.get('verify')}"
+
+    def test_no_verify_false_in_source(self):
+        """靜態檢查：原始碼中不應出現 verify=False。"""
+        from pathlib import Path
+        src = Path("morning_briefing.py").read_text(encoding="utf-8")
+        assert "verify=False" not in src, \
+            "morning_briefing.py 仍含有 verify=False，請改為 verify=True"

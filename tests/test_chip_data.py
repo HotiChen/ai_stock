@@ -484,3 +484,56 @@ class TestFilterRevenueGrowth:
     def test_empty_data_returns_empty(self):
         """空資料回傳 []"""
         assert filter_revenue_growth({}) == []
+
+
+# ── H1: requests.get 帶 timeout 參數 ──────────────────────────────────────────
+
+class TestRequestTimeout:
+    """驗證 fetch_institutional_investors / fetch_margin_trading 都傳 timeout 給 requests.get。"""
+
+    def test_institutional_investors_passes_timeout(self):
+        with patch("chip_data.requests.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"stat": "OK", "data": []}
+            mock_get.return_value = mock_resp
+
+            fetch_institutional_investors("20260505")
+
+            call_kwargs = mock_get.call_args
+            assert "timeout" in call_kwargs.kwargs, \
+                "requests.get 未傳 timeout 關鍵字參數"
+            assert call_kwargs.kwargs["timeout"] > 0
+
+    def test_margin_trading_passes_timeout(self):
+        with patch("chip_data.requests.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"stat": "OK", "data": []}
+            mock_get.return_value = mock_resp
+
+            fetch_margin_trading("20260505")
+
+            call_kwargs = mock_get.call_args
+            assert "timeout" in call_kwargs.kwargs, \
+                "requests.get 未傳 timeout 關鍵字參數"
+            assert call_kwargs.kwargs["timeout"] > 0
+
+    def test_continuous_buy_uses_rate_limit_sleep(self):
+        """多日查詢時應在呼叫之間 sleep，避免打爆 API。"""
+        import time
+        call_count = 0
+        data_by_date = {
+            "20260505": {"2330": {"foreign_net": 100.0, "investment_trust_net": 10.0}},
+            "20260504": {"2330": {"foreign_net": 200.0, "investment_trust_net": 20.0}},
+            "20260503": {"2330": {"foreign_net": 300.0, "investment_trust_net": 30.0}},
+        }
+
+        def counting_fetcher(date_str):
+            nonlocal call_count
+            call_count += 1
+            return data_by_date.get(date_str, {})
+
+        with patch("chip_data.time.sleep") as mock_sleep:
+            get_continuous_buy_days("2330", "20260505", data_fetcher=counting_fetcher, days=3)
+            # 3 日查詢，前 2 次後應各 sleep 一次（第一次不 sleep）
+            assert mock_sleep.call_count >= 2, \
+                f"days=3 應至少 sleep 2 次，實際 {mock_sleep.call_count} 次"
