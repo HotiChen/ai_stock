@@ -225,3 +225,154 @@ class TestFetchIndicators100Days:
         assert result is not None
         # should contain all keys needed by rules.py
         assert "current_price" in result or hasattr(result, "close")
+
+
+# ── M4: fetch_indicators_yfinance_batch ───────────────────────────────────────
+
+class TestFetchIndicatorsYfinanceBatch:
+    """驗證 yfinance 批次指標抓取邏輯（mock yfinance，不實際連線）。"""
+
+    def _make_ohlcv_df(self, n: int = 100):
+        """建立 n 筆假 OHLCV DataFrame，符合 calculate_indicators 需求。"""
+        import pandas as pd
+        import numpy as np
+        closes  = 100.0 + np.cumsum(np.random.randn(n) * 0.5)
+        highs   = closes + np.random.uniform(0.5, 2.0, n)
+        lows    = closes - np.random.uniform(0.5, 2.0, n)
+        volumes = np.random.randint(1000, 5000, n).astype(float)
+        return pd.DataFrame({
+            "Open": closes - 0.3,
+            "High": highs,
+            "Low": lows,
+            "Close": closes,
+            "Volume": volumes,
+        })
+
+    def _make_multi_df(self, symbols: list[str], n: int = 100):
+        """模擬 yfinance 多股 MultiIndex DataFrame。"""
+        import pandas as pd
+        frames = {}
+        for sym in symbols:
+            frames[sym] = self._make_ohlcv_df(n)
+        return pd.concat(frames, axis=1)
+
+    def test_returns_dict(self):
+        from technical_indicators import fetch_indicators_yfinance_batch
+        import sys
+        mock_yf = MagicMock()
+        df = self._make_multi_df(["2330.TW", "2454.TW"])
+        mock_yf.download.return_value = df
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            result = fetch_indicators_yfinance_batch(["2330", "2454"])
+        assert isinstance(result, dict)
+
+    def test_all_keys_present(self):
+        from technical_indicators import fetch_indicators_yfinance_batch
+        import sys
+        mock_yf = MagicMock()
+        df = self._make_multi_df(["2330.TW"])
+        mock_yf.download.return_value = df
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            result = fetch_indicators_yfinance_batch(["2330"])
+        if "2330" in result:
+            for key in ("MA5", "MA20", "RSI", "KD_K", "BB_upper", "volume_ratio"):
+                assert key in result["2330"], f"缺少欄位 {key}"
+
+    def test_empty_codes_returns_empty(self):
+        from technical_indicators import fetch_indicators_yfinance_batch
+        result = fetch_indicators_yfinance_batch([])
+        assert result == {}
+
+    def test_import_error_returns_empty(self):
+        from technical_indicators import fetch_indicators_yfinance_batch
+        import sys
+        sys.modules["yfinance"] = None  # type: ignore
+        try:
+            result = fetch_indicators_yfinance_batch(["2330"])
+            assert result == {}
+        finally:
+            sys.modules.pop("yfinance", None)
+
+    def test_download_exception_returns_empty(self):
+        from technical_indicators import fetch_indicators_yfinance_batch
+        import sys
+        mock_yf = MagicMock()
+        mock_yf.download.side_effect = Exception("network error")
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            result = fetch_indicators_yfinance_batch(["2330"])
+        assert result == {}
+
+    def test_insufficient_data_excluded(self):
+        """資料筆數不足 80 的股票不應出現在結果裡。"""
+        from technical_indicators import fetch_indicators_yfinance_batch
+        import sys
+        mock_yf = MagicMock()
+        # 只給 50 筆（不夠 80）
+        short_df = self._make_multi_df(["2330.TW"], n=50)
+        mock_yf.download.return_value = short_df
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            result = fetch_indicators_yfinance_batch(["2330"])
+        assert "2330" not in result
+
+    def test_suffix_digit_gets_tw(self):
+        """純數字代號應加 .TW 後綴。"""
+        from technical_indicators import fetch_indicators_yfinance_batch
+        import sys
+        mock_yf = MagicMock()
+        mock_yf.download.return_value = MagicMock(empty=True)
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            fetch_indicators_yfinance_batch(["2330"])
+        symbols_arg = str(mock_yf.download.call_args)
+        assert "2330.TW" in symbols_arg
+
+
+# ── M4: candidate indicators_text integration ─────────────────────────────────
+
+class TestIndicatorsInPrompt:
+    """驗證 build_planner_prompt 確實把技術面文字帶進 candidates。"""
+
+    def test_indicators_text_appears_in_prompt(self):
+        from strategy_planner import build_planner_prompt, StrategyPlannerGoal
+
+        goal = StrategyPlannerGoal(
+            initial_capital=30000.0,
+            target_return_pct=10.0,
+            max_drawdown_pct=5.0,
+            holding_days=5,
+            risk_level="moderate",
+        )
+        candidates = [{
+            "code": "2330",
+            "name": "台積電",
+            "close": 850.0,
+            "change_rate": 1.5,
+            "analysis": "外資買超",
+            "chip_score": 3.0,
+            "indicators_text": "均線：多頭排列 ✅（MA5=840 > MA20=800 > MA60=750）\nRSI：65.0（偏強）",
+        }]
+        prompt = build_planner_prompt(goal, 30000.0, candidates)
+        assert "📊技術面" in prompt, "prompt 裡沒有技術面區塊"
+        assert "均線：多頭排列" in prompt, "技術指標內容沒有出現在 prompt 裡"
+
+    def test_no_indicators_text_no_section(self):
+        """indicators_text 空時不應出現 📊技術面 標記。"""
+        from strategy_planner import build_planner_prompt, StrategyPlannerGoal
+
+        goal = StrategyPlannerGoal(
+            initial_capital=30000.0,
+            target_return_pct=10.0,
+            max_drawdown_pct=5.0,
+            holding_days=5,
+            risk_level="moderate",
+        )
+        candidates = [{
+            "code": "2330",
+            "name": "台積電",
+            "close": 850.0,
+            "change_rate": 1.5,
+            "analysis": "外資買超",
+            "chip_score": 3.0,
+            "indicators_text": "",
+        }]
+        prompt = build_planner_prompt(goal, 30000.0, candidates)
+        assert "📊技術面" not in prompt

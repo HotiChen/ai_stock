@@ -251,11 +251,14 @@ def build_planner_prompt(
         else:
             buy_tag = f"最多可買 {max_lots} 張（整張）或 {max_shares} 股（零股）"
 
+        indicators_text = c.get("indicators_text", "").strip()
+        ind_section = f"\n  📊技術面：{indicators_text}" if indicators_text else ""
+
         stocks_text += (
             f"- {c['code']} {c.get('name', '')}　"
             f"現價 {price:,.1f}　{buy_tag}　"
             f"漲跌 {c.get('change_rate', 0):+.1f}%　"
-            f"分析：{analysis}\n"
+            f"分析：{analysis}{ind_section}\n"
         )
     if not stocks_text:
         stocks_text = f"（目前無本金 {current_value:,.0f} 元以內可買的候選股票）\n"
@@ -547,10 +550,12 @@ def build_plan_prompt(
             tag = f"最多可買 {max_lots} 張（整張）｜或最多 {max_sh} 股（零股）"
         else:
             tag = f"整張買不起（需 {lot_cost:,.0f} 元）｜零股最多 {max_sh} 股"
+        ind_text = c.get("indicators_text", "").strip()
+        ind_section = f"\n  📊技術面：{ind_text}" if ind_text else ""
         stocks_text += (
             f"- {c['code']} {c.get('name', '')}　現價 {price:,.1f}　{tag}　"
             f"漲跌 {c.get('change_rate', 0):+.1f}%　"
-            f"分析：{c.get('analysis') or '無分析'}\n"
+            f"分析：{c.get('analysis') or '無分析'}{ind_section}\n"
         )
     if not stocks_text:
         stocks_text = f"（無候選股）\n"

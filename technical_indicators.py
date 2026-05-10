@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -301,3 +304,78 @@ def fetch_indicators(api, code: str) -> Optional[dict]:
         return calculate_indicators(df)
     except Exception:
         return None
+
+
+# ── yfinance batch fetcher（M4：補齊技術指標資料管道）───────────────────────────
+
+def fetch_indicators_yfinance_batch(codes: list[str]) -> dict[str, dict]:
+    """
+    批次透過 yfinance 抓 6 個月日線，計算所有技術指標。
+    在 Shioaji 無法取得 kbars（simulation / 盤前）時作為主要資料來源。
+
+    Returns:
+        {code: calculate_indicators() dict}，失敗或資料不足的 code 不在 dict 裡。
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+    except ImportError:
+        log.warning("yfinance 未安裝，無法取得技術指標")
+        return {}
+
+    if not codes:
+        return {}
+
+    def _suffix(code: str) -> str:
+        return f"{code}.TW" if code.isdigit() else f"{code}.TWO"
+
+    tickers: dict[str, str] = {code: _suffix(code) for code in codes}
+    symbols = list(tickers.values())
+
+    # ── 批次下載 ─────────────────────────────────────────────────────────────
+    try:
+        raw = yf.download(
+            symbols,
+            period="6mo",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+    except Exception as e:
+        log.warning("yfinance batch OHLCV download failed: %s", e)
+        return {}
+
+    if raw is None or raw.empty:
+        return {}
+
+    # ── 拆分每支股票的 DataFrame ──────────────────────────────────────────────
+    data_map: dict[str, "pd.DataFrame"] = {}
+    is_multi = isinstance(raw.columns, pd.MultiIndex)
+
+    if is_multi:
+        for sym in symbols:
+            try:
+                df = raw.xs(sym, level=1, axis=1).dropna()
+                if len(df) >= 80:
+                    data_map[sym] = df
+            except KeyError:
+                pass
+    else:
+        # 單支 symbol fallback（symbols 長度為 1 時 yfinance 不返回 MultiIndex）
+        df = raw.dropna()
+        if len(df) >= 80 and symbols:
+            data_map[symbols[0]] = df
+
+    # ── 計算指標 ──────────────────────────────────────────────────────────────
+    result: dict[str, dict] = {}
+    for code, symbol in tickers.items():
+        df = data_map.get(symbol)
+        if df is None:
+            continue
+        try:
+            result[code] = calculate_indicators(df)
+        except Exception as e:
+            log.debug("calc_indicators failed for %s: %s", code, e)
+
+    log.info("技術指標 yfinance batch：%d/%d 支成功", len(result), len(codes))
+    return result

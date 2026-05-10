@@ -201,6 +201,20 @@ def build_candidates(api=None) -> list[dict]:
                 c["close"] = yf_prices[c["code"]]
                 log.debug("yfinance fallback price: %s → %.2f", c["code"], c["close"])
 
+    # ── 3c. 技術指標（M4：yfinance 批次取 6 個月日線 → MA/RSI/KD/BB/量比）────
+    try:
+        from technical_indicators import fetch_indicators_yfinance_batch, format_indicators_text
+        all_codes = [c["code"] for c in deduped]
+        ind_map = fetch_indicators_yfinance_batch(all_codes)
+        for c in deduped:
+            ind = ind_map.get(c["code"])
+            c["indicators_text"] = format_indicators_text(ind) if ind else ""
+        log.info("技術指標：%d/%d 支取得成功", len(ind_map), len(all_codes))
+    except Exception as e:
+        log.warning("技術指標取得失敗：%s", e)
+        for c in deduped:
+            c.setdefault("indicators_text", "")
+
     # ── 4. 抓籌碼資料 ────────────────────────────────────────────────────────
     today_str = date.today().strftime("%Y%m%d")
     try:
