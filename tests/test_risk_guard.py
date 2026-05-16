@@ -204,11 +204,14 @@ class TestValidatePlanSectorLimit:
         existing = [_make_position("2303", sector="半導體", value=28_000.0)]  # 28%
         picks = [_make_pick("2330", "台積電", 5_000.0, sector="半導體")]  # would push to 33%
         result = validate_plan(picks, capital, current_positions=existing)
-        # total sector exposure 28+5 = 33% > 30%, pick should be reduced or rejected
+        # total sector exposure 28+5 = 33% > 30%: pick must be reduced (to 2k) or rejected
         approved = {p["code"]: p for p in result["approved"]}
+        rejected = {p["code"]: p for p in result["rejected"]}
         if "2330" in approved:
             sector_total = 28_000.0 + approved["2330"]["budget"]
             assert sector_total <= capital * 0.30 + 0.01
+        else:
+            assert "2330" in rejected  # fully rejected is also acceptable
 
     def test_different_sectors_not_affected_by_each_other(self):
         from risk_guard import validate_plan
@@ -221,6 +224,212 @@ class TestValidatePlanSectorLimit:
         result = validate_plan(picks, capital, current_positions=[])
         codes = [p["code"] for p in result["approved"]]
         assert len(codes) == 3
+
+
+# ── validate_plan: existing positions → single-stock cap ─────────────────────
+#
+# 核心場景：昨日已有持倉，今日再買同股或同板塊
+# 驗收：Guard 4（單股 5%）必須計算「已持倉 + 新增」的合計，不能只看新增。
+
+class TestValidatePlanSingleStockWithExistingPositions:
+    """Guard 4：單股上限需計入已持倉曝險。"""
+
+    def test_existing_holding_reduces_available_room(self):
+        """
+        輸入：2330 已持有 4,000（4%），新 pick budget=3,000（3%）
+        合計 7% > 5% → 應縮減至剩餘 1,000（1%）
+        """
+        from risk_guard import validate_plan
+        capital  = 100_000.0
+        existing = [_make_position("2330", sector="半導體", value=4_000.0)]
+        picks    = [_make_pick("2330", "台積電", 3_000.0, sector="半導體")]
+
+        result   = validate_plan(picks, capital, current_positions=existing)
+
+        approved = {p["code"]: p for p in result["approved"]}
+        assert "2330" in approved, "2330 should be approved with reduced budget"
+        assert approved["2330"]["budget"] == pytest.approx(1_000.0), (
+            f"Expected 1000 (room = 5000-4000), got {approved['2330']['budget']}"
+        )
+
+    def test_existing_holding_at_limit_rejects_new_buy(self):
+        """
+        輸入：2330 已持有 5,000（= 5% 上限）
+        新 pick → 直接拒絕，不得再加碼同一股票。
+        """
+        from risk_guard import validate_plan
+        capital  = 100_000.0
+        existing = [_make_position("2330", sector="半導體", value=5_000.0)]
+        picks    = [_make_pick("2330", "台積電", 2_000.0, sector="半導體")]
+
+        result   = validate_plan(picks, capital, current_positions=existing)
+
+        rejected_codes = [p["code"] for p in result["rejected"]]
+        assert "2330" in rejected_codes, "Already at 5% limit → must be rejected"
+        approved_codes = [p["code"] for p in result["approved"]]
+        assert "2330" not in approved_codes
+
+    def test_existing_holding_above_limit_rejects_new_buy(self):
+        """
+        輸入：舊邏輯下可能存入超限持倉（例如 6,000 = 6%）
+        新 pick → 仍應拒絕，不能繼續加碼。
+        """
+        from risk_guard import validate_plan
+        capital  = 100_000.0
+        existing = [_make_position("2330", sector="半導體", value=6_000.0)]
+        picks    = [_make_pick("2330", "台積電", 1_000.0, sector="半導體")]
+
+        result   = validate_plan(picks, capital, current_positions=existing)
+
+        rejected_codes = [p["code"] for p in result["rejected"]]
+        assert "2330" in rejected_codes
+
+    def test_different_stock_not_affected_by_existing_position(self):
+        """
+        2330 已持有 4%；新 pick 是 2454（不同股票）→ 2454 不受影響。
+        """
+        from risk_guard import validate_plan
+        capital  = 100_000.0
+        existing = [_make_position("2330", sector="半導體", value=4_000.0)]
+        picks    = [_make_pick("2454", "聯發科", 4_000.0, sector="半導體")]
+
+        result   = validate_plan(picks, capital, current_positions=existing)
+        # 2454 stock room = 5000 (no existing), 半導體 sector room = 30000-4000=26000
+        # → 4000 should pass both caps
+        approved_codes = [p["code"] for p in result["approved"]]
+        assert "2454" in approved_codes
+
+    def test_two_picks_same_stock_cumulative_cap(self):
+        """
+        同批次 picks 中有兩筆 2330：第一筆 3,000、第二筆 3,000
+        無既有持倉，上限 5,000。
+        第一筆核准（3,000），第二筆僅剩 2,000 空間 → 縮至 2,000。
+        """
+        from risk_guard import validate_plan
+        capital = 100_000.0
+        picks   = [
+            _make_pick("2330", "台積電", 3_000.0, sector="半導體"),
+            _make_pick("2330", "台積電", 3_000.0, sector="半導體"),
+        ]
+
+        result  = validate_plan(picks, capital, current_positions=[])
+
+        approved = result["approved"]
+        total_2330 = sum(p["budget"] for p in approved if p["code"] == "2330")
+        assert total_2330 <= 100_000.0 * 0.05 + 0.01, (
+            f"Total 2330 budget {total_2330} exceeds 5% cap"
+        )
+
+
+# ── validate_plan: 昨日持倉 + 今日新買 + 同板塊加碼 ──────────────────────────
+#
+# 最高風險場景：跨日持倉 + 板塊集中度雙重疊加
+
+class TestValidatePlanMultiDayExposure:
+    """昨日持倉 + 今日新買：sector_exposure 必須合計所有曝險。"""
+
+    def test_yesterday_plus_today_same_sector_capped(self):
+        """
+        昨日半導體持倉 28,000（28%）
+        今日新買半導體 pick budget=5,000 → 合計 33% > 30%
+        → 應縮減至 2,000（剩餘空間）
+        """
+        from risk_guard import validate_plan
+        capital  = 100_000.0
+        existing = [_make_position("2303", sector="半導體", value=28_000.0)]
+        picks    = [_make_pick("2330", "台積電", 5_000.0, sector="半導體")]
+
+        result   = validate_plan(picks, capital, current_positions=existing)
+
+        approved = {p["code"]: p for p in result["approved"]}
+        assert "2330" in approved, "Should be approved with reduced budget"
+        sector_total = 28_000.0 + approved["2330"]["budget"]
+        assert sector_total <= capital * 0.30 + 0.01, (
+            f"Sector total {sector_total} > 30% cap"
+        )
+        assert approved["2330"]["budget"] == pytest.approx(2_000.0)
+
+    def test_yesterday_sector_at_limit_rejects_today_same_sector(self):
+        """
+        昨日半導體已達 30,000（30%）→ 今日同板塊新 pick 直接拒絕。
+        """
+        from risk_guard import validate_plan
+        capital  = 100_000.0
+        existing = [_make_position("2303", sector="半導體", value=30_000.0)]
+        picks    = [_make_pick("2330", "台積電", 3_000.0, sector="半導體")]
+
+        result   = validate_plan(picks, capital, current_positions=existing)
+
+        rejected_codes = [p["code"] for p in result["rejected"]]
+        assert "2330" in rejected_codes, "Sector at 30% limit → must reject"
+
+    def test_three_layer_accumulation(self):
+        """
+        三層疊加：昨日持倉 + 今日批次第一筆 + 今日批次第二筆，同板塊。
+
+        昨日半導體：20,000（20%）
+        今日第一筆：6,000 → 通過（合計 26%，未超 30%）
+        今日第二筆：6,000 → 只剩 4,000 空間，縮至 4,000
+
+        合計三層：20,000 + 6,000 + 4,000 = 30,000 = 上限，不超限。
+        """
+        from risk_guard import validate_plan
+        capital  = 100_000.0
+        existing = [_make_position("2303", sector="半導體", value=20_000.0)]
+        picks    = [
+            _make_pick("2330", "台積電",  6_000.0, sector="半導體"),
+            _make_pick("2454", "聯發科",  6_000.0, sector="半導體"),
+        ]
+
+        result   = validate_plan(picks, capital, current_positions=existing)
+
+        approved = {p["code"]: p for p in result["approved"]}
+        total_sector = (
+            20_000.0
+            + approved.get("2330", {}).get("budget", 0.0)
+            + approved.get("2454", {}).get("budget", 0.0)
+        )
+        assert total_sector <= capital * 0.30 + 0.01, (
+            f"Three-layer sector total {total_sector} exceeds 30% cap"
+        )
+
+    def test_single_stock_and_sector_both_constrain(self):
+        """
+        2330 昨日持有 4,000（4%），板塊 28,000（28%）
+        新 pick 2330 budget=5,000
+        → 單股剩 1,000；板塊剩 2,000
+        → 取較小值：batch reduced to 1,000
+        """
+        from risk_guard import validate_plan
+        capital  = 100_000.0
+        existing = [
+            _make_position("2303", sector="半導體", value=24_000.0),  # other 半導體
+            _make_position("2330", sector="半導體", value=4_000.0),   # same stock
+        ]
+        # total 半導體 = 28,000 (28%); 2330 = 4,000 (4%)
+        picks = [_make_pick("2330", "台積電", 5_000.0, sector="半導體")]
+
+        result  = validate_plan(picks, capital, current_positions=existing)
+
+        approved = {p["code"]: p for p in result["approved"]}
+        assert "2330" in approved
+        # stock_room  = 5000 - 4000 = 1000
+        # sector_room = 30000 - 28000 = 2000
+        # final budget = min(1000, 2000) = 1000
+        assert approved["2330"]["budget"] == pytest.approx(1_000.0)
+
+    def test_no_existing_positions_behavior_unchanged(self):
+        """
+        空 current_positions → 行為與修正前完全相同（回歸保護）。
+        單股 5,000 = 5%，剛好在上限，應核准不縮減。
+        """
+        from risk_guard import validate_plan
+        capital = 100_000.0
+        picks   = [_make_pick("2330", "台積電", 5_000.0, sector="半導體")]
+        result  = validate_plan(picks, capital, current_positions=[])
+        approved = {p["code"]: p for p in result["approved"]}
+        assert "2330" in approved
+        assert approved["2330"]["budget"] == pytest.approx(5_000.0)
 
 
 # ── validate_plan: blacklist & ex-dividend ────────────────────────────────────

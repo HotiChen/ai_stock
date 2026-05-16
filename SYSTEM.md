@@ -1,5 +1,10 @@
 # AI Stock System — 系統邏輯文件
 
+> **文件定位**：本文件為系統架構與邏輯參考手冊（Technical Reference）。
+> **主運營手冊（操作 SOP）請以 `TUTORIAL.md` 為主。**
+
+---
+
 ## 架構總覽
 
 ```
@@ -13,12 +18,16 @@ start.sh
 ## 每日排程（`main.py`）
 
 ```
-週一～週五，main loop 每 30 秒 poll 一次時間
+週一～週五（台股非休市日），main loop 每 30 秒 poll 一次時間
 
 08:30 → PremarketJob.run()
 09:00 → MarketOpenJob.run()
+13:25 → ForceCloseJob.run()    ← 強制平倉（日內策略，不留隔夜）
 13:35 → PostMarketJob.run()
 ```
+
+**隔夜策略**：本系統採「當日沖銷」模式，不允許隔夜留倉。
+ForceCloseJob 於 13:25（收盤前 5 分鐘）自動以市價平掉所有買入部位。
 
 ---
 
@@ -47,8 +56,8 @@ validate_plan()                  ← risk_guard.py
     ├── 1. 黑名單過濾
     ├── 2. 除息日過濾（TWSE OpenAPI）
     ├── 3. 漲跌停過濾（±10% 判斷）
-    ├── 4. 單一部位上限（≤ 5% 總資金）
-    └── 5. 板塊集中度（≤ 30% 總資金）
+    ├── 4. 單一部位上限（≤ 5% 總資金，含現有持倉）
+    └── 5. 板塊集中度（≤ 30% 總資金，含現有持倉）
     回傳 {approved: [...], rejected: [...]}
     │
     ▼
@@ -120,6 +129,7 @@ place_stock_order()              ← executor.py
             order_lot:  Common / IntradayOdd
 
     成功 → save_daily_trade()    ← research_db.py → daily_trades 表
+            欄位含 lot_type、sector（正式 DB 欄位，非字串解析）
     │
     ▼
 MonitorAgent.start()             ← monitor_agent.py
@@ -149,19 +159,42 @@ MonitorAgent
 
 ---
 
-## 五、強制停損（`executor.py`）
+## 五、強制平倉（13:25 `ForceCloseJob`）
 
 ```
-force_stop_loss(api, code, quantity)
+ForceCloseJob
+    │
+    ├── load_current_positions()  ← research_db.py → 今日 buy 單
+    │       回傳 {code, name, sector, value, lot_type, quantity, price}
+    │       lot_type 從 daily_trades.lot_type 欄位讀取（正式 DB 欄位）
+    │
+    └── for pos in positions:
+            force_stop_loss(
+                api=api, code=code, name=name,
+                quantity=quantity,
+                lot_type=lot_type,     ← common → Common / intraday_odd → IntradayOdd
+            )
+```
+
+*13:25 後 Shioaji 不再接受新的零股（IntradayOdd）委託；
+ForceCloseJob 必須在此時間點前觸發，否則改用整股市價單。*
+
+---
+
+## 六、強制停損（`executor.py`）
+
+```
+force_stop_loss(api, code, quantity, lot_type)
     │
     └── api.place_order(contract, _OrderSpec)
             action:     sc.Action.Sell
             price_type: sc.StockPriceType.MKT   ← 市價，立即成交
+            order_lot:  依 lot_type 決定 Common / IntradayOdd
 ```
 
 ---
 
-## 六、收盤（13:35 `PostMarketJob`）
+## 七、收盤（13:35 `PostMarketJob`）
 
 ```
 MonitorAgent.stop()
@@ -173,7 +206,7 @@ save_daily_summary(DailySummaryRow)  ← research_db.py → daily_summaries 表
 
 ---
 
-## 七、AI 對話顧問（Dashboard）
+## 八、AI 對話顧問（Dashboard）
 
 ```
 用戶輸入問題
@@ -190,33 +223,37 @@ call_anthropic_chat(messages)    ← chat_agent.py
 
 ---
 
-## 八、資料庫（`research_db.py` SQLite）
+## 九、資料庫（`research_db.py` SQLite）
 
 | 表 | 用途 |
 |----|------|
 | `daily_plans` | 每日盤前 AI 選股計劃（code、budget、sector） |
-| `daily_trades` | 每筆實際委託記錄（action、price、amount、pnl） |
+| `daily_trades` | 每筆實際委託記錄（action、price、amount、pnl、**lot_type**、**sector**） |
 | `alerts` | 觸價 / 停損警報（sent=0 待推送） |
 | `daily_summaries` | 每日收盤總結（pnl、review） |
 | `stock_analyses` | 個股深度分析快取 |
 | `market_context` | 大盤背景資料 |
 
+`daily_trades` 欄位 `lot_type`（`'common'` / `'intraday_odd'`）與 `sector` 為正式 DB 欄位，
+不藏在 `note` 字串。舊版資料庫透過 `_upgrade_daily_trades()` 自動補欄（不破壞既有資料）。
+
 ---
 
-## 九、安全機制
+## 十、安全機制
 
 | 機制 | 位置 | 說明 |
 |------|------|------|
 | Prompt Injection 防護 | `ai_client.build_safe_prompt()` | 外部資料用 `<external_data>` 隔離，截斷 500 字 |
-| 重複委託防護 | `executor.is_duplicate_order()` | 同股同向當日只下一次 |
+| 重複委託防護 | `executor.is_duplicate_order()` | 同股同向當日只下一次；`prior_orders` 必含 `date` 欄位 |
 | 金額硬上限 | `executor.check_hard_limit()` | 單筆 ≤ 15 萬（可由 `.env` 調整） |
 | 黑名單 | `risk_guard.is_blacklisted()` | 硬編碼 + 可擴充 |
 | 人工確認 | `user_confirm.send_confirmation()` | Telegram inline keyboard，下單前必須人工按 |
-| 模擬模式 | `SIMULATION=true` | Shioaji simulation=True，不動真實資金 |
+| 模擬模式 | `SHIOAJI_SIMULATION=true` | Shioaji simulation=True，不動真實資金 |
+| 強制平倉 | `ForceCloseJob` 13:25 | 日內策略，不留隔夜 |
 
 ---
 
-## 十、AI 模型分配
+## 十一、AI 模型分配
 
 | 任務 | 模型 | 原因 |
 |------|------|------|
@@ -226,14 +263,14 @@ call_anthropic_chat(messages)    ← chat_agent.py
 
 ---
 
-## 十一、環境變數（`.env`）
+## 十二、環境變數（`.env`）
 
 | 變數 | 說明 |
 |------|------|
 | `ANTHROPIC_API_KEY` | Anthropic API 金鑰 |
 | `SHIOAJI_API_KEY` | 永豐金 API 金鑰 |
 | `SHIOAJI_SECRET_KEY` | 永豐金 Secret |
-| `SIMULATION` | `true` = 模擬模式（預設） |
+| `SHIOAJI_SIMULATION` | `true` = 模擬模式（預設），`false` = 真實下單 ★ 全系統唯一開關 |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token |
 | `TELEGRAM_CHAT_ID` | 授權的 Telegram Chat ID |
 | `ORDER_HARD_LIMIT` | 單筆委託金額上限（預設 150000） |

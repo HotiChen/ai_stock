@@ -84,11 +84,19 @@ def validate_plan(
     max_position = capital * MAX_POSITION_RATIO
     max_sector   = capital * MAX_SECTOR_RATIO
 
-    # Build current sector exposure from existing positions
+    # Build existing exposures from current_positions.
+    # stock_exposure  : {code:   total_value} — for the per-stock 5% cap
+    # sector_exposure : {sector: total_value} — for the sector 30% cap
+    # Both must be seeded from current holdings so that Guard 4 and Guard 5
+    # measure *total* exposure (existing + new), not just the new pick.
+    stock_exposure:  dict[str, float] = {}
     sector_exposure: dict[str, float] = {}
     for pos in current_positions:
+        c = pos.get("code",   "")
         s = pos.get("sector", "未知")
-        sector_exposure[s] = sector_exposure.get(s, 0.0) + pos.get("value", 0.0)
+        v = pos.get("value",  0.0)
+        stock_exposure[c]  = stock_exposure.get(c,  0.0) + v
+        sector_exposure[s] = sector_exposure.get(s, 0.0) + v
 
     approved: list[dict] = []
     rejected: list[dict] = []
@@ -121,26 +129,39 @@ def validate_plan(
                 rejected.append(result)
                 continue
 
-        # 4. Single position cap (reduce, not reject)
-        if budget > max_position:
-            result["budget"] = max_position
-            result["reason"] = f"reduced: single position capped at {MAX_POSITION_RATIO*100:.0f}%"
-
-        # 5. Sector cap (reduce or reject)
-        current_sector = sector_exposure.get(sector, 0.0)
-        remaining_room = max_sector - current_sector
-        if remaining_room <= 0:
-            result["reason"] = f"rejected: sector {sector} already at {MAX_SECTOR_RATIO*100:.0f}% limit"
+        # 4. Single position cap — measured against *total* exposure (existing + new).
+        # If we already hold this stock, the new budget is constrained to the remaining room.
+        existing_stock  = stock_exposure.get(code, 0.0)
+        stock_room      = max_position - existing_stock
+        if stock_room <= 0:
+            result["reason"] = (
+                f"rejected: {code} position already at {MAX_POSITION_RATIO*100:.0f}% limit"
+            )
             rejected.append(result)
             continue
-        if result["budget"] > remaining_room:
-            result["budget"] = remaining_room
+        if budget > stock_room:
+            result["budget"] = stock_room
+            result["reason"] = f"reduced: single position capped at {MAX_POSITION_RATIO*100:.0f}%"
+
+        # 5. Sector cap — measured against *total* sector exposure (existing + new).
+        existing_sector = sector_exposure.get(sector, 0.0)
+        sector_room     = max_sector - existing_sector
+        if sector_room <= 0:
+            result["reason"] = (
+                f"rejected: sector {sector} already at {MAX_SECTOR_RATIO*100:.0f}% limit"
+            )
+            rejected.append(result)
+            continue
+        if result["budget"] > sector_room:
+            result["budget"] = sector_room
             existing_reason = result.get("reason", "")
             sep = "; " if existing_reason else ""
             result["reason"] = existing_reason + sep + f"reduced: sector {sector} cap"
 
-        # Update running sector total so subsequent picks respect it
-        sector_exposure[sector] = current_sector + result["budget"]
+        # Update running totals so subsequent picks in the same batch respect
+        # the caps already partially filled by earlier picks in this loop.
+        stock_exposure[code]    = existing_stock  + result["budget"]
+        sector_exposure[sector] = existing_sector + result["budget"]
 
         approved.append(result)
 

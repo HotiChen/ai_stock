@@ -1085,6 +1085,22 @@ def process_update(update: dict) -> None:
         _handle_set_stop_loss(chat_id, text)
         return
 
+    # ── 查股路由：純數字 4-6 碼 / /查股 XXXX / 查 XXXX ─────────────────────
+    import re as _re
+    _stock_code: str | None = None
+    if _re.match(r"^\d{4,6}$", text):
+        _stock_code = text
+    else:
+        _m = _re.match(r"^/查股\s+(\d{4,6})$", text) or _re.match(r"^查\s+(\d{4,6})$", text)
+        if _m:
+            _stock_code = _m.group(1)
+    if _stock_code:
+        send_text(chat_id, "⏳ 查詢中…")
+        from stock_query import query_stock as _query_stock
+        result = _query_stock(_stock_code, api=_get_sj_api())
+        send_text(chat_id, result)
+        return
+
     import telegram_bot as _self
     handler_name = _HANDLER_NAMES.get(text)
     if handler_name:

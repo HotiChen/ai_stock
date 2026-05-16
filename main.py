@@ -12,6 +12,7 @@ Run: python3 main.py
 import os
 import signal
 import time
+from collections import defaultdict
 from datetime import datetime, date
 from typing import Optional
 
@@ -20,7 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from deep_analyzer import run_deep_analysis
-from executor import place_stock_order, ExecutionResult, force_stop_loss
+from executor import place_stock_order, ExecutionResult, force_stop_loss, _normalize_action
 from logger import get_logger
 from market_scan import batch_fetch_snapshots
 from market_scanner import ScanCriteria, get_all_stock_codes, screen_candidates
@@ -34,6 +35,10 @@ from user_confirm import send_confirmation
 
 log = get_logger(__name__)
 
+# Track which years have already triggered an incomplete-calendar warning so the
+# log isn't flooded — the scheduler calls is_trading_day() every 30–60 seconds.
+_warned_incomplete_calendar_years: set[int] = set()
+
 DB_PATH          = os.getenv("DB_PATH", "data/research.db")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 CAPITAL          = float(os.getenv("BUDGET", "100000"))
@@ -44,8 +49,38 @@ SIMULATION       = os.getenv("SHIOAJI_SIMULATION", "true").lower() == "true"
 # ── Pure helpers ──────────────────────────────────────────────────────────────
 
 def is_trading_day(dt: datetime) -> bool:
-    """Return True for Mon–Fri (weekday)."""
-    return dt.weekday() < 5
+    """Return True for TWSE trading days: Mon–Fri excluding public holidays.
+
+    Two-stage check:
+      1. Weekday gate  — Sat (5) and Sun (6) are never trading days.
+      2. Holiday gate  — dates listed in ``tw_trading_calendar._TWSE_HOLIDAYS``
+                         are also excluded (228, 清明, 春節, 勞動節, etc.).
+
+    Degraded mode: if the year is not yet in the holiday calendar, the function
+    falls back to weekday-only logic and emits a WARNING so operators know the
+    system is running without holiday awareness for that year.
+    """
+    if dt.weekday() >= 5:
+        return False
+    from tw_trading_calendar import is_twse_holiday, is_year_in_calendar, is_calendar_complete
+    year = dt.year
+    if not is_year_in_calendar(year):
+        log.warning(
+            "is_trading_day: year %d is not in the TWSE holiday calendar — "
+            "falling back to weekday-only logic (public holidays NOT excluded). "
+            "Update tw_trading_calendar.py to fix this.",
+            year,
+        )
+    elif not is_calendar_complete(year) and year not in _warned_incomplete_calendar_years:
+        _warned_incomplete_calendar_years.add(year)
+        log.warning(
+            "is_trading_day: year %d holiday calendar is INCOMPLETE — "
+            "some holidays (e.g. 端午節, 中秋節) are missing and those dates will "
+            "be treated as trading days. Update tw_trading_calendar.py once "
+            "TWSE publishes the official schedule.",
+            year,
+        )
+    return not is_twse_holiday(dt.date())
 
 
 def _confidence_budget(
@@ -87,17 +122,26 @@ def scan_candidates(
 
 def load_prior_orders(api) -> list[dict]:
     """Return today's already-placed orders from Shioaji as plain dicts.
-    Used to prevent duplicate orders at 09:00."""
+    Used to prevent duplicate orders at 09:00.
+
+    Each dict contains: code, action, quantity, price, date (ISO string).
+    The ``date`` field is required by executor.is_duplicate_order() to block
+    same-stock same-action same-day re-submissions.
+    """
     if api is None:
         return []
     try:
         trades = api.list_trades()
+        today = date.today().isoformat()
         return [
             {
                 "code":     t.contract.code,
-                "action":   str(t.order.action),
+                # Shioaji returns 'Action.Buy' / 'Action.Sell'; normalize to
+                # 'buy' / 'sell' so is_duplicate_order() matches correctly.
+                "action":   _normalize_action(str(t.order.action)),
                 "quantity": t.order.quantity,
                 "price":    float(t.order.price),
+                "date":     today,              # required by is_duplicate_order()
             }
             for t in (trades or [])
         ]
@@ -107,11 +151,64 @@ def load_prior_orders(api) -> list[dict]:
 
 
 def load_current_positions(trade_date: date, db_path: str) -> list[dict]:
-    """Return today's executed buy trades from DB as position dicts.
-    Used by PremarketJob to pass current exposure to risk_guard."""
+    """Return today's executed buy trades as a risk_guard-compatible position list.
+
+    Each returned dict has the shape expected by risk_guard.validate_plan():
+        {code, name, sector, value, lot_type, quantity, price}
+
+    Field mapping from daily_trades:
+        sector   ← daily_trades.sector  (written at trade time from pick["sector"])
+        value    ← daily_trades.amount  (cost basis = quantity × price)
+        lot_type ← daily_trades.lot_type (written at trade time from ExecutionResult)
+
+    Limitation: this reflects *today's executed buys* only.  It does NOT include
+    positions carried over from previous sessions.  For a production multi-day
+    position tracker, replace with a dedicated `positions` table (A1 task).
+    """
     try:
         trades = load_daily_trades(trade_date, db_path)
-        return [t for t in trades if t.get("action") == "buy"]
+
+        # ── Net-quantity approach ─────────────────────────────────────────────
+        # Only CONFIRMED fills (action="sell") reduce the open position.
+        # "force_close_requested" means the close ORDER was submitted, not that
+        # it filled.  If the order is rejected or times out the position is still
+        # open and must remain visible so ForceCloseJob can retry.
+        #
+        # Idempotency for real-mode close orders is handled separately by
+        # ForceCloseJob.run() via an explicit pending_close_codes guard.
+        #
+        # Limitation: multiple buy trades for the same code are merged; value
+        # and price reflect the LAST buy record.  For the current intraday
+        # single-buy-per-stock model this is exact; multi-buy sessions are a
+        # known TODO (A1 task: dedicated positions table).
+        buy_qty:   defaultdict[str, int] = defaultdict(int)
+        close_qty: defaultdict[str, int] = defaultdict(int)
+        last_buy:  dict[str, dict]       = {}   # metadata from latest buy record
+
+        for t in trades:
+            code   = t["code"]
+            action = t.get("action")
+            qty    = t.get("quantity", 0)
+            if action == "buy":
+                buy_qty[code]  += qty
+                last_buy[code]  = t
+            elif action == "sell":          # only confirmed fills reduce position
+                close_qty[code] += qty
+            # "force_close_requested" is intentionally NOT counted here
+
+        return [
+            {
+                "code":     code,
+                "name":     last_buy[code].get("name", code),
+                "sector":   last_buy[code].get("sector", "未知"),
+                "value":    last_buy[code].get("amount", 0.0),
+                "lot_type": last_buy[code].get("lot_type", "common"),
+                "quantity": buy_qty[code] - close_qty.get(code, 0),
+                "price":    last_buy[code].get("price", 0.0),
+            }
+            for code in buy_qty
+            if buy_qty[code] - close_qty.get(code, 0) > 0
+        ]
     except Exception as e:
         log.warning("load_current_positions failed: %s", e)
         return []
@@ -225,14 +322,39 @@ class MarketOpenJob:
         self._prior_orders    = prior_orders
         init_db(db_path)
 
-    def run(self) -> MonitorAgent:
-        # Always read from DB — user may have rejected picks via Telegram between
-        # 08:30 (premarket) and 09:00 (open), so in-memory list may be stale.
-        try:
-            picks_to_execute = load_daily_plan(date.today(), self._db_path) or self._picks
-        except Exception:
-            picks_to_execute = self._picks
+    def _resolve_picks(self) -> list[dict]:
+        """Determine the authoritative pick list for 09:00 execution.
 
+        Single-source-of-truth rule
+        ───────────────────────────
+        DB read succeeds  → use DB result, regardless of whether it is empty.
+                            An empty list means "zero orders for today"
+                            (e.g. user pressed reject_all on Telegram between
+                            08:30 and 09:00).  We NEVER fall back to the
+                            in-memory list in this path because that would
+                            silently undo an explicit user rejection.
+        DB read raises    → DEGRADED MODE: fall back to in-memory picks and
+                            emit a WARNING so the operator can see the system
+                            is running without the authoritative DB state.
+        """
+        try:
+            picks = load_daily_plan(date.today(), self._db_path)
+            if not picks:
+                log.info(
+                    "MarketOpenJob: DB plan is empty for %s — zero orders today "
+                    "(all picks rejected or none approved)",
+                    date.today(),
+                )
+            return picks
+        except Exception as e:
+            log.warning(
+                "MarketOpenJob: DB read failed — DEGRADED MODE, "
+                "falling back to in-memory picks. Cause: %s", e,
+            )
+            return self._picks
+
+    def run(self) -> MonitorAgent:
+        picks_to_execute = self._resolve_picks()
         prior_orders = (
             self._prior_orders
             if self._prior_orders is not None
@@ -267,7 +389,9 @@ class MarketOpenJob:
                         "price":      result.price,
                         "amount":     result.amount,
                         "pnl":        None,
-                        "note":       f"id={result.order_id} lot={result.lot_type}",
+                        "lot_type":   result.lot_type,            # proper column (not note)
+                        "sector":     pick.get("sector", "未知"),  # proper column (not note)
+                        "note":       f"id={result.order_id}",    # note: only order_id now
                     }, self._db_path)
                 except Exception as db_err:
                     log.error("save_daily_trade failed for %s: %s", code, db_err)
@@ -318,9 +442,41 @@ class PostMarketJob:
         self._db_path      = db_path
         self._execution_id = execution_id
 
-    def run(self, total_pnl: float, trades_summary: str) -> None:
+    def run(self, trades_summary: str) -> float:
+        """Stop monitor, compute PnL from sell trades in DB, save daily summary.
+
+        PnL is computed by summing ``pnl`` on all ``daily_trades`` for today.
+        Force-close sell trades are written with real PnL by ForceCloseJob, so
+        this value reflects actual realized results — not a caller-supplied
+        constant.
+
+        Returns the computed ``total_pnl`` so callers can use it for
+        notifications without an extra DB round-trip.
+        """
         if self._monitor is not None:
             self._monitor.stop()
+
+        try:
+            trades = load_daily_trades(date.today(), self._db_path)
+            # Only sum PnL from CONFIRMED sell trades.
+            # "force_close_requested" records have pnl=None because the fill is
+            # not yet confirmed — they must NOT contribute to realized PnL.
+            total_pnl = sum(
+                t.get("pnl") or 0.0
+                for t in trades
+                if t.get("action") == "sell"
+            )
+            pending_closes = sum(
+                1 for t in trades if t.get("action") == "force_close_requested"
+            )
+            if pending_closes:
+                log.warning(
+                    "PostMarket: %d force_close_requested order(s) with unconfirmed fill — "
+                    "excluded from realized PnL", pending_closes,
+                )
+        except Exception as e:
+            log.warning("PostMarket: could not load trades for PnL: %s", e)
+            total_pnl = 0.0
 
         row = DailySummaryRow(
             execution_id=self._execution_id,
@@ -332,6 +488,22 @@ class PostMarketJob:
         )
         save_daily_summary(row, self._db_path)
         log.info("PostMarket: pnl=%+.0f saved", total_pnl)
+        return total_pnl
+
+
+# ── ForceCloseJob helpers ─────────────────────────────────────────────────────
+
+def _get_snapshot_price(api, code: str, fallback: float) -> float:
+    """Return the latest close price from Shioaji snapshot, or ``fallback``."""
+    try:
+        contract = api.Contracts.Stocks.get(code)
+        if contract:
+            snaps = api.snapshots([contract])
+            if snaps:
+                return float(snaps[0].close)
+    except Exception:
+        pass
+    return fallback
 
 
 # ── ForceCloseJob ─────────────────────────────────────────────────────────────
@@ -348,22 +520,110 @@ class ForceCloseJob:
 
     def run(self) -> list[dict]:
         positions = load_current_positions(date.today(), self._db_path)
+
+        # Idempotency guard — real mode only.
+        # load_current_positions() does NOT subtract force_close_requested from
+        # position quantities (those orders may not have filled).  Without this
+        # guard ForceCloseJob would re-submit a close order every time it runs
+        # while the position is still open and no confirmed sell exists yet.
+        #
+        # Simulation mode never populates this set because ForceCloseJob writes
+        # action="sell" there, which IS subtracted by load_current_positions().
+        try:
+            all_trades = load_daily_trades(date.today(), self._db_path)
+        except Exception:
+            all_trades = []
+        pending_close_codes = {
+            t["code"] for t in all_trades
+            if t.get("action") == "force_close_requested"
+        }
+
         results = []
         for pos in positions:
-            code     = pos["code"]
-            name     = pos.get("name", code)
-            quantity = pos.get("quantity", 0)
-            success  = force_stop_loss(
+            code      = pos["code"]
+            name      = pos.get("name", code)
+            quantity  = pos.get("quantity", 0)
+            lot_type  = pos.get("lot_type", "common")
+            buy_price = pos.get("price", 0.0)
+
+            # Skip if a close order is already outstanding (real mode).
+            if code in pending_close_codes:
+                log.info(
+                    "ForceClose: skipping %s — pending close order already submitted",
+                    code,
+                )
+                results.append({"code": code, "success": True})
+                continue
+
+            # Best-effort snapshot price; fall back to buy price when API is
+            # unavailable (e.g. tests, network outage).
+            close_price = _get_snapshot_price(self._api, code, fallback=buy_price)
+
+            success = force_stop_loss(
                 api=self._api,
                 code=code,
                 name=name,
                 quantity=quantity,
+                lot_type=lot_type,
             )
-            results.append({"code": code, "success": success})
+
             if success:
-                log.info("ForceClose: sold %s qty=%d", code, quantity)
+                multiplier       = 1000 if lot_type == "common" else 1
+                estimated_amount = close_price * quantity * multiplier
+
+                if SIMULATION:
+                    # Simulation fills are guaranteed — write a confirmed sell trade
+                    # with computed PnL so PostMarketJob can report a real daily result.
+                    pnl = (close_price - buy_price) * quantity * multiplier
+                    try:
+                        save_daily_trade({
+                            "trade_date": date.today(),
+                            "code":       code,
+                            "name":       name,
+                            "action":     "sell",              # confirmed in simulation
+                            "quantity":   quantity,
+                            "price":      close_price,
+                            "amount":     estimated_amount,
+                            "pnl":        pnl,
+                            "lot_type":   lot_type,
+                            "sector":     pos.get("sector", "未知"),
+                            "note":       "force_close_simulation",
+                        }, self._db_path)
+                    except Exception as db_err:
+                        log.error("ForceClose: save simulation sell record failed %s: %s", code, db_err)
+                    log.info(
+                        "ForceClose: simulation sell %s qty=%d lot=%s pnl=%+.0f",
+                        code, quantity, lot_type, pnl,
+                    )
+                else:
+                    # Real mode: order submitted but fill is unconfirmed.
+                    # Write a "force_close_requested" record so:
+                    #   1. pending_close_codes blocks re-submission on next run
+                    #   2. PostMarketJob does NOT count unconfirmed PnL
+                    try:
+                        save_daily_trade({
+                            "trade_date": date.today(),
+                            "code":       code,
+                            "name":       name,
+                            "action":     "force_close_requested",
+                            "quantity":   quantity,
+                            "price":      close_price,         # snapshot at submission time
+                            "amount":     estimated_amount,    # estimated; not a confirmed fill
+                            "pnl":        None,                # unknown until fill confirmed
+                            "lot_type":   lot_type,
+                            "sector":     pos.get("sector", "未知"),
+                            "note":       "force_close_requested",
+                        }, self._db_path)
+                    except Exception as db_err:
+                        log.error("ForceClose: save pending record failed %s: %s", code, db_err)
+                    log.info(
+                        "ForceClose: order submitted %s qty=%d lot=%s (fill unconfirmed)",
+                        code, quantity, lot_type,
+                    )
             else:
-                log.error("ForceClose: failed to sell %s", code)
+                log.error("ForceClose: order submission failed %s", code)
+
+            results.append({"code": code, "success": success})
         return results
 
 
@@ -449,15 +709,13 @@ def main() -> None:
 
         # 13:35 post-market
         elif t.hour == 13 and t.minute == 35:
-            from research_db import load_daily_trades
-            trades = load_daily_trades(date.today(), DB_PATH)
-            total_pnl = sum(t.get("pnl") or 0 for t in trades)
             job = PostMarketJob(
                 monitor=monitor,
                 db_path=DB_PATH,
                 execution_id=f"main-{now.date().isoformat()}",
             )
-            job.run(total_pnl=total_pnl, trades_summary="自動收盤")
+            total_pnl = job.run(trades_summary="自動收盤")
+            trades = load_daily_trades(date.today(), DB_PATH)
             notify_market_close(total_pnl=total_pnl, trade_count=len(trades))
             monitor = None
             approved_picks = []

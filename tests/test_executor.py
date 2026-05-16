@@ -323,3 +323,133 @@ class TestForceStopLoss:
         api.Contracts.Stocks.get.side_effect = Exception("error")
         result = force_stop_loss(api=api, code="2330", name="台積電", quantity=2, lot_type="common")
         assert result is False
+
+    # ── lot_type → order_lot 映射驗收 ────────────────────────────────────────────
+
+    def _get_order_lot(self, api):
+        """從 place_order call_args 中取出 order.order_lot。"""
+        call_args = api.place_order.call_args
+        order = call_args[0][1] if call_args[0] else call_args[1].get("order")
+        return order.order_lot
+
+    def test_common_lot_type_uses_common_order_lot(self):
+        """整股（common）→ Shioaji StockOrderLot.Common。"""
+        from executor import force_stop_loss
+        import shioaji.constant as sc
+        api = self._mock_api()
+        force_stop_loss(api=api, code="2330", name="台積電", quantity=2, lot_type="common")
+        assert self._get_order_lot(api) == sc.StockOrderLot.Common
+
+    def test_intraday_odd_lot_type_uses_intraday_odd_order_lot(self):
+        """零股（intraday_odd）→ Shioaji StockOrderLot.IntradayOdd，不可走整股通道。"""
+        from executor import force_stop_loss
+        import shioaji.constant as sc
+        api = self._mock_api()
+        force_stop_loss(api=api, code="2454", name="聯發科", quantity=100, lot_type="intraday_odd")
+        assert self._get_order_lot(api) == sc.StockOrderLot.IntradayOdd
+
+    def test_default_lot_type_is_common(self):
+        """未傳 lot_type 時預設走整股通道。"""
+        from executor import force_stop_loss
+        import shioaji.constant as sc
+        api = self._mock_api()
+        force_stop_loss(api=api, code="2330", name="台積電", quantity=2)  # no lot_type
+        assert self._get_order_lot(api) == sc.StockOrderLot.Common
+
+    def test_intraday_odd_does_not_use_common_order_lot(self):
+        """零股平倉明確不走整股通道（防止 Shioaji 拒單）。"""
+        from executor import force_stop_loss
+        import shioaji.constant as sc
+        api = self._mock_api()
+        force_stop_loss(api=api, code="2454", name="聯發科", quantity=50, lot_type="intraday_odd")
+        assert self._get_order_lot(api) != sc.StockOrderLot.Common
+
+    def test_true_return_means_order_submitted_not_filled(self):
+        """True 代表委託送出（api.place_order 成功），不代表成交。
+
+        caller 必須寫 force_close_requested 記錄（而非 sell trade），
+        因為 place_order 成功 ≠ broker 成交確認。
+        """
+        from executor import force_stop_loss
+        api = self._mock_api()
+        result = force_stop_loss(
+            api=api, code="2330", name="台積電", quantity=1, lot_type="common"
+        )
+        # True ↔ 委託送出成功
+        assert result is True
+        # api.place_order 被呼叫一次（非兩次、非零次）
+        assert api.place_order.call_count == 1
+        # 沒有任何「確認成交」API 被呼叫（force_stop_loss 不做成交確認）
+        # 代表 caller 必須自行管理成交確認邏輯
+        assert not hasattr(api, "confirm_fill") or not api.confirm_fill.called
+
+    def test_false_return_means_order_not_submitted(self):
+        """False 代表委託未能送達 broker（例外），不是未成交。"""
+        from executor import force_stop_loss
+        api = MagicMock()
+        api.Contracts.Stocks.get.side_effect = Exception("connection lost")
+        result = force_stop_loss(
+            api=api, code="2330", name="台積電", quantity=1, lot_type="common"
+        )
+        assert result is False
+        assert api.place_order.call_count == 0
+
+
+# ── _normalize_action ─────────────────────────────────────────────────────────
+
+class TestNormalizeAction:
+    """_normalize_action must bridge Shioaji 'Action.Buy' format and internal 'buy'."""
+
+    def test_buy_lowercase(self):
+        from executor import _normalize_action
+        assert _normalize_action("buy") == "buy"
+
+    def test_sell_lowercase(self):
+        from executor import _normalize_action
+        assert _normalize_action("sell") == "sell"
+
+    def test_shioaji_action_buy(self):
+        from executor import _normalize_action
+        assert _normalize_action("Action.Buy") == "buy"
+
+    def test_shioaji_action_sell(self):
+        from executor import _normalize_action
+        assert _normalize_action("Action.Sell") == "sell"
+
+    def test_case_insensitive(self):
+        from executor import _normalize_action
+        assert _normalize_action("ACTION.BUY") == "buy"
+
+
+class TestIsDuplicateOrderWithShioajiValues:
+    """is_duplicate_order must recognize real Shioaji action strings."""
+
+    def test_action_buy_in_prior_orders_blocks_buy_intent(self):
+        from executor import is_duplicate_order
+        from datetime import date
+        prior = [{"code": "2330", "action": "Action.Buy",
+                  "date": date.today().isoformat()}]
+        assert is_duplicate_order("2330", "buy", prior) is True, (
+            "Prior order stored as 'Action.Buy' should block a new 'buy' order"
+        )
+
+    def test_action_sell_in_prior_orders_blocks_sell_intent(self):
+        from executor import is_duplicate_order
+        from datetime import date
+        prior = [{"code": "2330", "action": "Action.Sell",
+                  "date": date.today().isoformat()}]
+        assert is_duplicate_order("2330", "sell", prior) is True
+
+    def test_action_buy_does_not_block_sell_intent(self):
+        from executor import is_duplicate_order
+        from datetime import date
+        prior = [{"code": "2330", "action": "Action.Buy",
+                  "date": date.today().isoformat()}]
+        assert is_duplicate_order("2330", "sell", prior) is False
+
+    def test_mixed_case_action_buy(self):
+        from executor import is_duplicate_order
+        from datetime import date
+        prior = [{"code": "2330", "action": "action.buy",
+                  "date": date.today().isoformat()}]
+        assert is_duplicate_order("2330", "buy", prior) is True

@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS daily_trades (
     price       REAL,
     amount      REAL,
     pnl         REAL,
+    lot_type    TEXT DEFAULT 'common',
+    sector      TEXT DEFAULT '未知',
     note        TEXT
 );
 
@@ -180,9 +182,23 @@ def _conn(path: str) -> sqlite3.Connection:
     return sqlite3.connect(path)
 
 
+def _upgrade_daily_trades(con: sqlite3.Connection) -> None:
+    """Idempotent migration: add lot_type / sector columns to daily_trades if absent.
+
+    Needed for databases created before this schema version.
+    SQLite does not support ADD COLUMN IF NOT EXISTS, so we check PRAGMA first.
+    """
+    existing = {row[1] for row in con.execute("PRAGMA table_info(daily_trades)").fetchall()}
+    if "lot_type" not in existing:
+        con.execute("ALTER TABLE daily_trades ADD COLUMN lot_type TEXT DEFAULT 'common'")
+    if "sector" not in existing:
+        con.execute("ALTER TABLE daily_trades ADD COLUMN sector TEXT DEFAULT '未知'")
+
+
 def init_db(path: str) -> None:
     with _conn(path) as con:
         con.executescript(_DDL)
+        _upgrade_daily_trades(con)
 
 
 # ── MarketContext ─────────────────────────────────────────────────────────────
@@ -379,15 +395,24 @@ def reject_all_picks_from_plan(plan_date: date, path: str) -> None:
 
 
 def save_daily_trade(trade: dict, path: str) -> None:
-    """Append a trade record. trade dict keys: trade_date, code, name, action,
-    quantity, price, amount, pnl (nullable), note."""
+    """Append a trade record.
+
+    Required keys: trade_date, code, action.
+    Optional keys: name, quantity, price, amount, pnl (nullable),
+                   lot_type (default 'common'), sector (default '未知'), note.
+
+    ``lot_type`` and ``sector`` are stored as proper columns so that
+    load_current_positions() can build a risk_guard-compatible position record
+    without parsing free-text strings.
+    """
     td = trade.get("trade_date")
     td_str = td.isoformat() if isinstance(td, date) else str(td)
     with _conn(path) as con:
         con.execute(
             "INSERT INTO daily_trades "
-            "(trade_date, code, name, action, quantity, price, amount, pnl, note) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(trade_date, code, name, action, quantity, price, amount, pnl, "
+            " lot_type, sector, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 td_str,
                 trade.get("code"),
@@ -397,24 +422,32 @@ def save_daily_trade(trade: dict, path: str) -> None:
                 trade.get("price"),
                 trade.get("amount"),
                 trade.get("pnl"),
+                trade.get("lot_type", "common"),
+                trade.get("sector", "未知"),
                 trade.get("note"),
             ),
         )
 
 
 def load_daily_trades(trade_date: date, path: str) -> list[dict]:
-    """Return all trades for the given date."""
+    """Return all trades for the given date.
+
+    Each dict contains: code, name, action, quantity, price, amount, pnl,
+                        lot_type, sector, note.
+    """
     with _conn(path) as con:
         rows = con.execute(
-            "SELECT code, name, action, quantity, price, amount, pnl, note "
+            "SELECT code, name, action, quantity, price, amount, pnl, "
+            "       lot_type, sector, note "
             "FROM daily_trades WHERE trade_date=? ORDER BY id",
             (trade_date.isoformat(),),
         ).fetchall()
     return [
         {
-            "code": r[0], "name": r[1], "action": r[2],
-            "quantity": r[3], "price": r[4], "amount": r[5],
-            "pnl": r[6], "note": r[7],
+            "code":     r[0], "name":     r[1], "action":   r[2],
+            "quantity": r[3], "price":    r[4], "amount":   r[5],
+            "pnl":      r[6], "lot_type": r[7], "sector":   r[8],
+            "note":     r[9],
         }
         for r in rows
     ]

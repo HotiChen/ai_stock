@@ -134,6 +134,8 @@ class TestDailyTrades:
             price=850.0,
             amount=850_000.0,
             pnl=None,
+            lot_type="common",
+            sector="半導體",
             note="模擬",
         )
         defaults.update(kwargs)
@@ -192,6 +194,79 @@ class TestDailyTrades:
         save_daily_trade(self._make_trade(action="sell"), db)
         result = load_daily_trades(date(2026, 4, 28), db)
         assert result[0]["action"] == "sell"
+
+    # ── lot_type / sector 正式欄位（data contract audit fix）────────────────────
+
+    def test_lot_type_common_preserved(self, db):
+        from research_db import save_daily_trade, load_daily_trades
+        save_daily_trade(self._make_trade(lot_type="common"), db)
+        result = load_daily_trades(date(2026, 4, 28), db)
+        assert result[0]["lot_type"] == "common"
+
+    def test_lot_type_intraday_odd_preserved(self, db):
+        from research_db import save_daily_trade, load_daily_trades
+        save_daily_trade(self._make_trade(lot_type="intraday_odd"), db)
+        result = load_daily_trades(date(2026, 4, 28), db)
+        assert result[0]["lot_type"] == "intraday_odd"
+
+    def test_lot_type_defaults_to_common(self, db):
+        """未傳 lot_type 時預設為 'common'。"""
+        from research_db import save_daily_trade, load_daily_trades
+        trade = self._make_trade()
+        trade.pop("lot_type", None)  # ensure key absent
+        save_daily_trade(trade, db)
+        result = load_daily_trades(date(2026, 4, 28), db)
+        assert result[0]["lot_type"] == "common"
+
+    def test_sector_preserved(self, db):
+        from research_db import save_daily_trade, load_daily_trades
+        save_daily_trade(self._make_trade(sector="半導體"), db)
+        result = load_daily_trades(date(2026, 4, 28), db)
+        assert result[0]["sector"] == "半導體"
+
+    def test_sector_defaults_to_unknown(self, db):
+        """未傳 sector 時預設為 '未知'。"""
+        from research_db import save_daily_trade, load_daily_trades
+        trade = self._make_trade()
+        trade.pop("sector", None)
+        save_daily_trade(trade, db)
+        result = load_daily_trades(date(2026, 4, 28), db)
+        assert result[0]["sector"] == "未知"
+
+    def test_loaded_trade_has_lot_type_key(self, db):
+        """load_daily_trades 的每筆結果都要有 lot_type key。"""
+        from research_db import save_daily_trade, load_daily_trades
+        save_daily_trade(self._make_trade(), db)
+        result = load_daily_trades(date(2026, 4, 28), db)
+        assert "lot_type" in result[0]
+
+    def test_loaded_trade_has_sector_key(self, db):
+        """load_daily_trades 的每筆結果都要有 sector key。"""
+        from research_db import save_daily_trade, load_daily_trades
+        save_daily_trade(self._make_trade(), db)
+        result = load_daily_trades(date(2026, 4, 28), db)
+        assert "sector" in result[0]
+
+    def test_force_close_requested_action_preserved(self, db):
+        """action='force_close_requested' 可正確存入並讀回（語義一致性）。"""
+        from research_db import save_daily_trade, load_daily_trades
+        save_daily_trade(self._make_trade(action="force_close_requested", pnl=None), db)
+        result = load_daily_trades(date(2026, 4, 28), db)
+        assert result[0]["action"] == "force_close_requested"
+
+    def test_force_close_requested_pnl_is_null(self, db):
+        """force_close_requested 記錄的 pnl 必須能以 None 存入並讀回。"""
+        from research_db import save_daily_trade, load_daily_trades
+        save_daily_trade(self._make_trade(action="force_close_requested", pnl=None), db)
+        result = load_daily_trades(date(2026, 4, 28), db)
+        assert result[0]["pnl"] is None
+
+    def test_init_db_is_idempotent_with_new_columns(self, tmp_path):
+        """init_db 重複呼叫不應拋出異常（migration 幂等性）。"""
+        from research_db import init_db
+        path = str(tmp_path / "migrate.db")
+        init_db(path)
+        init_db(path)  # second call must not raise
 
 
 # ── alerts ────────────────────────────────────────────────────────────────────

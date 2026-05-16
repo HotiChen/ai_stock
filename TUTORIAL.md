@@ -1,5 +1,8 @@
 # AI Stock 系統教學
 
+> **文件定位**：本文件為**主運營手冊（Single Source of Truth）**。
+> 架構細節參見 `SYSTEM.md`；上線放行標準參見 `docs/go_no_go_checklist_2026-05-09.md`。
+
 ## 目錄
 
 1. [系統概覽](#1-系統概覽)
@@ -27,7 +30,8 @@
 │ deep_analyzer│ main.py          │ monitor_agent.py          │
 │ risk_guard   │ ├─ 08:30 盤前    │ ├─ 每 30 秒 snapshot      │
 │ market_scanner│ ├─ 09:00 開盤   │ ├─ 達標/停損 alert        │
-│              │ └─ 13:35 收盤    │ └─ AlertWorker → notifier │
+│              │ ├─ 13:25 強制平倉│ └─ AlertWorker → notifier │
+│              │ └─ 13:35 收盤    │                           │
 └──────────────┴──────────────────┴───────────────────────────┘
         ↕                ↕                      ↕
    Anthropic API    Shioaji API           Telegram Bot
@@ -165,6 +169,9 @@ Telegram 應收到：
        ├─ check_price_alerts()              🎯 達到目標價！（若觸發）
        └─ AlertWorker → notifier           🚨 觸及停損！（若觸發）
 
+13:25  ┌─ ForceCloseJob.run()               🔔 13:25 強制平倉
+       └─ 所有持倉以市價賣出（整股/零股依 lot_type 自動判斷）
+
 13:35  ┌─ MonitorAgent.stop()               🔕 13:35 收盤
        └─ save_daily_summary → DB          📈 今日損益
 
@@ -262,7 +269,7 @@ SQLite 位於 `data/research.db`（或 `DB_PATH` 指定的路徑）：
 | 資料表 | 內容 | 主要欄位 |
 |--------|------|---------|
 | `daily_plans` | 每日選股計劃 | date, picks_json |
-| `daily_trades` | 實際委託記錄 | trade_date, code, action, quantity, price, pnl |
+| `daily_trades` | 實際委託記錄 | trade_date, code, action, quantity, price, pnl, lot_type, sector |
 | `daily_summaries` | 每日收盤總結 | date, total_pnl, target_met |
 | `alerts` | 價格警報記錄 | code, alert_type, current_price, sent |
 | `stock_analysis` | AI 分析快取 | code, signal, confidence, factors_json |
@@ -271,7 +278,7 @@ SQLite 位於 `data/research.db`（或 `DB_PATH` 指定的路徑）：
 查詢範例：
 
 ```bash
-sqlite3 data/research.db "SELECT trade_date, code, name, action, quantity, price FROM daily_trades ORDER BY trade_date DESC LIMIT 20;"
+sqlite3 data/research.db "SELECT trade_date, code, name, action, quantity, price, lot_type, sector FROM daily_trades ORDER BY trade_date DESC LIMIT 20;"
 ```
 
 ---
@@ -331,24 +338,27 @@ Telegram 上按 ✅/❌ 只會回覆文字，不會修改 `daily_plans` 的執�
 完整做法：按下 approve/reject 後需更新 `daily_plans`，
 09:00 時重新從 DB 讀取過濾後的清單再下單。
 
-**3. prior_orders 永遠為空**
+**3. ✅ prior_orders 永遠為空（已修正 2026-05-11）**
 
-```python
-job = MarketOpenJob(..., prior_orders=[])  # ← 無法防重複下單
-```
-需在 09:00 時先呼叫 `api.list_trades()` 取得當日已有委託。
+~~`job = MarketOpenJob(..., prior_orders=[])`~~
+`load_prior_orders()` 現在從 Shioaji `api.list_trades()` 載入當日已有委託，
+每筆記錄包含 `{code, action, date, quantity, price}`，
+`is_duplicate_order()` 可正確比對同股同向同日而拒絕重複下單。
 
 ### 🟡 中優先（影響風控品質）
 
-**4. current_positions 永遠為空**
+**4. ✅ current_positions 永遠為空（已修正 2026-05-11）**
 
-`risk_guard` 的 sector 倉位計算從 0 開始，無法考慮昨日留倉。
-需從 `daily_trades` 載入仍持有的倉位。
+~~`risk_guard` 的 sector 倉位計算從 0 開始，無法考慮昨日留倉。~~
+`load_current_positions()` 現在回傳 risk_guard 相容格式
+`{code, name, sector, value, lot_type, quantity, price}`，
+`validate_plan()` 同時基於現有持倉計算單股與板塊總曝險。
 
-**5. 13:25 強制平倉未接入 main.py**
+**5. ✅ 13:25 強制平倉未接入 main.py（已修正 2026-05-11）**
 
-`executor.force_stop_loss()` 存在，`auto_trader.py` 也有 13:25 邏輯，
-但 `main.py` 的排程只有 13:35 收盤，中間沒有 trailing stop 或強制平倉機制。
+~~`executor.force_stop_loss()` 存在，但 `main.py` 的排程只有 13:35 收盤。~~
+`ForceCloseJob` 現已接入 `main.py` 排程（13:25），
+從 `daily_trades.lot_type` 欄位正確讀取整股/零股並平倉。
 
 **6. `mark_alert_sent()` 未被呼叫**
 
@@ -363,9 +373,17 @@ job = MarketOpenJob(..., prior_orders=[])  # ← 無法防重複下單
 與之前修復的 issue #6 相同問題，`_API_BASE = f"...{TELEGRAM_BOT_TOKEN}"` 在模組載入時就已確定，
 測試時 monkeypatch token 不會更新 URL。
 
-**8. 無台灣國定假日判斷**
+**8. 台灣國定假日判斷 ⚠️ 部分實作（2026-05-12）**
 
-`is_trading_day()` 只排除週六日，不排除國定假日（228、清明等）。
+`is_trading_day()` 已整合 `tw_trading_calendar.py`，2026 年**確定性**假日已內建（元旦、春節、勞動節等）。
+已知限制：
+- **端午節、中秋節尚未加入**（2026 年確切日期待 TWSE 正式公告）。這些日期目前會被當成**交易日**，不會觸發任何告警（因為年份本身已存在於曆法中）。
+- `tw_trading_calendar._TWSE_HOLIDAYS` 僅收錄 2026 年；未來年份**不會自動覆蓋**。
+- 兩種告警情境：
+  - 「**年份完全未收錄**」（如 2030）→ `is_trading_day()` 每次呼叫都會發出 `WARNING`，提示退化為 weekday-only。
+  - 「**年份存在但曆法不完整**」（如 2026）→ `is_trading_day()` 每年**僅第一次呼叫**發出 `WARNING`，提示部分假日可能缺漏，之後不再重複。
+
+維護方式：每年 11 月前更新 `tw_trading_calendar.py`，官方來源：https://www.twse.com.tw/zh/news/notice（搜尋「休市」）。更新後，同時將該年移出 `_INCOMPLETE_CALENDAR_YEARS`。
 
 **9. Shioaji 斷線後無重連**
 

@@ -30,6 +30,29 @@ log = get_logger(__name__)
 SHARES_PER_LOT = 1000
 
 
+def _normalize_action(raw: str) -> str:
+    """Normalize a Shioaji action value to lowercase 'buy' or 'sell'.
+
+    Shioaji's ``str(trade.order.action)`` returns ``'Action.Buy'`` /
+    ``'Action.Sell'``.  Executor internals use ``'buy'`` / ``'sell'``.
+    This function bridges the two so ``is_duplicate_order`` works with
+    both in-process strings and raw API values.
+
+    Examples::
+
+        _normalize_action("Action.Buy")  -> "buy"
+        _normalize_action("Action.Sell") -> "sell"
+        _normalize_action("buy")         -> "buy"
+        _normalize_action("SELL")        -> "sell"
+    """
+    tail = str(raw).lower().split(".")[-1]
+    if tail == "buy":
+        return "buy"
+    if tail == "sell":
+        return "sell"
+    return tail  # passthrough for unexpected values
+
+
 @_dc
 class _OrderSpec:
     """Plain order struct so tests can inspect real attribute values."""
@@ -91,11 +114,16 @@ def is_duplicate_order(code: str, action: str, prior_orders: list[dict]) -> bool
     """
     Return True if there's already an order for the same code+action today.
     prior_orders: list of dicts with keys {code, action, date (ISO string)}.
+
+    Both the ``action`` argument and the stored action values are normalized via
+    ``_normalize_action`` before comparison, so Shioaji raw values like
+    ``'Action.Buy'`` are treated the same as the internal ``'buy'``.
     """
     today = date.today().isoformat()
+    norm_action = _normalize_action(action)
     return any(
         o.get("code") == code
-        and o.get("action") == action
+        and _normalize_action(o.get("action", "")) == norm_action
         and o.get("date") == today
         for o in prior_orders
     )
@@ -218,9 +246,20 @@ def force_stop_loss(
     quantity: int,
     lot_type: str = "common",
 ) -> bool:
-    """
-    Send an immediate market-price sell order for stop-loss.
-    Returns True on success, False on error.
+    """Send a market-price sell order for stop-loss / force-close.
+
+    Returns
+    -------
+    True   — api.place_order() accepted the request.
+             This means the **order was submitted to the broker**, nothing more.
+             It does NOT mean the order was filled, partially filled, or filled
+             at any particular price.  Fill confirmation requires a separate
+             mechanism (order-status callbacks, polling, or end-of-day settlement).
+    False  — an exception occurred before the order reached the broker.
+
+    Callers MUST NOT treat a True return as evidence of a confirmed trade.
+    Write a ``force_close_requested`` record (not a ``sell`` trade) to reflect
+    the actual semantic: order submitted, fill unknown.
     """
     sj_lot = (
         sc.StockOrderLot.Common
