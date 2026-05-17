@@ -47,8 +47,8 @@ def _get_indicators(code: str, api=None) -> Optional[dict]:
     try:
         import yfinance as yf
         from technical_indicators import calculate_indicators
-        df = yf.Ticker(f"{code}.TW").history(period="3mo")
-        if df is not None and not df.empty and len(df) >= 20:
+        df = yf.Ticker(f"{code}.TW").history(period="6mo")
+        if df is not None and not df.empty and len(df) >= 80:
             return calculate_indicators(df)
     except Exception as e:
         log.debug("yfinance indicators(%s) failed: %s", code, e)
