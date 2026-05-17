@@ -340,8 +340,8 @@ def handle_help(chat_id: str) -> None:
         "💥 一鍵平倉　→ 市價賣出所有持倉\n\n"
         "排程：\n"
         "  08:30 盤前 AI 分析\n"
-        "  09:05 開盤推播今日當沖預測\n"
         "  09:00 開盤下單\n"
+        "  09:05 開盤推播今日當沖預測\n"
         "  13:35 收盤總結\n\n"
         "查股：直接輸入代號（2330）或名稱（台積電）"
     )
@@ -1036,6 +1036,10 @@ def handle_callback(callback_query: dict) -> None:
 
 # ── Message router ─────────────────────────────────────────────────────────────
 
+# Reverse name→code lookup built once at import time (avoids per-message rebuild).
+import config as _tb_cfg
+_REV_STOCK_NAMES: dict[str, str] = {v: k for k, v in _tb_cfg.STOCK_NAMES.items()}
+
 # Map button text → handler function name (string).
 # Using names instead of direct references so unittest.mock.patch works correctly.
 _HANDLER_NAMES: dict[str, str] = {
@@ -1112,7 +1116,6 @@ def process_update(update: dict) -> None:
     #   /查股 2330      → slash 指令（代號）
     #   /查股 台積電    → slash 指令（名稱）
     import re as _re
-    import config as _cfg
 
     _query_input: str | None = None
 
@@ -1126,8 +1129,7 @@ def process_update(update: dict) -> None:
             _query_input = _m.group(1).strip()
         else:
             # 無前綴：只有名稱完全比對 config.STOCK_NAMES 才觸發，避免攔截其他訊息
-            _rev_names = {v: k for k, v in _cfg.STOCK_NAMES.items()}
-            if text in _rev_names:
+            if text in _REV_STOCK_NAMES:
                 _query_input = text
 
     if _query_input is not None:

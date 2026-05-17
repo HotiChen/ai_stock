@@ -67,7 +67,7 @@ def _fetch_chip_data(today_str: str) -> dict:
         return {}
 
 
-def _fetch_market(today_str: str) -> dict:
+def _fetch_market() -> dict:
     """抓大盤漲跌幅，失敗回 0.0 並記 warning。"""
     try:
         from market_index import fetch_market_index_change
@@ -112,7 +112,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
         )
 
     # 2. 大盤方向（一次）
-    market = _fetch_market(today_str)
+    market = _fetch_market()
 
     # 3. 三大法人（今日全市場，一次）
     chip_today = _fetch_chip_data(today_str)

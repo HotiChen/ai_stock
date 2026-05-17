@@ -139,7 +139,6 @@ def _assess_day_trading(
     current_price= indicators.get("current_price", 0.0)
     bullish      = indicators.get("bullish_alignment", False)
     bearish      = indicators.get("bearish_alignment", False)
-    bb_pos       = indicators.get("BB_position", 0.5)
     kd_k         = indicators.get("KD_K", 50.0)
     kd_d         = indicators.get("KD_D", 50.0)
 
@@ -422,6 +421,7 @@ def resolve_stock_input(text: str, api=None) -> tuple[str | None, str | None]:
         import requests as _req
 
         results: list[tuple[str, str]] = []
+        found_exact = False
         for url in (
             "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
             "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
@@ -437,10 +437,13 @@ def resolve_stock_input(text: str, api=None) -> tuple[str | None, str | None]:
                     c = item.get(code_key, "")
                     if n == text:
                         results.append((c, n))
+                        found_exact = True
                     elif text in n:
                         results.append((c, n))
             except Exception as e:
                 log.debug("TWSE/TPEX name lookup failed (%s): %s", url, e)
+            if found_exact:
+                break
 
         if len(results) == 1:
             return results[0][0], None
