@@ -106,8 +106,13 @@ def _fetch_annual_trend(code: str, api=None) -> dict:
 # _assess_day_trading
 # ---------------------------------------------------------------------------
 
-def _assess_day_trading(indicators: Optional[dict], annual: dict) -> dict:
-    """從技術指標評估當沖適合度。
+def _assess_day_trading(
+    indicators: Optional[dict],
+    annual: dict,
+    chip: Optional[dict] = None,
+    market: Optional[dict] = None,
+) -> dict:
+    """從技術指標、法人籌碼、大盤狀況評估當沖適合度。
 
     Returns:
         dict with keys:
@@ -185,6 +190,55 @@ def _assess_day_trading(indicators: Optional[dict], annual: dict) -> dict:
     elif kd_k < kd_d and kd_k > 20:
         reasons_bad.append(f"KD 死亡交叉（K={kd_k:.0f}），短線偏空")
         score -= 1
+
+    # ── 法人籌碼評分 ─────────────────────────────────────────────
+    if chip is not None:
+        foreign_net  = chip.get("foreign_net", 0)
+        trust_net    = chip.get("investment_trust_net", 0)
+        dealer_net   = chip.get("dealer_net", 0)
+        foreign_cont = chip.get("foreign_continuous_buy", 0)
+
+        if foreign_net >= 1000:
+            reasons_good.append(f"外資大買 {foreign_net:,.0f} 張，動能強勁")
+            score += 2
+        elif foreign_net >= 500:
+            reasons_good.append(f"外資買超 {foreign_net:,.0f} 張")
+            score += 1
+        elif foreign_net <= -1000:
+            reasons_bad.append(f"外資大賣 {-foreign_net:,.0f} 張，賣壓沉重")
+            score -= 2
+        elif foreign_net <= -500:
+            reasons_bad.append(f"外資賣超 {-foreign_net:,.0f} 張")
+            score -= 1
+
+        if trust_net >= 300:
+            reasons_good.append(f"投信買超 {trust_net:,.0f} 張")
+            score += 1
+        elif trust_net <= -300:
+            reasons_bad.append(f"投信賣超 {-trust_net:,.0f} 張")
+            score -= 1
+
+        if foreign_cont >= 3:
+            reasons_good.append(f"外資連續買超 {foreign_cont} 日")
+            score += 1
+
+        total_net = foreign_net + trust_net + dealer_net
+        if total_net <= -2000:
+            reasons_bad.append(f"三大法人合計賣超 {-total_net:,.0f} 張")
+            score -= 1
+
+    # ── 大盤方向加權 ─────────────────────────────────────────────
+    if market is not None:
+        index_pct = market.get("index_change_pct", 0.0)
+        if index_pct <= -1.0:
+            reasons_bad.append(f"大盤大跌 {index_pct:.2f}%，當沖風險高")
+            score -= 2
+        elif index_pct <= -0.3:
+            reasons_bad.append(f"大盤走弱 {index_pct:.2f}%")
+            score -= 1
+        elif index_pct >= 1.0:
+            reasons_good.append(f"大盤強勢 +{index_pct:.2f}%，多頭氛圍")
+            score += 1
 
     # ── 硬性否決條件 ─────────────────────────────────────────────
     # 量比嚴重不足時，直接否決（不論其他指標）

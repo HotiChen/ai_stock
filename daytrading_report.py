@@ -54,10 +54,48 @@ def _get_indicators(code: str, api=None) -> Optional[dict]:
     return None
 
 
+_MAX_CHIP_PICKS = 10  # 查連續買超天數的上限，避免 TWSE rate limit
+
+
+def _fetch_chip_data(today_str: str) -> dict:
+    """抓今日全市場三大法人資料，失敗回空 dict。"""
+    try:
+        from chip_data import fetch_institutional_investors
+        return fetch_institutional_investors(today_str)
+    except Exception as e:
+        log.warning("fetch_institutional_investors failed: %s", e)
+        return {}
+
+
+def _fetch_market(today_str: str) -> dict:
+    """抓大盤漲跌幅，失敗回 0.0 並記 warning。"""
+    try:
+        from market_index import fetch_market_index_change
+        pct = fetch_market_index_change()
+        if pct == 0.0:
+            log.warning("fetch_market_index_change returned 0.0，大盤方向加權暫停")
+        return {"index_change_pct": pct}
+    except Exception as e:
+        log.warning("fetch_market_index_change failed: %s", e)
+        return {"index_change_pct": 0.0}
+
+
+def _market_label(pct: float) -> str:
+    if pct <= -1.0:
+        return f"📉 {pct:.2f}%（大跌，慎！）"
+    if pct <= -0.3:
+        return f"📉 {pct:.2f}%（偏弱）"
+    if pct >= 1.0:
+        return f"📈 +{pct:.2f}%（強勢）"
+    return f"📊 {pct:+.2f}%（平盤）"
+
+
 def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
     """建立今日當沖預測報告，回傳 Telegram HTML 字串。"""
     from research_db import load_daily_plan
     from stock_query import _assess_day_trading, _fetch_annual_trend
+
+    today_str = date.today().strftime("%Y%m%d")
 
     # 1. 取今日候選股
     try:
@@ -73,22 +111,56 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             "<i>今日尚無候選股。\n請等 08:30 盤前分析後再查詢。</i>"
         )
 
-    # 2. 歷史系統勝率（用於背景參考）
+    # 2. 大盤方向（一次）
+    market = _fetch_market(today_str)
+
+    # 3. 三大法人（今日全市場，一次）
+    chip_today = _fetch_chip_data(today_str)
+
+    # 4. 連續買超快取（各日期共用，避免重複打 TWSE API）
+    _date_cache: dict = {today_str: chip_today}
+
+    def _cached_fetcher(date_str: str) -> dict:
+        if date_str not in _date_cache:
+            try:
+                from chip_data import fetch_institutional_investors
+                _date_cache[date_str] = fetch_institutional_investors(date_str)
+            except Exception:
+                _date_cache[date_str] = {}
+        return _date_cache[date_str]
+
+    # 5. 歷史系統勝率
     hist_win_rate = _fetch_historical_win_rate(db_path)
 
-    # 3. 對每支股票計算當沖評分 + 勝率預測
+    # 6. 對每支股票計算當沖評分 + 勝率預測
     results = []
-    for pick in picks:
+    for i, pick in enumerate(picks):
         code       = pick.get("code", "")
         name       = pick.get("name", code)
-        confidence = pick.get("confidence", 5)  # AI 信心分數 0-10
+        confidence = pick.get("confidence", 5)
 
         if not code:
             continue
 
         indicators = _get_indicators(code, api=api)
         annual     = _fetch_annual_trend(code, api=api)
-        assessment = _assess_day_trading(indicators, annual)
+
+        # 法人籌碼：今日單日資料 + 連續買超天數（上限 _MAX_CHIP_PICKS 支）
+        chip = chip_today.get(code)
+        if chip is not None and i < _MAX_CHIP_PICKS:
+            try:
+                from chip_data import get_continuous_buy_days
+                cont = get_continuous_buy_days(
+                    code,
+                    end_date=today_str,
+                    data_fetcher=_cached_fetcher,
+                    days=5,
+                )
+                chip = {**chip, **cont}
+            except Exception as e:
+                log.debug("get_continuous_buy_days(%s) failed: %s", code, e)
+
+        assessment = _assess_day_trading(indicators, annual, chip=chip, market=market)
         dt_score   = assessment.get("score", 0)
 
         # 勝率預測：AI 信心 60% 權重 + 當沖評分 40% 權重
@@ -106,9 +178,10 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             "reasons_good": assessment.get("reasons_good", []),
             "reasons_bad":  assessment.get("reasons_bad", []),
             "indicators":   indicators,
+            "chip":         chip,
         })
 
-    # 4. 排序：先按 win_pct，再按 dt_score
+    # 7. 排序：先按 win_pct，再按 dt_score
     results.sort(key=lambda x: (x["win_pct"], x["dt_score"]), reverse=True)
     qualified = [r for r in results if r["dt_score"] >= 4]
 
@@ -119,10 +192,11 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             "<i>今日候選股當沖評分均偏低，建議觀望。</i>"
         )
 
-    # 5. 組合報告
+    # 8. 組合報告
     lines = [
         "⚡ <b>今日當沖預測</b>",
         "━━━━━━━━━━━━━━━━",
+        f"大盤：{_market_label(market['index_change_pct'])}",
     ]
 
     if hist_win_rate is not None:
@@ -137,8 +211,8 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
         rsi   = ind.get("RSI", "—")
         vr    = ind.get("volume_ratio", "—")
 
-        vr_str  = f"{vr:.1f}x"  if isinstance(vr,  float) else str(vr)
-        rsi_str = f"{rsi:.1f}"  if isinstance(rsi, float) else str(rsi)
+        vr_str    = f"{vr:.1f}x"   if isinstance(vr,    float) else str(vr)
+        rsi_str   = f"{rsi:.1f}"   if isinstance(rsi,   float) else str(rsi)
         price_str = f"{price:,.0f}" if isinstance(price, (int, float)) else str(price)
 
         lines.append(
@@ -151,6 +225,17 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
         )
         if price != "—":
             lines.append(f"  現價 {price_str}　RSI {rsi_str}　量比 {vr_str}")
+
+        # 法人籌碼摘要（有資料才顯示）
+        chip = r.get("chip")
+        if chip:
+            fn = chip.get("foreign_net", 0)
+            fn_str = f"外資 {fn:+,.0f} 張"
+            cont = chip.get("foreign_continuous_buy", 0)
+            if cont >= 2:
+                fn_str += f"（連買 {cont} 日）"
+            lines.append(f"  🏦 {fn_str}")
+
         for g in r["reasons_good"][:2]:
             lines.append(f"  ✅ {g}")
         for b in r["reasons_bad"][:1]:
