@@ -70,16 +70,24 @@ def _fetch_chip_data(today_str: str) -> dict:
 
 
 def _fetch_market() -> dict:
-    """抓大盤漲跌幅，失敗回 0.0 並記 warning。"""
+    """抓大盤漲跌幅 + 台指期溢貼水，失敗各自回 0.0。"""
+    result: dict = {"index_change_pct": 0.0, "futures_premium_pct": 0.0}
     try:
         from market_index import fetch_market_index_change
         pct = fetch_market_index_change()
         if pct == 0.0:
             log.warning("fetch_market_index_change returned 0.0，大盤方向加權暫停")
-        return {"index_change_pct": pct}
+        result["index_change_pct"] = pct
     except Exception as e:
         log.warning("fetch_market_index_change failed: %s", e)
-        return {"index_change_pct": 0.0}
+    try:
+        from futures_premium import fetch_futures_premium
+        fp = fetch_futures_premium()
+        if fp is not None:
+            result["futures_premium_pct"] = fp.premium_pct
+    except Exception as e:
+        log.debug("fetch_futures_premium failed: %s", e)
+    return result
 
 
 def _market_label(pct: float) -> str:

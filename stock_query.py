@@ -250,6 +250,15 @@ def _assess_day_trading(
             reasons_good.append(f"大盤強勢 +{index_pct:.2f}%，多頭氛圍")
             score += 1
 
+        # ── 台指期溢貼水 ─────────────────────────────────────────
+        futures_pct = market.get("futures_premium_pct", 0.0)
+        if futures_pct >= 0.3:
+            reasons_good.append(f"台指期溢價 +{futures_pct:.2f}%，期市偏多")
+            score += 1
+        elif futures_pct <= -0.3:
+            reasons_bad.append(f"台指期貼水 {futures_pct:.2f}%，期市偏空")
+            score -= 1
+
     # ── 硬性否決條件 ─────────────────────────────────────────────
     # 量比嚴重不足時，直接否決（不論其他指標）
     if volume_ratio < 0.8:
