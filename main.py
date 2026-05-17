@@ -631,6 +631,14 @@ class ForceCloseJob:
 
 _RUNNING = True
 
+_DT_MONITOR_TIMES: frozenset[tuple[int, int]] = frozenset({
+    (9, 15), (9, 30), (9, 45),
+    (10, 0), (10, 30),
+    (11, 0), (11, 30),
+    (12, 0), (12, 30),
+    (13, 0), (13, 15),
+})
+
 
 def _handle_signal(sig, frame):
     global _RUNNING
@@ -699,6 +707,31 @@ def main() -> None:
                     prior_orders=None,
                 )
                 monitor = job.run()
+            time.sleep(60)
+
+        # 09:05 push day trading prediction report
+        elif t.hour == 9 and t.minute == 5:
+            if TELEGRAM_CHAT_ID:
+                try:
+                    from daytrading_report import build_daytrading_report
+                    from telegram_bot import send_text
+                    report = build_daytrading_report(api=api, db_path=DB_PATH)
+                    send_text(TELEGRAM_CHAT_ID, report)
+                except Exception as e:
+                    log.warning("DayTrading push failed: %s", e)
+            time.sleep(60)
+
+        # 盤中當沖監控（每 30 分鐘，09:15–13:15）
+        elif (t.hour, t.minute) in _DT_MONITOR_TIMES:
+            if TELEGRAM_CHAT_ID:
+                try:
+                    from daytrading_monitor import run_daytrading_monitor, format_alerts_message
+                    from telegram_bot import send_text
+                    alerts = run_daytrading_monitor(api=api)
+                    if alerts:
+                        send_text(TELEGRAM_CHAT_ID, format_alerts_message(alerts))
+                except Exception as e:
+                    log.warning("DayTrading monitor failed: %s", e)
             time.sleep(60)
 
         # 13:25 force-close all positions before market close

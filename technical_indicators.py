@@ -95,6 +95,22 @@ def calc_volume_ratio(volumes: np.ndarray) -> float:
     return today / avg5 if avg5 != 0 else 1.0
 
 
+def calc_vwap(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    volumes: np.ndarray,
+) -> float:
+    """Volume Weighted Average Price using typical price (H+L+C)/3."""
+    if len(closes) == 0:
+        return 0.0
+    typical   = (highs + lows + closes) / 3.0
+    total_vol = float(volumes.sum())
+    if total_vol == 0.0:
+        return float(closes[-1])
+    return float((typical * volumes).sum() / total_vol)
+
+
 def calc_macd(
     closes: np.ndarray,
     fast: int = 12,
@@ -185,6 +201,8 @@ def calculate_indicators(df) -> dict:
     vol_r   = calc_volume_ratio(volumes)
     atr     = calc_atr(highs, lows, closes)
 
+    vwap       = calc_vwap(highs[-20:], lows[-20:], closes[-20:], volumes[-20:])
+
     resistance = float(highs[-20:].max())
     support    = float(lows[-20:].min())
 
@@ -211,6 +229,7 @@ def calculate_indicators(df) -> dict:
         "resistance":       round(resistance, 2),
         "support":          round(support,    2),
         "ATR":              round(atr, 2),
+        "VWAP":             round(vwap, 2),
         "bullish_alignment": bullish,
         "bearish_alignment": bearish,
         "trailing_stop":    round(price * 0.93, 2),
@@ -379,3 +398,47 @@ def fetch_indicators_yfinance_batch(codes: list[str]) -> dict[str, dict]:
 
     log.info("技術指標 yfinance batch：%d/%d 支成功", len(result), len(codes))
     return result
+
+
+# ── fetch_intraday_vwap ───────────────────────────────────────────────────────
+
+def fetch_intraday_vwap(code: str, api=None) -> Optional[float]:
+    """Today's intraday VWAP: Shioaji 1-min → yfinance 1-min → None."""
+    # 1. Shioaji 1-min kbars
+    if api is not None:
+        try:
+            from datetime import date as _date
+            import pandas as _pd
+            today = _date.today().strftime("%Y-%m-%d")
+            contract = api.Contracts.Stocks.get(code)
+            kbars = api.kbars(
+                contract,
+                start=today, end=today,
+                timeframe=api.constant.Timeframe.Minute,
+            )
+            if kbars and kbars.get("ts") and len(kbars["ts"]) > 0:
+                df = _pd.DataFrame(kbars)
+                return round(calc_vwap(
+                    df["High"].values.astype(float),
+                    df["Low"].values.astype(float),
+                    df["Close"].values.astype(float),
+                    df["Volume"].values.astype(float),
+                ), 2)
+        except Exception as e:
+            log.debug("Shioaji intraday VWAP failed for %s: %s", code, e)
+
+    # 2. yfinance 1-min intraday
+    try:
+        import yfinance as yf
+        df = yf.Ticker(f"{code}.TW").history(period="1d", interval="1m")
+        if df is not None and not df.empty:
+            return round(calc_vwap(
+                df["High"].values.astype(float),
+                df["Low"].values.astype(float),
+                df["Close"].values.astype(float),
+                df["Volume"].values.astype(float),
+            ), 2)
+    except Exception as e:
+        log.debug("yfinance intraday VWAP failed for %s: %s", code, e)
+
+    return None

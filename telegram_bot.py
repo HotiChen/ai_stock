@@ -95,9 +95,9 @@ def send_main_menu(chat_id: str, text: str = "請選擇功能：") -> None:
         "keyboard": [
             ["📊 今日狀態", "💼 持倉"],
             ["📈 選股計劃", "⚡ 快速下單"],
-            ["🛡️ 停損設定", "❓ 說明"],
-            ["🚨 緊急暫停", "🔄 撤銷所有委託"],
-            ["💥 一鍵全平倉"],
+            ["🎯 今日當沖預測", "🛡️ 停損設定"],
+            ["❓ 說明", "🚨 緊急暫停"],
+            ["🔄 撤銷所有委託", "💥 一鍵全平倉"],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -314,6 +314,17 @@ def _handle_set_stop_loss(chat_id: str, text: str) -> None:
     )
 
 
+def handle_daytrading(chat_id: str) -> None:
+    send_text(chat_id, "⏳ 分析中，請稍候…")
+    try:
+        from daytrading_report import build_daytrading_report
+        report = build_daytrading_report(api=_get_sj_api())
+    except Exception as e:
+        log.error("handle_daytrading error: %s", e)
+        report = "⚠️ 當沖預測產生失敗，請稍後再試。"
+    send_text(chat_id, report)
+
+
 def handle_help(chat_id: str) -> None:
     send_text(
         chat_id,
@@ -322,6 +333,7 @@ def handle_help(chat_id: str) -> None:
         "💼 持倉　　　→ 今日持倉明細\n"
         "📈 選股計劃　→ AI 今日選股清單\n"
         "⚡ 快速下單　→ 執行今日計劃\n"
+        "🎯 今日當沖預測 → 今日候選股當沖評分 + 預測勝率\n"
         "🛡️ 停損設定　→ 設定個股停損價\n"
         "🚨 緊急暫停　→ 立即停止系統，今日不再下單\n"
         "🔄 撤銷委託　→ 取消今日所有未成交委託\n"
@@ -329,7 +341,9 @@ def handle_help(chat_id: str) -> None:
         "排程：\n"
         "  08:30 盤前 AI 分析\n"
         "  09:00 開盤下單\n"
-        "  13:35 收盤總結"
+        "  09:05 開盤推播今日當沖預測\n"
+        "  13:35 收盤總結\n\n"
+        "查股：直接輸入代號（2330）或名稱（台積電）"
     )
 
 
@@ -1022,18 +1036,23 @@ def handle_callback(callback_query: dict) -> None:
 
 # ── Message router ─────────────────────────────────────────────────────────────
 
+# Reverse name→code lookup built once at import time (avoids per-message rebuild).
+import config as _tb_cfg
+_REV_STOCK_NAMES: dict[str, str] = {v: k for k, v in _tb_cfg.STOCK_NAMES.items()}
+
 # Map button text → handler function name (string).
 # Using names instead of direct references so unittest.mock.patch works correctly.
 _HANDLER_NAMES: dict[str, str] = {
-    "📊 今日狀態":    "handle_status",
-    "💼 持倉":        "handle_holdings",
-    "📈 選股計劃":    "handle_plan",
-    "⚡ 快速下單":    "handle_quick_order",
-    "🛡️ 停損設定":   "handle_stop_loss",
-    "❓ 說明":        "handle_help",
-    "🚨 緊急暫停":    "handle_emergency_halt",
-    "🔄 撤銷所有委託": "handle_cancel_all",
-    "💥 一鍵全平倉":   "handle_liquidate_all",
+    "📊 今日狀態":      "handle_status",
+    "💼 持倉":          "handle_holdings",
+    "📈 選股計劃":      "handle_plan",
+    "⚡ 快速下單":      "handle_quick_order",
+    "🎯 今日當沖預測":  "handle_daytrading",
+    "🛡️ 停損設定":     "handle_stop_loss",
+    "❓ 說明":          "handle_help",
+    "🚨 緊急暫停":      "handle_emergency_halt",
+    "🔄 撤銷所有委託":  "handle_cancel_all",
+    "💥 一鍵全平倉":    "handle_liquidate_all",
 }
 
 
@@ -1085,20 +1104,44 @@ def process_update(update: dict) -> None:
         _handle_set_stop_loss(chat_id, text)
         return
 
-    # ── 查股路由：純數字 4-6 碼 / /查股 XXXX / 查 XXXX ─────────────────────
+    if text in ("今日當沖", "/當沖"):
+        handle_daytrading(chat_id)
+        return
+
+    # ── 查股路由：代號或名稱，支援以下格式 ───────────────────────────────────
+    #   2330            → 純數字代號
+    #   台積電          → 股票名稱（完全比對 config.STOCK_NAMES）
+    #   查 2330         → 明確查股指令（代號）
+    #   查 台積電       → 明確查股指令（名稱）
+    #   /查股 2330      → slash 指令（代號）
+    #   /查股 台積電    → slash 指令（名稱）
     import re as _re
-    _stock_code: str | None = None
+
+    _query_input: str | None = None
+
     if _re.match(r"^\d{4,6}$", text):
-        _stock_code = text
+        # 純數字代號，直接使用
+        _query_input = text
     else:
-        _m = _re.match(r"^/查股\s+(\d{4,6})$", text) or _re.match(r"^查\s+(\d{4,6})$", text)
+        # 明確查股前綴：/查股 或 查
+        _m = _re.match(r"^(?:/查股|查)\s+(.+)$", text)
         if _m:
-            _stock_code = _m.group(1)
-    if _stock_code:
+            _query_input = _m.group(1).strip()
+        else:
+            # 無前綴：只有名稱完全比對 config.STOCK_NAMES 才觸發，避免攔截其他訊息
+            if text in _REV_STOCK_NAMES:
+                _query_input = text
+
+    if _query_input is not None:
         send_text(chat_id, "⏳ 查詢中…")
-        from stock_query import query_stock as _query_stock
-        result = _query_stock(_stock_code, api=_get_sj_api())
-        send_text(chat_id, result)
+        from stock_query import resolve_stock_input as _resolve, query_stock as _query_stock
+        _api = _get_sj_api()
+        _code, _err = _resolve(_query_input, api=_api)
+        if _err:
+            send_text(chat_id, _err)
+        else:
+            result = _query_stock(_code, api=_api)
+            send_text(chat_id, result)
         return
 
     import telegram_bot as _self

@@ -106,8 +106,13 @@ def _fetch_annual_trend(code: str, api=None) -> dict:
 # _assess_day_trading
 # ---------------------------------------------------------------------------
 
-def _assess_day_trading(indicators: Optional[dict], annual: dict) -> dict:
-    """從技術指標評估當沖適合度。
+def _assess_day_trading(
+    indicators: Optional[dict],
+    annual: dict,
+    chip: Optional[dict] = None,
+    market: Optional[dict] = None,
+) -> dict:
+    """從技術指標、法人籌碼、大盤狀況評估當沖適合度。
 
     Returns:
         dict with keys:
@@ -134,7 +139,6 @@ def _assess_day_trading(indicators: Optional[dict], annual: dict) -> dict:
     current_price= indicators.get("current_price", 0.0)
     bullish      = indicators.get("bullish_alignment", False)
     bearish      = indicators.get("bearish_alignment", False)
-    bb_pos       = indicators.get("BB_position", 0.5)
     kd_k         = indicators.get("KD_K", 50.0)
     kd_d         = indicators.get("KD_D", 50.0)
 
@@ -185,6 +189,75 @@ def _assess_day_trading(indicators: Optional[dict], annual: dict) -> dict:
     elif kd_k < kd_d and kd_k > 20:
         reasons_bad.append(f"KD 死亡交叉（K={kd_k:.0f}），短線偏空")
         score -= 1
+
+    # ── VWAP 評估 ────────────────────────────────────────────────
+    vwap = indicators.get("VWAP", 0.0)
+    if vwap and vwap > 0 and current_price > 0:
+        ratio = current_price / vwap
+        if ratio > 1.005:
+            reasons_good.append(f"站上 VWAP {vwap:,.1f}，籌碼偏多")
+            score += 1
+        elif ratio < 0.995:
+            reasons_bad.append(f"跌破 VWAP {vwap:,.1f}，籌碼偏空")
+            score -= 1
+
+    # ── 法人籌碼評分 ─────────────────────────────────────────────
+    if chip is not None:
+        foreign_net  = chip.get("foreign_net", 0)
+        trust_net    = chip.get("investment_trust_net", 0)
+        dealer_net   = chip.get("dealer_net", 0)
+        foreign_cont = chip.get("foreign_continuous_buy", 0)
+
+        if foreign_net >= 1000:
+            reasons_good.append(f"外資大買 {foreign_net:,.0f} 張，動能強勁")
+            score += 2
+        elif foreign_net >= 500:
+            reasons_good.append(f"外資買超 {foreign_net:,.0f} 張")
+            score += 1
+        elif foreign_net <= -1000:
+            reasons_bad.append(f"外資大賣 {-foreign_net:,.0f} 張，賣壓沉重")
+            score -= 2
+        elif foreign_net <= -500:
+            reasons_bad.append(f"外資賣超 {-foreign_net:,.0f} 張")
+            score -= 1
+
+        if trust_net >= 300:
+            reasons_good.append(f"投信買超 {trust_net:,.0f} 張")
+            score += 1
+        elif trust_net <= -300:
+            reasons_bad.append(f"投信賣超 {-trust_net:,.0f} 張")
+            score -= 1
+
+        if foreign_cont >= 3:
+            reasons_good.append(f"外資連續買超 {foreign_cont} 日")
+            score += 1
+
+        total_net = foreign_net + trust_net + dealer_net
+        if total_net <= -2000:
+            reasons_bad.append(f"三大法人合計賣超 {-total_net:,.0f} 張")
+            score -= 1
+
+    # ── 大盤方向加權 ─────────────────────────────────────────────
+    if market is not None:
+        index_pct = market.get("index_change_pct", 0.0)
+        if index_pct <= -1.0:
+            reasons_bad.append(f"大盤大跌 {index_pct:.2f}%，當沖風險高")
+            score -= 2
+        elif index_pct <= -0.3:
+            reasons_bad.append(f"大盤走弱 {index_pct:.2f}%")
+            score -= 1
+        elif index_pct >= 1.0:
+            reasons_good.append(f"大盤強勢 +{index_pct:.2f}%，多頭氛圍")
+            score += 1
+
+        # ── 台指期溢貼水 ─────────────────────────────────────────
+        futures_pct = market.get("futures_premium_pct", 0.0)
+        if futures_pct >= 0.3:
+            reasons_good.append(f"台指期溢價 +{futures_pct:.2f}%，期市偏多")
+            score += 1
+        elif futures_pct <= -0.3:
+            reasons_bad.append(f"台指期貼水 {futures_pct:.2f}%，期市偏空")
+            score -= 1
 
     # ── 硬性否決條件 ─────────────────────────────────────────────
     # 量比嚴重不足時，直接否決（不論其他指標）
@@ -312,10 +385,112 @@ def format_query_report(
 
 
 # ---------------------------------------------------------------------------
-# query_stock  (main entry point)
+# resolve_stock_input  — 代號或名稱 → 代號
 # ---------------------------------------------------------------------------
 
 _CODE_RE = re.compile(r"^\d{4,6}$")
+_REQUEST_TIMEOUT = 10
+
+
+def resolve_stock_input(text: str, api=None) -> tuple[str | None, str | None]:
+    """把用戶輸入（代號或名稱）解析成股票代號。
+
+    Returns:
+        (code, None)         — 找到唯一結果
+        (None, error_msg)    — 找不到或結果模糊
+    """
+    text = text.strip()
+    if not text:
+        return None, "❌ 請輸入股票代號或名稱"
+
+    # 1. 純數字 → 直接視為代號
+    if _CODE_RE.match(text):
+        return text, None
+
+    import config
+
+    # 2. config.STOCK_NAMES 完全比對（離線優先）
+    rev = {v: k for k, v in config.STOCK_NAMES.items()}
+    if text in rev:
+        return rev[text], None
+
+    # 3. Shioaji contracts（完全比對 > 部分比對）
+    if api is not None:
+        exact: list[tuple[str, str]] = []
+        partial: list[tuple[str, str]] = []
+        for exchange in ("TSE", "OTC", "OES"):
+            try:
+                for c in getattr(api.Contracts.Stocks, exchange, []):
+                    if c.name == text:
+                        exact.append((c.code, c.name))
+                    elif text in c.name:
+                        partial.append((c.code, c.name))
+            except Exception:
+                pass
+        if len(exact) == 1:
+            return exact[0][0], None
+        if not exact and len(partial) == 1:
+            return partial[0][0], None
+        if exact or partial:
+            candidates = exact or partial
+            hint = "　".join(f"{c} {n}" for c, n in candidates[:5])
+            return None, f"🔍 找到多個結果，請輸入代號：\n{hint}"
+
+    # 4. TWSE OpenAPI 線上搜尋（上市 + 上櫃）
+    try:
+        import requests as _req
+
+        results: list[tuple[str, str]] = []
+        found_exact = False
+        for url in (
+            "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
+            "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
+        ):
+            try:
+                resp = _req.get(url, timeout=_REQUEST_TIMEOUT, verify=True)
+                if not resp.ok:
+                    continue
+                for item in resp.json():
+                    name_key = "Name" if "Name" in item else "CompanyName"
+                    code_key = "Code" if "Code" in item else "SecuritiesCode"
+                    n = item.get(name_key, "")
+                    c = item.get(code_key, "")
+                    if n == text:
+                        results.append((c, n))
+                        found_exact = True
+                    elif text in n:
+                        results.append((c, n))
+            except Exception as e:
+                log.debug("TWSE/TPEX name lookup failed (%s): %s", url, e)
+            if found_exact:
+                break
+
+        if len(results) == 1:
+            return results[0][0], None
+        if len(results) > 1:
+            # 優先完全比對
+            exact_r = [(c, n) for c, n in results if n == text]
+            if len(exact_r) == 1:
+                return exact_r[0][0], None
+            hint = "　".join(f"{c} {n}" for c, n in (exact_r or results)[:5])
+            return None, f"🔍 找到多個結果，請輸入代號：\n{hint}"
+    except Exception as e:
+        log.debug("resolve_stock_input TWSE error: %s", e)
+
+    # 5. config.STOCK_NAMES 部分比對（最後 fallback）
+    partial_cfg = [(c, n) for c, n in config.STOCK_NAMES.items() if text in n]
+    if len(partial_cfg) == 1:
+        return partial_cfg[0][0], None
+    if len(partial_cfg) > 1:
+        hint = "　".join(f"{c} {n}" for c, n in partial_cfg[:5])
+        return None, f"🔍 找到多個結果，請輸入代號：\n{hint}"
+
+    return None, f"❌ 找不到「{text}」\n請確認股票名稱或改用代號（例如：2330）"
+
+
+# ---------------------------------------------------------------------------
+# query_stock  (main entry point)
+# ---------------------------------------------------------------------------
 
 
 def query_stock(code: str, api=None) -> str:

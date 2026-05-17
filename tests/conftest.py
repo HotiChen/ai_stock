@@ -1,7 +1,37 @@
 """
 tests/conftest.py — 測試基礎設施（全域 fixtures）
 """
+import sys
+import types
+from unittest.mock import MagicMock
+
 import pytest
+
+# ---------------------------------------------------------------------------
+# 在任何 import 之前，把 google.genai 注入為 stub，
+# 避免 ci 環境缺少套件或 cryptography ABI 不相容造成 collection error。
+# ---------------------------------------------------------------------------
+def _stub_google_genai() -> None:
+    google_mod = types.ModuleType("google")
+    genai_mod = types.ModuleType("google.genai")
+    types_mod = types.ModuleType("google.genai.types")
+
+    # 最小化 stub：讓 ai_client.py 的 top-level import 不 raise
+    genai_mod.Client = MagicMock
+    types_mod.Tool = MagicMock
+    types_mod.GoogleSearch = MagicMock
+    types_mod.GenerateContentConfig = MagicMock
+    genai_mod.types = types_mod
+
+    google_mod.genai = genai_mod
+    sys.modules.setdefault("google", google_mod)
+    sys.modules.setdefault("google.genai", genai_mod)
+    sys.modules.setdefault("google.genai.types", types_mod)
+
+_stub_google_genai()
+
+# feedparser stub（test 環境不裝真實 feedparser）
+sys.modules.setdefault("feedparser", MagicMock())
 
 
 @pytest.fixture(autouse=True)
