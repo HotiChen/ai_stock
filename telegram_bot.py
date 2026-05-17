@@ -1085,20 +1085,42 @@ def process_update(update: dict) -> None:
         _handle_set_stop_loss(chat_id, text)
         return
 
-    # ── 查股路由：純數字 4-6 碼 / /查股 XXXX / 查 XXXX ─────────────────────
+    # ── 查股路由：代號或名稱，支援以下格式 ───────────────────────────────────
+    #   2330            → 純數字代號
+    #   台積電          → 股票名稱（完全比對 config.STOCK_NAMES）
+    #   查 2330         → 明確查股指令（代號）
+    #   查 台積電       → 明確查股指令（名稱）
+    #   /查股 2330      → slash 指令（代號）
+    #   /查股 台積電    → slash 指令（名稱）
     import re as _re
-    _stock_code: str | None = None
+    import config as _cfg
+
+    _query_input: str | None = None
+
     if _re.match(r"^\d{4,6}$", text):
-        _stock_code = text
+        # 純數字代號，直接使用
+        _query_input = text
     else:
-        _m = _re.match(r"^/查股\s+(\d{4,6})$", text) or _re.match(r"^查\s+(\d{4,6})$", text)
+        # 明確查股前綴：/查股 或 查
+        _m = _re.match(r"^(?:/查股|查)\s+(.+)$", text)
         if _m:
-            _stock_code = _m.group(1)
-    if _stock_code:
+            _query_input = _m.group(1).strip()
+        else:
+            # 無前綴：只有名稱完全比對 config.STOCK_NAMES 才觸發，避免攔截其他訊息
+            _rev_names = {v: k for k, v in _cfg.STOCK_NAMES.items()}
+            if text in _rev_names:
+                _query_input = text
+
+    if _query_input is not None:
         send_text(chat_id, "⏳ 查詢中…")
-        from stock_query import query_stock as _query_stock
-        result = _query_stock(_stock_code, api=_get_sj_api())
-        send_text(chat_id, result)
+        from stock_query import resolve_stock_input as _resolve, query_stock as _query_stock
+        _api = _get_sj_api()
+        _code, _err = _resolve(_query_input, api=_api)
+        if _err:
+            send_text(chat_id, _err)
+        else:
+            result = _query_stock(_code, api=_api)
+            send_text(chat_id, result)
         return
 
     import telegram_bot as _self

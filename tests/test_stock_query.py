@@ -287,8 +287,63 @@ class TestQueryStock:
 # Tests for telegram_bot routing (Phase 3)
 # ===========================================================================
 
+class TestResolveStockInput:
+    """Tests for resolve_stock_input(text, api=None)"""
+
+    def _resolve(self, text, api=None):
+        from stock_query import resolve_stock_input
+        return resolve_stock_input(text, api=api)
+
+    def test_numeric_code_returns_itself(self):
+        code, err = self._resolve("2330")
+        assert code == "2330"
+        assert err is None
+
+    def test_exact_name_match_in_config(self):
+        # 台積電 is in config.STOCK_NAMES
+        code, err = self._resolve("台積電")
+        assert code == "2330"
+        assert err is None
+
+    def test_unknown_name_no_api_returns_error(self):
+        with patch("requests.get", side_effect=Exception("net")):
+            code, err = self._resolve("不存在公司XYZ")
+        assert code is None
+        assert err is not None
+        assert "找不到" in err
+
+    def test_empty_input_returns_error(self):
+        code, err = self._resolve("")
+        assert code is None
+        assert err is not None
+
+    def test_shioaji_api_exact_match(self):
+        mock_api = MagicMock()
+        contract = MagicMock()
+        contract.code = "2454"
+        contract.name = "聯發科"
+        mock_api.Contracts.Stocks.TSE = [contract]
+        mock_api.Contracts.Stocks.OTC = []
+        mock_api.Contracts.Stocks.OES = []
+        code, err = self._resolve("聯發科", api=mock_api)
+        assert code == "2454"
+        assert err is None
+
+    def test_shioaji_api_multiple_matches_returns_hint(self):
+        mock_api = MagicMock()
+        c1, c2 = MagicMock(), MagicMock()
+        c1.code, c1.name = "2330", "台積電"
+        c2.code, c2.name = "2303", "聯電"
+        mock_api.Contracts.Stocks.TSE = [c1, c2]
+        mock_api.Contracts.Stocks.OTC = []
+        mock_api.Contracts.Stocks.OES = []
+        code, err = self._resolve("電", api=mock_api)
+        assert code is None
+        assert "找到多個" in err
+
+
 class TestTelegramBotRouting:
-    """Tests 14-18: process_update() routing for stock query patterns"""
+    """Tests 14-18+: process_update() routing for stock query patterns"""
 
     def _make_update(self, text: str, chat_id: str = "123", user_id: str = "456") -> dict:
         return {
@@ -299,44 +354,96 @@ class TestTelegramBotRouting:
             }
         }
 
-    def _call_process_update(self, text: str):
-        """Patch env vars, _is_authorized, and call process_update."""
+    def _call_process_update(self, text: str, resolve_return=None):
+        """Patch env vars, _is_authorized, resolve_stock_input, and query_stock."""
         import telegram_bot
         update = self._make_update(text)
+        # Default: resolve returns the numeric code extracted from text
+        if resolve_return is None:
+            import re
+            m = re.match(r"\d{4,6}", text)
+            resolved_code = m.group(0) if m else None
+            resolve_return = (resolved_code, None) if resolved_code else (None, "找不到")
+
         with patch.object(telegram_bot, "CHAT_ID", "123"), \
              patch.object(telegram_bot, "USER_ID", ""), \
              patch("telegram_bot._is_authorized", return_value=True), \
              patch("telegram_bot.send_text") as mock_send, \
+             patch("stock_query.resolve_stock_input", return_value=resolve_return) as mock_resolve, \
              patch("stock_query.query_stock", return_value="查股結果") as mock_query:
             telegram_bot.process_update(update)
-            return mock_send, mock_query
+            return mock_send, mock_resolve, mock_query
 
     def test_pure_digits_triggers_query_stock(self):
-        """Test 14: '2330' (4-6 digits) → query_stock called with code='2330'"""
-        mock_send, mock_query = self._call_process_update("2330")
+        """'2330' (4-6 digits) → resolve called, then query_stock called"""
+        mock_send, mock_resolve, mock_query = self._call_process_update(
+            "2330", resolve_return=("2330", None)
+        )
+        mock_resolve.assert_called_once()
         mock_query.assert_called_once()
-        assert mock_query.call_args[0][0] == "2330" or mock_query.call_args[1].get("code") == "2330"
+        assert mock_query.call_args[0][0] == "2330"
 
     def test_slash_query_command_triggers(self):
-        """Test 15: '/查股 2454' → query_stock called with code='2454'"""
-        mock_send, mock_query = self._call_process_update("/查股 2454")
+        """'/查股 2454' → resolve called with '2454', query_stock called"""
+        mock_send, mock_resolve, mock_query = self._call_process_update(
+            "/查股 2454", resolve_return=("2454", None)
+        )
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args[0][0] == "2454"
         mock_query.assert_called_once()
-        args = mock_query.call_args
-        assert args[0][0] == "2454" or args[1].get("code") == "2454"
+        assert mock_query.call_args[0][0] == "2454"
 
     def test_cha_command_triggers(self):
-        """Test 16: '查 0050' → query_stock called with code='0050'"""
-        mock_send, mock_query = self._call_process_update("查 0050")
+        """'查 0050' → resolve called with '0050', query_stock called"""
+        mock_send, mock_resolve, mock_query = self._call_process_update(
+            "查 0050", resolve_return=("0050", None)
+        )
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args[0][0] == "0050"
         mock_query.assert_called_once()
-        args = mock_query.call_args
-        assert args[0][0] == "0050" or args[1].get("code") == "0050"
+
+    def test_name_query_with_cha_prefix(self):
+        """'查 台積電' → resolve called with '台積電', query_stock called with '2330'"""
+        mock_send, mock_resolve, mock_query = self._call_process_update(
+            "查 台積電", resolve_return=("2330", None)
+        )
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args[0][0] == "台積電"
+        mock_query.assert_called_once()
+        assert mock_query.call_args[0][0] == "2330"
+
+    def test_slash_query_with_name(self):
+        """'/查股 聯發科' → resolve called with '聯發科', query_stock called with '2454'"""
+        mock_send, mock_resolve, mock_query = self._call_process_update(
+            "/查股 聯發科", resolve_return=("2454", None)
+        )
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args[0][0] == "聯發科"
+        mock_query.assert_called_once()
+        assert mock_query.call_args[0][0] == "2454"
+
+    def test_resolve_error_sends_error_not_query(self):
+        """When resolve_stock_input returns error, send error msg, do NOT call query_stock"""
+        mock_send, mock_resolve, mock_query = self._call_process_update(
+            "查 不存在公司", resolve_return=(None, "❌ 找不到「不存在公司」")
+        )
+        mock_query.assert_not_called()
+        error_calls = [str(c) for c in mock_send.call_args_list]
+        assert any("找不到" in c for c in error_calls)
+
+    def test_known_stock_name_without_prefix(self):
+        """'台積電' (exact in STOCK_NAMES) → triggers query"""
+        mock_send, mock_resolve, mock_query = self._call_process_update(
+            "台積電", resolve_return=("2330", None)
+        )
+        mock_query.assert_called_once()
 
     def test_hello_does_not_trigger_query(self):
-        """Test 17: 'hello' → query_stock NOT called"""
-        mock_send, mock_query = self._call_process_update("hello")
+        """'hello' → query_stock NOT called"""
+        mock_send, mock_resolve, mock_query = self._call_process_update("hello")
         mock_query.assert_not_called()
 
     def test_eight_digit_code_does_not_trigger(self):
-        """Test 18: '12345678' (8 digits, too long) → query_stock NOT called"""
-        mock_send, mock_query = self._call_process_update("12345678")
+        """'12345678' (8 digits, too long) → query_stock NOT called"""
+        mock_send, mock_resolve, mock_query = self._call_process_update("12345678")
         mock_query.assert_not_called()
