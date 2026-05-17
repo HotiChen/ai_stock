@@ -10,6 +10,8 @@ import logging
 from datetime import date
 from typing import Optional
 
+from daytrading_analyzer import run_daytrading_analysis
+
 log = logging.getLogger(__name__)
 
 DB_PATH = "data/learning.db"
@@ -192,7 +194,21 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             "<i>今日候選股當沖評分均偏低，建議觀望。</i>"
         )
 
-    # 8. 組合報告
+    # 8. AI 當沖分析（前 3 名）
+    ai_map: dict = {}
+    for r in qualified[:3]:
+        try:
+            ai_map[r["code"]] = run_daytrading_analysis(
+                code=r["code"], name=r["name"],
+                indicators=r["indicators"],
+                chip=r["chip"],
+                market=market,
+                dt_score=r["dt_score"],
+            )
+        except Exception as e:
+            log.debug("run_daytrading_analysis(%s) failed: %s", r["code"], e)
+
+    # 9. 組合報告
     lines = [
         "⚡ <b>今日當沖預測</b>",
         "━━━━━━━━━━━━━━━━",
@@ -240,6 +256,21 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             lines.append(f"  ✅ {g}")
         for b in r["reasons_bad"][:1]:
             lines.append(f"  ⚠️ {b}")
+
+        # AI 當沖建議（前 3 名才有）
+        ai = ai_map.get(r["code"])
+        if ai and ai.action == "long":
+            ai_parts = [f"  🤖 {ai.timing}進場"]
+            if ai.entry_low is not None and ai.entry_high is not None:
+                ai_parts.append(f"進場區間 {ai.entry_low:,.1f}–{ai.entry_high:,.1f}")
+            if ai.target_price is not None:
+                ai_parts.append(f"目標 {ai.target_price:,.1f}")
+            if ai.stop_loss is not None:
+                ai_parts.append(f"停損 {ai.stop_loss:,.1f}")
+            lines.append("　".join(ai_parts))
+            if ai.summary:
+                lines.append(f"  <i>{ai.summary}</i>")
+
         lines.append("")
 
     lines.append(
