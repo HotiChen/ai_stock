@@ -701,6 +701,18 @@ def main() -> None:
                 monitor = job.run()
             time.sleep(60)
 
+        # 09:05 push day trading prediction report
+        elif t.hour == 9 and t.minute == 5:
+            if TELEGRAM_CHAT_ID:
+                try:
+                    from daytrading_report import build_daytrading_report
+                    from telegram_bot import send_text
+                    report = build_daytrading_report(api=api, db_path=DB_PATH)
+                    send_text(TELEGRAM_CHAT_ID, report)
+                except Exception as e:
+                    log.warning("DayTrading push failed: %s", e)
+            time.sleep(60)
+
         # 13:25 force-close all positions before market close
         elif t.hour == 13 and t.minute == 25:
             if api:

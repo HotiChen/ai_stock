@@ -95,9 +95,9 @@ def send_main_menu(chat_id: str, text: str = "請選擇功能：") -> None:
         "keyboard": [
             ["📊 今日狀態", "💼 持倉"],
             ["📈 選股計劃", "⚡ 快速下單"],
-            ["🛡️ 停損設定", "❓ 說明"],
-            ["🚨 緊急暫停", "🔄 撤銷所有委託"],
-            ["💥 一鍵全平倉"],
+            ["🎯 今日當沖預測", "🛡️ 停損設定"],
+            ["❓ 說明", "🚨 緊急暫停"],
+            ["🔄 撤銷所有委託", "💥 一鍵全平倉"],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -314,6 +314,17 @@ def _handle_set_stop_loss(chat_id: str, text: str) -> None:
     )
 
 
+def handle_daytrading(chat_id: str) -> None:
+    send_text(chat_id, "⏳ 分析中，請稍候…")
+    try:
+        from daytrading_report import build_daytrading_report
+        report = build_daytrading_report(api=_get_sj_api())
+    except Exception as e:
+        log.error("handle_daytrading error: %s", e)
+        report = "⚠️ 當沖預測產生失敗，請稍後再試。"
+    send_text(chat_id, report)
+
+
 def handle_help(chat_id: str) -> None:
     send_text(
         chat_id,
@@ -322,14 +333,17 @@ def handle_help(chat_id: str) -> None:
         "💼 持倉　　　→ 今日持倉明細\n"
         "📈 選股計劃　→ AI 今日選股清單\n"
         "⚡ 快速下單　→ 執行今日計劃\n"
+        "🎯 今日當沖預測 → 今日候選股當沖評分 + 預測勝率\n"
         "🛡️ 停損設定　→ 設定個股停損價\n"
         "🚨 緊急暫停　→ 立即停止系統，今日不再下單\n"
         "🔄 撤銷委託　→ 取消今日所有未成交委託\n"
         "💥 一鍵平倉　→ 市價賣出所有持倉\n\n"
         "排程：\n"
         "  08:30 盤前 AI 分析\n"
+        "  09:05 開盤推播今日當沖預測\n"
         "  09:00 開盤下單\n"
-        "  13:35 收盤總結"
+        "  13:35 收盤總結\n\n"
+        "查股：直接輸入代號（2330）或名稱（台積電）"
     )
 
 
@@ -1025,15 +1039,16 @@ def handle_callback(callback_query: dict) -> None:
 # Map button text → handler function name (string).
 # Using names instead of direct references so unittest.mock.patch works correctly.
 _HANDLER_NAMES: dict[str, str] = {
-    "📊 今日狀態":    "handle_status",
-    "💼 持倉":        "handle_holdings",
-    "📈 選股計劃":    "handle_plan",
-    "⚡ 快速下單":    "handle_quick_order",
-    "🛡️ 停損設定":   "handle_stop_loss",
-    "❓ 說明":        "handle_help",
-    "🚨 緊急暫停":    "handle_emergency_halt",
-    "🔄 撤銷所有委託": "handle_cancel_all",
-    "💥 一鍵全平倉":   "handle_liquidate_all",
+    "📊 今日狀態":      "handle_status",
+    "💼 持倉":          "handle_holdings",
+    "📈 選股計劃":      "handle_plan",
+    "⚡ 快速下單":      "handle_quick_order",
+    "🎯 今日當沖預測":  "handle_daytrading",
+    "🛡️ 停損設定":     "handle_stop_loss",
+    "❓ 說明":          "handle_help",
+    "🚨 緊急暫停":      "handle_emergency_halt",
+    "🔄 撤銷所有委託":  "handle_cancel_all",
+    "💥 一鍵全平倉":    "handle_liquidate_all",
 }
 
 
@@ -1083,6 +1098,10 @@ def process_update(update: dict) -> None:
 
     if text.startswith("停損 "):
         _handle_set_stop_loss(chat_id, text)
+        return
+
+    if text in ("今日當沖", "/當沖"):
+        handle_daytrading(chat_id)
         return
 
     # ── 查股路由：代號或名稱，支援以下格式 ───────────────────────────────────
