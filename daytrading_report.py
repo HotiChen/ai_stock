@@ -216,6 +216,24 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
         except Exception as e:
             log.debug("run_daytrading_analysis(%s) failed: %s", r["code"], e)
 
+    # 8b. 儲存盤中監控倉位
+    try:
+        from daytrading_monitor import DaytradingPosition, save_daytrading_positions
+        dt_positions = [
+            DaytradingPosition(
+                code=r["code"], name=r["name"],
+                entry_low=ai.entry_low, entry_high=ai.entry_high,
+                target_price=ai.target_price, stop_loss=ai.stop_loss,
+                dt_score=r["dt_score"],
+            )
+            for r in qualified[:3]
+            if (ai := ai_map.get(r["code"])) and ai.action == "long"
+        ]
+        if dt_positions:
+            save_daytrading_positions(dt_positions)
+    except Exception as e:
+        log.warning("save_daytrading_positions failed: %s", e)
+
     # 9. 組合報告
     lines = [
         "⚡ <b>今日當沖預測</b>",
