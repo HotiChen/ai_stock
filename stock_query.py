@@ -190,6 +190,17 @@ def _assess_day_trading(
         reasons_bad.append(f"KD 死亡交叉（K={kd_k:.0f}），短線偏空")
         score -= 1
 
+    # ── VWAP 評估 ────────────────────────────────────────────────
+    vwap = indicators.get("VWAP", 0.0)
+    if vwap and vwap > 0 and current_price > 0:
+        ratio = current_price / vwap
+        if ratio > 1.005:
+            reasons_good.append(f"站上 VWAP {vwap:,.1f}，籌碼偏多")
+            score += 1
+        elif ratio < 0.995:
+            reasons_bad.append(f"跌破 VWAP {vwap:,.1f}，籌碼偏空")
+            score -= 1
+
     # ── 法人籌碼評分 ─────────────────────────────────────────────
     if chip is not None:
         foreign_net  = chip.get("foreign_net", 0)
