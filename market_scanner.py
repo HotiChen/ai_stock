@@ -186,11 +186,13 @@ def fetch_twse_sim_candidates(
 
     snapshots: dict[str, dict] = {}
     for row in rows:
-        code = str(row.get("Code", "")).strip()
+        code = str(row.get("Code", row.get("SecuritiesCode", ""))).strip()
         # 只保留 4 位純數字股票（排除 ETF 如 0050、特別股）
         if not code.isdigit() or len(code) != 4:
             continue
         try:
+            _name_raw = (row.get("Name") or row.get("CompanyName") or row.get("name") or "")
+            name = str(_name_raw).strip() or code
             close  = float(row.get("ClosingPrice", 0) or 0)
             prev   = float(row.get("OpeningPrice",  0) or 0)
             change = float(row.get("Change", 0) or 0)
@@ -201,7 +203,7 @@ def fetch_twse_sim_candidates(
             change_pct = change / prev_close * 100 if prev_close > 0 else 0.0
             snapshots[code] = {
                 "code":         code,
-                "name":         str(row.get("Name", code)).strip(),
+                "name":         name,
                 "close":        close,
                 "change_rate":  change_pct,
                 "total_volume": int(volume),
