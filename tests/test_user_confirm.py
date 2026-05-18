@@ -204,3 +204,81 @@ class TestHandleCallback:
         with patch("user_confirm.AUTHORIZED_CHAT_ID", "12345"):
             result = handle_callback(self._make_callback("unknown_action"))
         assert result is None
+
+
+# ── send_dt_buy_confirmation ──────────────────────────────────────────────────
+
+class TestSendDtBuyConfirmation:
+    """PR-7：當沖買入確認 inline keyboard。"""
+
+    def _make_positions(self):
+        from daytrading_monitor import DaytradingPosition
+        return [
+            DaytradingPosition(
+                code="2330", name="台積電",
+                entry_low=None, entry_high=None,
+                target_price=None, stop_loss=None,
+                dt_score=7, status="watching",
+            ),
+            DaytradingPosition(
+                code="2454", name="聯發科",
+                entry_low=None, entry_high=None,
+                target_price=None, stop_loss=None,
+                dt_score=8, status="watching",
+            ),
+        ]
+
+    @patch("user_confirm.requests.post")
+    def test_calls_telegram_api(self, mock_post):
+        mock_post.return_value.json.return_value = {"ok": True, "result": {"message_id": 42}}
+        from user_confirm import send_dt_buy_confirmation
+        result = send_dt_buy_confirmation(self._make_positions(), "12345", 30000.0)
+        assert mock_post.called
+        assert result == 42
+
+    @patch("user_confirm.requests.post")
+    def test_keyboard_has_row_per_stock(self, mock_post):
+        mock_post.return_value.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        from user_confirm import send_dt_buy_confirmation
+        send_dt_buy_confirmation(self._make_positions(), "12345", 30000.0)
+        call_kwargs = mock_post.call_args[1]
+        payload = call_kwargs["json"]
+        keyboard = __import__("json").loads(payload["reply_markup"])["inline_keyboard"]
+        # 2 stocks + 1 bulk row = 3 rows
+        assert len(keyboard) == 3
+
+    @patch("user_confirm.requests.post")
+    def test_callback_data_format(self, mock_post):
+        mock_post.return_value.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        from user_confirm import send_dt_buy_confirmation
+        send_dt_buy_confirmation(self._make_positions(), "12345", 30000.0)
+        payload = mock_post.call_args[1]["json"]
+        keyboard = __import__("json").loads(payload["reply_markup"])["inline_keyboard"]
+        # First row: [dt_buy:2330, dt_skip:2330]
+        assert keyboard[0][0]["callback_data"] == "dt_buy:2330"
+        assert keyboard[0][1]["callback_data"] == "dt_skip:2330"
+        # Bulk row
+        assert keyboard[-1][0]["callback_data"] == "dt_buy_all"
+        assert keyboard[-1][1]["callback_data"] == "dt_skip_all"
+
+    @patch("user_confirm.requests.post")
+    def test_empty_positions_returns_none(self, mock_post):
+        from user_confirm import send_dt_buy_confirmation
+        result = send_dt_buy_confirmation([], "12345", 30000.0)
+        assert result is None
+        assert not mock_post.called
+
+    @patch("user_confirm.requests.post")
+    def test_budget_in_message(self, mock_post):
+        mock_post.return_value.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        from user_confirm import send_dt_buy_confirmation
+        send_dt_buy_confirmation(self._make_positions(), "12345", 50000.0)
+        payload = mock_post.call_args[1]["json"]
+        assert "50,000" in payload["text"]
+
+    @patch("user_confirm.requests.post")
+    def test_api_error_returns_none(self, mock_post):
+        mock_post.return_value.json.return_value = {"ok": False}
+        from user_confirm import send_dt_buy_confirmation
+        result = send_dt_buy_confirmation(self._make_positions(), "12345", 30000.0)
+        assert result is None

@@ -20,6 +20,58 @@ AUTHORIZED_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 _API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 
+# ── send_dt_buy_confirmation ──────────────────────────────────────────────────
+
+def send_dt_buy_confirmation(
+    positions: list,   # list[DaytradingPosition]
+    chat_id: str,
+    budget: float,
+) -> Optional[int]:
+    """發送當沖買入確認的 Telegram inline keyboard。
+
+    每支候選股一行：[✅ CODE NAME] [❌ 跳過]
+    最後一行：      [✅ 全部買入] [❌ 全部跳過]
+
+    callback_data 格式：
+      dt_buy:CODE   dt_skip:CODE   dt_buy_all   dt_skip_all
+    """
+    if not positions:
+        return None
+
+    header = (
+        f"💰 <b>當沖買入確認</b>\n"
+        f"預算 <b>{budget:,.0f}</b> 元／支\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"請選擇要買入的股票："
+    )
+
+    rows = []
+    for p in positions:
+        rows.append([
+            {"text": f"✅ {p.code} {p.name}", "callback_data": f"dt_buy:{p.code}"},
+            {"text": "❌ 跳過",                 "callback_data": f"dt_skip:{p.code}"},
+        ])
+    rows.append([
+        {"text": "✅ 全部買入", "callback_data": "dt_buy_all"},
+        {"text": "❌ 全部跳過", "callback_data": "dt_skip_all"},
+    ])
+
+    payload = {
+        "chat_id":      chat_id,
+        "text":         header,
+        "parse_mode":   "HTML",
+        "reply_markup": json.dumps({"inline_keyboard": rows}),
+    }
+    try:
+        resp = requests.post(f"{_API_BASE}/sendMessage", json=payload, timeout=10)
+        data = resp.json()
+        if data.get("ok"):
+            return data["result"]["message_id"]
+        return None
+    except Exception:
+        return None
+
+
 # ── verify_user ───────────────────────────────────────────────────────────────
 
 def verify_user(user_id) -> bool:
