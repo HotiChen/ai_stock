@@ -85,9 +85,45 @@ def get_all_stock_codes(api) -> list[str]:
 
 # ── TWSE simulation-mode scanner ──────────────────────────────────────────────
 
-_TWSE_DAY_ALL_URL = (
-    "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-)
+_TWSE_DAY_ALL_URL   = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+_TWSE_COMPANY_URL   = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+_TPEX_COMPANY_URL   = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
+
+_name_cache: dict[str, str] = {}
+
+
+def _fetch_name_map(timeout: int = 10) -> dict[str, str]:
+    """一次拿 TWSE + TPEX 全市場股票代號→名稱對照表（有快取）。"""
+    global _name_cache
+    if _name_cache:
+        return _name_cache
+    result: dict[str, str] = {}
+    try:
+        resp = requests.get(_TWSE_COMPANY_URL, timeout=timeout,
+                            headers={"User-Agent": "Mozilla/5.0"})
+        if resp.ok:
+            for item in resp.json():
+                code = str(item.get("公司代號") or item.get("Code") or "").strip()
+                name = str(item.get("公司簡稱") or item.get("Name") or "").strip()
+                if code and name:
+                    result[code] = name
+    except Exception as e:
+        log.debug("_fetch_name_map TWSE failed: %s", e)
+    try:
+        resp = requests.get(_TPEX_COMPANY_URL, timeout=timeout,
+                            headers={"User-Agent": "Mozilla/5.0"})
+        if resp.ok:
+            for item in resp.json():
+                code = str(item.get("SecuritiesCode") or item.get("Code") or "").strip()
+                name = str(item.get("CompanyName") or item.get("Name") or "").strip()
+                if code and name:
+                    result[code] = name
+    except Exception as e:
+        log.debug("_fetch_name_map TPEX failed: %s", e)
+    if result:
+        _name_cache = result
+        log.info("_fetch_name_map: 取得 %d 支股票名稱", len(result))
+    return result
 
 # 當 TWSE API 與 yfinance 均不可用時的保底股票清單（高流動性台股）
 _FALLBACK_STOCKS: list[tuple[str, str]] = [
@@ -184,8 +220,7 @@ def fetch_twse_sim_candidates(
         log.warning("fetch_twse_sim_candidates: TWSE 回傳空資料 — 嘗試 fallback")
         return _fallback_candidates(criteria)
 
-    log.warning("fetch_twse_sim_candidates: TWSE 第一筆 keys=%s, 範例=%s",
-                list(rows[0].keys()), {k: rows[0][k] for k in list(rows[0].keys())[:4]})
+    name_map = _fetch_name_map()
     snapshots: dict[str, dict] = {}
     for row in rows:
         code = str(row.get("Code", row.get("SecuritiesCode", ""))).strip()
@@ -194,7 +229,7 @@ def fetch_twse_sim_candidates(
             continue
         try:
             _name_raw = (row.get("Name") or row.get("CompanyName") or row.get("name") or "")
-            name = str(_name_raw).strip() or code
+            name = str(_name_raw).strip() or name_map.get(code) or code
             close  = float(row.get("ClosingPrice", 0) or 0)
             prev   = float(row.get("OpeningPrice",  0) or 0)
             change = float(row.get("Change", 0) or 0)

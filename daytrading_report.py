@@ -102,6 +102,23 @@ def _market_label(pct: float) -> str:
     return f"📊 {pct:+.2f}%（平盤）"
 
 
+def _resolve_name(code: str, name: str) -> str:
+    """若 name 與 code 相同（代表未成功取到名稱），嘗試用 yfinance 補查。"""
+    if name and name != code:
+        return name
+    try:
+        import yfinance as yf
+        info = yf.Ticker(f"{code}.TW").fast_info
+        short = getattr(info, "shortName", None) or getattr(info, "longName", None)
+        if short:
+            # yfinance 有時回傳 "2330.TW" 格式，略過
+            if short != f"{code}.TW" and not short.endswith(".TW"):
+                return short
+    except Exception:
+        pass
+    return name or code
+
+
 def _get_stock_universe(api, top_n: int = 50) -> list[dict]:
     """取得全市場候選池（掃描所有股票），固定回傳 code+name 的列表。
 
@@ -134,8 +151,12 @@ def _get_stock_universe(api, top_n: int = 50) -> list[dict]:
     rows = fetch_twse_sim_candidates(ScanCriteria(
         min_volume=0, min_price=0.0, max_price=999999.0, top_n=top_n,
     ))
-    return [{"code": r["code"], "name": r.get("name", r["code"]), "confidence": 5}
-            for r in rows]
+    result = []
+    for r in rows:
+        code = r["code"]
+        name = _resolve_name(code, r.get("name", code))
+        result.append({"code": code, "name": name, "confidence": 5})
+    return result
 
 
 def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
