@@ -116,6 +116,16 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
         log.warning("load_daily_plan failed: %s", e)
         picks = []
 
+    _twse_fallback = False
+    if not picks:
+        try:
+            from market_scanner import fetch_twse_sim_candidates, ScanCriteria
+            twse = fetch_twse_sim_candidates(ScanCriteria(min_volume=3000, top_n=10))
+            picks = [{"code": c["code"], "name": c["name"], "confidence": 5} for c in twse]
+            _twse_fallback = bool(picks)
+        except Exception as e:
+            log.warning("TWSE fallback failed: %s", e)
+
     if not picks:
         return (
             "⚡ <b>今日當沖預測</b>\n"
@@ -246,7 +256,8 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
     if hist_win_rate is not None:
         lines.append(f"📊 系統近 30 日實際勝率：<b>{hist_win_rate}%</b>")
 
-    lines.append(f"<i>共 {len(qualified)} 支候選，依預測勝率排序</i>")
+    source_note = "（TWSE 模擬選股）" if _twse_fallback else ""
+    lines.append(f"<i>共 {len(qualified)} 支候選{source_note}，依預測勝率排序</i>")
     lines.append("")
 
     for r in qualified[:8]:
