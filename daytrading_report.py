@@ -102,35 +102,61 @@ def _market_label(pct: float) -> str:
     return f"📊 {pct:+.2f}%（平盤）"
 
 
+def _get_stock_universe(api, top_n: int = 50) -> list[dict]:
+    """取得全市場候選池（掃描所有股票），固定回傳 code+name 的列表。
+
+    Real mode : Shioaji snapshots → 取量/漲跌排前 top_n
+    Sim mode  : TWSE → yfinance → 保底清單
+    """
+    try:
+        from market_scanner import (
+            fetch_twse_sim_candidates, ScanCriteria,
+            get_all_stock_codes, screen_candidates,
+        )
+        from market_scan import batch_fetch_snapshots
+    except Exception as e:
+        log.warning("_get_stock_universe import failed: %s", e)
+        return []
+
+    if api is not None:
+        try:
+            codes = get_all_stock_codes(api)
+            snaps = batch_fetch_snapshots(api, codes)
+            rows  = screen_candidates(snaps, ScanCriteria(
+                min_volume=500, min_price=10.0, max_price=5000.0, top_n=top_n,
+            ))
+            return [{"code": r["code"], "name": r.get("name", r["code"]), "confidence": 5}
+                    for r in rows]
+        except Exception as e:
+            log.warning("_get_stock_universe (shioaji) failed: %s", e)
+
+    # 模擬模式：TWSE → yfinance → 保底
+    rows = fetch_twse_sim_candidates(ScanCriteria(
+        min_volume=0, min_price=0.0, max_price=999999.0, top_n=top_n,
+    ))
+    return [{"code": r["code"], "name": r.get("name", r["code"]), "confidence": 5}
+            for r in rows]
+
+
 def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
-    """建立今日當沖預測報告，回傳 Telegram HTML 字串。"""
-    from research_db import load_daily_plan
+    """建立今日當沖預測報告，回傳 Telegram HTML 字串。
+
+    掃描全市場所有股票，用技術指標評分選出最適合當沖的 3~5 支，
+    再對前 3 名執行 AI 當沖深度分析，產生進場區間/目標/停損。
+    不依賴 research.db，獨立運作。
+    """
     from stock_query import _assess_day_trading, _fetch_annual_trend
 
     today_str = date.today().strftime("%Y%m%d")
 
-    # 1. 取今日候選股
-    try:
-        picks = load_daily_plan(date.today(), db_path)
-    except Exception as e:
-        log.warning("load_daily_plan failed: %s", e)
-        picks = []
-
-    _twse_fallback = False
-    if not picks:
-        try:
-            from market_scanner import fetch_twse_sim_candidates, ScanCriteria
-            twse = fetch_twse_sim_candidates(ScanCriteria(min_volume=3000, top_n=10))
-            picks = [{"code": c["code"], "name": c["name"], "confidence": 5} for c in twse]
-            _twse_fallback = bool(picks)
-        except Exception as e:
-            log.warning("TWSE fallback failed: %s", e)
+    # 1. 取全市場候選池（不依賴 research.db）
+    picks = _get_stock_universe(api, top_n=50)
 
     if not picks:
         return (
             "⚡ <b>今日當沖預測</b>\n"
             "━━━━━━━━━━━━━━━━\n"
-            "<i>今日尚無候選股。\n請等 08:30 盤前分析後再查詢。</i>"
+            "<i>無法取得股票資料，請確認網路連線。</i>"
         )
 
     # 2. 大盤方向（一次）
@@ -154,13 +180,11 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
     # 5. 歷史系統勝率
     hist_win_rate = _fetch_historical_win_rate(db_path)
 
-    # 6. 對每支股票計算當沖評分 + 勝率預測
+    # 6. 對每支股票計算當沖技術評分
     results = []
     for i, pick in enumerate(picks):
-        code       = pick.get("code", "")
-        name       = pick.get("name", code)
-        confidence = pick.get("confidence", 5)
-
+        code = pick.get("code", "")
+        name = pick.get("name", code)
         if not code:
             continue
 
@@ -184,16 +208,12 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
 
         assessment = _assess_day_trading(indicators, annual, chip=chip, market=market)
         dt_score   = assessment.get("score", 0)
-
-        # 勝率預測：AI 信心 60% 權重 + 當沖評分 40% 權重
-        ai_win_pct = _confidence_to_win_pct(confidence)
-        dt_win_pct = round(30.0 + (dt_score / 10.0) * 50.0, 1)
-        win_pct    = round(ai_win_pct * 0.6 + dt_win_pct * 0.4, 1)
+        win_pct    = round(30.0 + (dt_score / 10.0) * 50.0, 1)
 
         results.append({
             "code":         code,
             "name":         name,
-            "confidence":   confidence,
+            "confidence":   5,
             "dt_score":     dt_score,
             "verdict":      assessment.get("verdict", "—"),
             "win_pct":      win_pct,
@@ -203,16 +223,9 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             "chip":         chip,
         })
 
-    # 7. 排序：先按 win_pct，再按 dt_score
-    results.sort(key=lambda x: (x["win_pct"], x["dt_score"]), reverse=True)
-    qualified = [r for r in results if r["dt_score"] >= 4]
-
-    if not qualified:
-        return (
-            "⚡ <b>今日當沖預測</b>\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "<i>今日候選股當沖評分均偏低，建議觀望。</i>"
-        )
+    # 7. 純技術評分排序，取前 5 支（不設最低門檻，確保一定有結果）
+    results.sort(key=lambda x: x["dt_score"], reverse=True)
+    qualified = results[:5]
 
     # 8. AI 當沖分析（前 3 名）
     ai_map: dict = {}
@@ -256,8 +269,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
     if hist_win_rate is not None:
         lines.append(f"📊 系統近 30 日實際勝率：<b>{hist_win_rate}%</b>")
 
-    source_note = "（TWSE 模擬選股）" if _twse_fallback else ""
-    lines.append(f"<i>共 {len(qualified)} 支候選{source_note}，依預測勝率排序</i>")
+    lines.append(f"<i>全市場掃描，技術評分前 {len(qualified)} 支</i>")
     lines.append("")
 
     for r in qualified[:8]:
@@ -274,10 +286,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             f"<b>{r['code']} {r['name']}</b>  "
             f"{r['verdict']}（當沖 {r['dt_score']}/10）"
         )
-        lines.append(
-            f"  🎯 預測勝率 <b>{r['win_pct']}%</b>"
-            f"　AI 信心 {r['confidence']}/10"
-        )
+        lines.append(f"  🎯 預測勝率 <b>{r['win_pct']}%</b>")
         if price != "—":
             lines.append(f"  現價 {price_str}　RSI {rsi_str}　量比 {vr_str}")
 
