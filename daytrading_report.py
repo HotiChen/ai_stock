@@ -58,7 +58,8 @@ def _get_indicators(code: str, api=None) -> Optional[dict]:
     return None
 
 
-_MAX_CHIP_PICKS = 10  # 查連續買超天數的上限，避免 TWSE rate limit
+_MAX_CHIP_PICKS = 10   # 查連續買超天數的上限，避免 TWSE rate limit
+_MIN_DT_SCORE   = 4    # 進入 qualified 的最低技術評分門檻
 
 
 def _fetch_chip_data(today_str: str) -> dict:
@@ -229,6 +230,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
 
         assessment = _assess_day_trading(indicators, annual, chip=chip, market=market)
         dt_score   = assessment.get("score", 0)
+        data_ok    = assessment.get("data_ok", True)
         win_pct    = round(30.0 + (dt_score / 10.0) * 50.0, 1)
 
         results.append({
@@ -236,6 +238,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             "name":         name,
             "confidence":   5,
             "dt_score":     dt_score,
+            "data_ok":      data_ok,
             "verdict":      assessment.get("verdict", "—"),
             "win_pct":      win_pct,
             "reasons_good": assessment.get("reasons_good", []),
@@ -244,11 +247,22 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             "chip":         chip,
         })
 
-    # 7. 純技術評分排序，取前 5 支（不設最低門檻，確保一定有結果）
+    # 7. 排序後依門檻篩選：必須有技術資料且評分 >= _MIN_DT_SCORE
     results.sort(key=lambda x: x["dt_score"], reverse=True)
-    qualified = results[:5]
+    qualified = [r for r in results if r["data_ok"] and r["dt_score"] >= _MIN_DT_SCORE]
 
-    # 8. AI 當沖分析（前 3 名）
+    if not qualified:
+        header = (
+            "⚡ <b>今日當沖預測</b>\n"
+            "━━━━━━━━━━━━━━━━\n"
+            f"大盤：{_market_label(market['index_change_pct'])}\n"
+        )
+        has_any_data = any(r["data_ok"] for r in results)
+        if not has_any_data:
+            return header + "<i>⚠️ 技術資料不足，無法產生預測。\n請確認市場資料來源是否正常。</i>"
+        return header + "<i>今日各股當沖條件不成熟，建議觀望。</i>"
+
+    # 8. AI 當沖分析（前 3 名，均已通過資料門檻）
     ai_map: dict = {}
     for r in qualified[:3]:
         try:

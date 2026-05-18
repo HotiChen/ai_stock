@@ -11,10 +11,11 @@ def _make_pick(code="2330", name="台積電", confidence=7):
     return {"code": code, "name": name, "confidence": confidence}
 
 
-def _make_assessment(score=7, verdict="✅ 適合當沖", good=None, bad=None):
+def _make_assessment(score=7, verdict="✅ 適合當沖", good=None, bad=None, data_ok=True):
     return {
         "score": score,
         "verdict": verdict,
+        "data_ok": data_ok,
         "reasons_good": good or ["量比充足"],
         "reasons_bad": bad or [],
     }
@@ -40,33 +41,43 @@ class TestConfidenceToWinPct:
 
 
 class TestBuildDaytradingReport:
-    def _call(self, picks, assessment_score=7, hist_win_rate=None,
-              market=None, chip_today=None):
+    def _call(self, picks, assessment_score=7, assessment_data_ok=True,
+              hist_win_rate=None, market=None, chip_today=None):
+        """
+        Helper：patch 所有外部依賴，讓測試只驗證 build_daytrading_report 邏輯。
+
+        picks              : 傳給 _get_stock_universe 的候選股列表
+        assessment_score   : _assess_day_trading 回傳的評分（所有股票相同）
+        assessment_data_ok : _assess_day_trading 回傳的 data_ok 旗標
+        """
         from daytrading_report import build_daytrading_report
         if market is None:
-            market = {"index_change_pct": 0.0}
+            market = {"index_change_pct": 0.0, "futures_premium_pct": 0.0}
         if chip_today is None:
             chip_today = {}
-        # get_continuous_buy_days 回傳 chip_today 裡已有的連續天數，避免打真實 API
+
+        assessment = _make_assessment(score=assessment_score, data_ok=assessment_data_ok)
+
         def _mock_cont(code, end_date, data_fetcher=None, days=5):
             entry = chip_today.get(code, {})
             return {
                 "foreign_continuous_buy": entry.get("foreign_continuous_buy", 0),
                 "investment_trust_continuous_buy": entry.get("investment_trust_continuous_buy", 0),
             }
-        with patch("research_db.load_daily_plan", return_value=picks), \
+
+        with patch("daytrading_report._get_stock_universe", return_value=picks), \
              patch("daytrading_report._fetch_historical_win_rate", return_value=hist_win_rate), \
              patch("daytrading_report._fetch_market", return_value=market), \
              patch("daytrading_report._fetch_chip_data", return_value=chip_today), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("chip_data.get_continuous_buy_days", side_effect=_mock_cont), \
              patch("stock_query._fetch_annual_trend", return_value={"error": "skip", "monthly_closes": []}), \
-             patch("stock_query._assess_day_trading", return_value=_make_assessment(score=assessment_score)):
+             patch("stock_query._assess_day_trading", return_value=assessment):
             return build_daytrading_report(api=None, db_path=":memory:")
 
     def test_no_picks_returns_waiting_message(self):
         report = self._call([])
-        assert "尚無候選股" in report
+        assert "無法取得" in report
 
     def test_report_contains_code_and_name(self):
         report = self._call([_make_pick("2330", "台積電", confidence=8)])
@@ -121,6 +132,101 @@ class TestBuildDaytradingReport:
                                "investment_trust_continuous_buy": 0}}
         report = self._call([_make_pick("2330")], chip_today=chip_today)
         assert "連買 4 日" in report
+
+
+# ===========================================================================
+# P0 fix: 資料不足 / 門檻 / AI 呼叫防護
+# ===========================================================================
+
+class TestDataSufficiencyGating:
+    """驗證「資料不足」三路分流與 AI 呼叫防護。"""
+
+    def _call_with_assessment(self, picks, assessment, market=None):
+        from daytrading_report import build_daytrading_report
+        if market is None:
+            market = {"index_change_pct": 0.0, "futures_premium_pct": 0.0}
+        with patch("daytrading_report._get_stock_universe", return_value=picks), \
+             patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
+             patch("daytrading_report._fetch_market", return_value=market), \
+             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._get_indicators", return_value=None), \
+             patch("stock_query._fetch_annual_trend", return_value={"error": "skip", "monthly_closes": []}), \
+             patch("stock_query._assess_day_trading", return_value=assessment):
+            return build_daytrading_report(api=None, db_path=":memory:")
+
+    def test_no_data_stock_not_in_qualified(self):
+        """indicators=None → data_ok=False → 不進 qualified → 不顯示在報表中。"""
+        picks = [_make_pick("2330", "台積電")]
+        assessment = _make_assessment(score=8, data_ok=False,
+                                      verdict="⚠️ 資料不足")
+        report = self._call_with_assessment(picks, assessment)
+        assert "2330" not in report or "資料不足" in report or "建議觀望" in report
+
+    def test_all_no_data_returns_insufficient_message(self):
+        """所有股票 data_ok=False → 報表顯示資料不足，而非可交易清單。"""
+        picks = [_make_pick("2330"), _make_pick("2317", "鴻海")]
+        assessment = _make_assessment(score=0, data_ok=False,
+                                      verdict="⚠️ 資料不足")
+        report = self._call_with_assessment(picks, assessment)
+        assert "資料不足" in report
+        # 不應出現進場區間或預測勝率
+        assert "預測勝率" not in report
+
+    def test_has_data_but_all_below_threshold_returns_observe(self):
+        """所有股票 data_ok=True 但 score < 4 → 顯示「建議觀望」而非可交易清單。"""
+        picks = [_make_pick("2330"), _make_pick("2317", "鴻海")]
+        assessment = _make_assessment(score=3, data_ok=True,
+                                      verdict="❌ 不建議當沖")
+        report = self._call_with_assessment(picks, assessment)
+        assert "建議觀望" in report
+        assert "預測勝率" not in report
+
+    def test_ai_not_called_for_no_data_stocks(self):
+        """data_ok=False 的股票不應觸發 run_daytrading_analysis。"""
+        picks = [_make_pick("2330"), _make_pick("2317", "鴻海")]
+        assessment = _make_assessment(score=0, data_ok=False)
+        with patch("daytrading_report._get_stock_universe", return_value=picks), \
+             patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
+             patch("daytrading_report._fetch_market",
+                   return_value={"index_change_pct": 0.0, "futures_premium_pct": 0.0}), \
+             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._get_indicators", return_value=None), \
+             patch("stock_query._fetch_annual_trend",
+                   return_value={"error": "skip", "monthly_closes": []}), \
+             patch("stock_query._assess_day_trading", return_value=assessment), \
+             patch("daytrading_report.run_daytrading_analysis") as mock_ai:
+            from daytrading_report import build_daytrading_report
+            build_daytrading_report(api=None, db_path=":memory:")
+        mock_ai.assert_not_called()
+
+    def test_ai_not_called_for_below_threshold_stocks(self):
+        """score < _MIN_DT_SCORE 且 data_ok=True → run_daytrading_analysis 不應被呼叫。"""
+        picks = [_make_pick("2330")]
+        assessment = _make_assessment(score=3, data_ok=True,
+                                      verdict="❌ 不建議當沖")
+        with patch("daytrading_report._get_stock_universe", return_value=picks), \
+             patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
+             patch("daytrading_report._fetch_market",
+                   return_value={"index_change_pct": 0.0, "futures_premium_pct": 0.0}), \
+             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._get_indicators", return_value=None), \
+             patch("stock_query._fetch_annual_trend",
+                   return_value={"error": "skip", "monthly_closes": []}), \
+             patch("stock_query._assess_day_trading", return_value=assessment), \
+             patch("daytrading_report.run_daytrading_analysis") as mock_ai:
+            from daytrading_report import build_daytrading_report
+            build_daytrading_report(api=None, db_path=":memory:")
+        mock_ai.assert_not_called()
+
+    def test_high_score_with_data_produces_normal_report(self):
+        """data_ok=True + score >= 4 → 正常報表，含預測勝率與股票代號。"""
+        picks = [_make_pick("2330", "台積電")]
+        assessment = _make_assessment(score=8, data_ok=True,
+                                      verdict="✅ 適合當沖")
+        report = self._call_with_assessment(picks, assessment)
+        assert "2330" in report
+        assert "台積電" in report
+        assert "預測勝率" in report
 
 
 class TestAssessDayTradingChipMarket:

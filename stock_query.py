@@ -127,8 +127,9 @@ def _assess_day_trading(
 
     if indicators is None:
         return dict(
-            verdict="🟡 尚可（無法取得技術指標）",
-            score=5,
+            verdict="⚠️ 資料不足",
+            score=0,
+            data_ok=False,
             reasons_good=[],
             reasons_bad=["技術指標資料不可用"],
         )
@@ -276,6 +277,7 @@ def _assess_day_trading(
     return dict(
         verdict=verdict,
         score=score,
+        data_ok=True,
         reasons_good=reasons_good,
         reasons_bad=reasons_bad,
     )
