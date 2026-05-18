@@ -20,18 +20,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from daytrading_config import load_daytrading_config, DaytradingConfig
 from deep_analyzer import run_deep_analysis
 from executor import place_stock_order, ExecutionResult, force_stop_loss, _normalize_action
 from logger import get_logger
 from market_scan import batch_fetch_snapshots
-from market_scanner import ScanCriteria, get_all_stock_codes, screen_candidates
+from market_scanner import ScanCriteria, get_all_stock_codes, screen_candidates, fetch_twse_sim_candidates
 from monitor_agent import MonitorAgent, ensure_connected
 from research_db import (
     init_db, save_daily_plan, load_daily_plan, save_daily_trade,
     save_daily_summary, DailySummaryRow, load_daily_trades,
 )
 from risk_guard import validate_plan
-from user_confirm import send_confirmation
+from user_confirm import send_confirmation, send_dt_buy_confirmation
 
 log = get_logger(__name__)
 
@@ -101,23 +102,28 @@ def scan_candidates(
     name_map: Optional[dict[str, str]] = None,
 ) -> list[dict]:
     """Screen all listed stocks and return top candidates for deep analysis.
-    Returns [] when api is None or on any error."""
-    if api is None:
-        return []
-    try:
-        codes = get_all_stock_codes(api)
-        snapshots = batch_fetch_snapshots(api, codes)
-        if name_map:
-            for code, snap in snapshots.items():
-                snap["name"] = name_map.get(code, code)
-        rows = screen_candidates(snapshots, criteria or ScanCriteria())
-        for row in rows:
-            if "name" not in row and name_map:
-                row["name"] = name_map.get(row["code"], row["code"])
-        return rows
-    except Exception as e:
-        log.warning("scan_candidates failed: %s", e)
-        return []
+
+    Real mode   : Shioaji snapshots → screen_candidates()
+    Simulation  : TWSE OpenAPI fallback when api is None or Shioaji fails
+    """
+    if api is not None:
+        try:
+            codes = get_all_stock_codes(api)
+            snapshots = batch_fetch_snapshots(api, codes)
+            if name_map:
+                for code, snap in snapshots.items():
+                    snap["name"] = name_map.get(code, code)
+            rows = screen_candidates(snapshots, criteria or ScanCriteria())
+            for row in rows:
+                if "name" not in row and name_map:
+                    row["name"] = name_map.get(row["code"], row["code"])
+            return rows
+        except Exception as e:
+            log.warning("scan_candidates (Shioaji) failed: %s — 嘗試 TWSE fallback", e)
+
+    # 模擬模式 / Shioaji 失敗 → TWSE OpenAPI
+    log.info("scan_candidates: 使用 TWSE OpenAPI 取候選股（模擬模式）")
+    return fetch_twse_sim_candidates(criteria)
 
 
 def load_prior_orders(api) -> list[dict]:
@@ -627,17 +633,142 @@ class ForceCloseJob:
         return results
 
 
+# ── Day-trading auto buy ─────────────────────────────────────────────────────
+
+def _auto_buy_dt_positions(
+    api,
+    positions: list,
+    dt_config: "DaytradingConfig",
+    dt_path: str = "data/daytrading_positions.json",
+) -> None:
+    """DT_MANUAL_CONFIRM=false 時，自動買入所有 watching 當沖持倉。"""
+    from daytrading_monitor import (
+        load_daytrading_positions, save_daytrading_positions,
+        mark_position_entered, fetch_current_price,
+    )
+
+    all_positions = load_daytrading_positions(path=dt_path)
+    pos_map = {p.code: p for p in all_positions if p.status == "watching"}
+    changed = False
+
+    for pos in positions:
+        code = pos.code
+        if code not in pos_map:
+            continue
+        try:
+            price = fetch_current_price(code, api=api)
+            if price is None:
+                log.warning("DT auto-buy: 無法取得 %s 報價，跳過", code)
+                continue
+            result = place_stock_order(
+                api=api,
+                code=code, name=pos_map[code].name,
+                action="buy",
+                budget=dt_config.budget_per_stock,
+                price=price,
+                hard_limit=HARD_LIMIT,
+            )
+            if result.success:
+                mark_position_entered(pos_map[code], result.price, result.quantity, result.lot_type)
+                changed = True
+                log.info("DT auto-buy: %s qty=%d price=%.2f", code, result.quantity, result.price)
+                if TELEGRAM_CHAT_ID:
+                    try:
+                        from telegram_bot import send_text
+                        send_text(
+                            TELEGRAM_CHAT_ID,
+                            f"🤖 當沖自動買入：<b>{code} {pos_map[code].name}</b>\n"
+                            f"買入價 {result.price:,.2f}　"
+                            f"數量 {result.quantity}"
+                            f"{'張' if result.lot_type == 'common' else '股'}\n"
+                            f"金額 {result.amount:,.0f} 元",
+                        )
+                    except Exception:
+                        pass
+            else:
+                log.warning("DT auto-buy failed %s: %s", code, result.reason)
+        except Exception as e:
+            log.warning("DT auto-buy exception %s: %s", code, e)
+
+    if changed:
+        save_daytrading_positions(all_positions, path=dt_path)
+
+
+# ── Day-trading sell-signal executor ─────────────────────────────────────────
+
+def _run_dt_sell_alerts(
+    api,
+    sell_alerts: list,
+    dt_config: "DaytradingConfig",
+    dt_path: str = "data/daytrading_positions.json",
+) -> None:
+    """觸發追蹤停利 / 停損 / 強制平倉時，自動執行賣單並更新持倉狀態。
+
+    所有 DT 賣單均自動執行（不需手動確認），確保及時出場。
+    `require_manual_confirm` 只管理買入確認，不影響出場。
+    """
+    from daytrading_monitor import (
+        load_daytrading_positions,
+        save_daytrading_positions,
+        format_alerts_message,
+    )
+
+    positions = load_daytrading_positions(path=dt_path)
+    pos_map = {p.code: p for p in positions if p.status == "active"}
+    changed = False
+
+    for alert in sell_alerts:
+        code = alert.code
+        pos = pos_map.get(code)
+        if pos is None:
+            log.warning("DT sell alert for %s but no active position found", code)
+            continue
+
+        if pos.quantity <= 0:
+            log.warning("DT sell alert for %s but quantity=0, skipping", code)
+            continue
+
+        success = force_stop_loss(
+            api=api,
+            code=pos.code,
+            name=pos.name,
+            quantity=pos.quantity,
+            lot_type=pos.lot_type,
+        )
+        if success:
+            pos.status = "closed"
+            changed = True
+            log.info(
+                "DT 出場：%s %s reason=%s price=%.2f",
+                code, pos.name, alert.alert_type, alert.price,
+            )
+        else:
+            log.error("DT 出場失敗：%s %s", code, pos.name)
+
+        if TELEGRAM_CHAT_ID:
+            try:
+                from telegram_bot import send_text
+                status_tag = "✅ 出場已送出" if success else "❌ 出場失敗，請手動處理"
+                send_text(
+                    TELEGRAM_CHAT_ID,
+                    f"{status_tag}\n{format_alerts_message([alert])}",
+                )
+            except Exception as e:
+                log.warning("DT sell notify failed: %s", e)
+
+    if changed:
+        save_daytrading_positions(positions, path=dt_path)
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 _RUNNING = True
 
-_DT_MONITOR_TIMES: frozenset[tuple[int, int]] = frozenset({
-    (9, 15), (9, 30), (9, 45),
-    (10, 0), (10, 30),
-    (11, 0), (11, 30),
-    (12, 0), (12, 30),
-    (13, 0), (13, 15),
-})
+# 盤中當沖監控：09:15–13:15 每 5 分鐘掃描一次
+from datetime import time as _dtime
+_DT_MON_START    = _dtime(9, 15)
+_DT_MON_END      = _dtime(13, 15)
+_DT_MON_INTERVAL = 300   # 秒（5 分鐘）
 
 
 def _handle_signal(sig, frame):
@@ -665,8 +796,22 @@ def main() -> None:
         simulation=SIMULATION,
     )
 
+    dt_config = load_daytrading_config()
+    log.info(
+        "DT config: budget=%.0f stop_loss=%.1f%% take_profit=%.1f%% "
+        "trailing_start=%.1f%% trailing_stop=%.1f%% force_close=%s manual_confirm=%s",
+        dt_config.budget_per_stock,
+        dt_config.stop_loss_pct,
+        dt_config.take_profit_pct,
+        dt_config.trailing_start_pct,
+        dt_config.trailing_stop_pct,
+        dt_config.force_close_time,
+        dt_config.require_manual_confirm,
+    )
+
     monitor: Optional[MonitorAgent] = None
     approved_picks: list[dict] = []
+    _last_dt_monitor: Optional[datetime] = None   # 上次 DT monitor 執行時間
 
     while _RUNNING:
         now = datetime.now()
@@ -680,6 +825,24 @@ def main() -> None:
         if is_halted():
             time.sleep(30)
             continue
+
+        # ── 每 5 分鐘 DT 監控（09:15–13:15，獨立於一次性排程之外）──────────
+        if _DT_MON_START <= t <= _DT_MON_END:
+            elapsed = (now - _last_dt_monitor).total_seconds() if _last_dt_monitor else _DT_MON_INTERVAL
+            if elapsed >= _DT_MON_INTERVAL:
+                _last_dt_monitor = now
+                try:
+                    from daytrading_monitor import run_daytrading_monitor, format_alerts_message
+                    alerts = run_daytrading_monitor(api=api, config=dt_config)
+                    sell_alerts = [a for a in alerts if a.sell_required]
+                    info_alerts = [a for a in alerts if not a.sell_required]
+                    if info_alerts and TELEGRAM_CHAT_ID:
+                        from telegram_bot import send_text
+                        send_text(TELEGRAM_CHAT_ID, format_alerts_message(info_alerts))
+                    if sell_alerts:
+                        _run_dt_sell_alerts(api, sell_alerts, dt_config)
+                except Exception as e:
+                    log.warning("DayTrading monitor failed: %s", e)
 
         # 08:30 pre-market
         if t.hour == 8 and t.minute == 30:
@@ -709,29 +872,24 @@ def main() -> None:
                 monitor = job.run()
             time.sleep(60)
 
-        # 09:05 push day trading prediction report
+        # 09:05 推播當沖預測報告，並依設定送出買入確認或自動買入
         elif t.hour == 9 and t.minute == 5:
-            if TELEGRAM_CHAT_ID:
-                try:
-                    from daytrading_report import build_daytrading_report
+            try:
+                from daytrading_report import build_daytrading_report
+                from daytrading_monitor import load_daytrading_positions
+                report = build_daytrading_report(api=api, db_path=DB_PATH)
+                if TELEGRAM_CHAT_ID:
                     from telegram_bot import send_text
-                    report = build_daytrading_report(api=api, db_path=DB_PATH)
                     send_text(TELEGRAM_CHAT_ID, report)
-                except Exception as e:
-                    log.warning("DayTrading push failed: %s", e)
-            time.sleep(60)
-
-        # 盤中當沖監控（每 30 分鐘，09:15–13:15）
-        elif (t.hour, t.minute) in _DT_MONITOR_TIMES:
-            if TELEGRAM_CHAT_ID:
-                try:
-                    from daytrading_monitor import run_daytrading_monitor, format_alerts_message
-                    from telegram_bot import send_text
-                    alerts = run_daytrading_monitor(api=api)
-                    if alerts:
-                        send_text(TELEGRAM_CHAT_ID, format_alerts_message(alerts))
-                except Exception as e:
-                    log.warning("DayTrading monitor failed: %s", e)
+                dt_watching = [p for p in load_daytrading_positions() if p.status == "watching"]
+                if dt_watching:
+                    if dt_config.require_manual_confirm:
+                        if TELEGRAM_CHAT_ID:
+                            send_dt_buy_confirmation(dt_watching, TELEGRAM_CHAT_ID, dt_config.budget_per_stock)
+                    else:
+                        _auto_buy_dt_positions(api, dt_watching, dt_config)
+            except Exception as e:
+                log.warning("DayTrading push failed: %s", e)
             time.sleep(60)
 
         # 13:25 force-close all positions before market close

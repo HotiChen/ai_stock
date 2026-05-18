@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import requests
 from dataclasses import dataclass, field
 
 from market_scan import batch_fetch_snapshots
@@ -80,6 +81,66 @@ def get_all_stock_codes(api) -> list[str]:
             seen.add(c)
             unique.append(c)
     return unique
+
+
+# ── TWSE simulation-mode scanner ──────────────────────────────────────────────
+
+_TWSE_DAY_ALL_URL = (
+    "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+)
+
+
+def fetch_twse_sim_candidates(
+    criteria: ScanCriteria | None = None,
+    timeout: int = 15,
+) -> list[dict]:
+    """模擬模式（api=None）時，從 TWSE OpenAPI 取得當日交易資料並篩選候選股。
+
+    回傳格式與 screen_candidates() 相同，可直接交給 PremarketJob 使用。
+    TWSE API 僅包含上市股票（TSE），不含上櫃（OTC）。
+    """
+    import requests as _req
+
+    criteria = criteria or ScanCriteria()
+    try:
+        resp = requests.get(_TWSE_DAY_ALL_URL, timeout=timeout)
+        resp.raise_for_status()
+        rows = resp.json()
+    except Exception as e:
+        log.warning("fetch_twse_sim_candidates: TWSE API failed: %s", e)
+        return []
+
+    snapshots: dict[str, dict] = {}
+    for row in rows:
+        code = str(row.get("Code", "")).strip()
+        # 只保留 4 位純數字股票（排除 ETF 如 0050、特別股）
+        if not code.isdigit() or len(code) != 4:
+            continue
+        try:
+            close  = float(row.get("ClosingPrice", 0) or 0)
+            prev   = float(row.get("OpeningPrice",  0) or 0)   # TWSE 無前日收盤；用開盤近似
+            change = float(row.get("Change", 0) or 0)
+            volume = float(str(row.get("TradeVolume", "0")).replace(",", "") or 0) / 1000
+            if close <= 0:
+                continue
+            prev_close = close - change if change != 0 else close
+            change_pct = change / prev_close * 100 if prev_close > 0 else 0.0
+            snapshots[code] = {
+                "code":         code,
+                "name":         str(row.get("Name", code)).strip(),
+                "close":        close,
+                "change_rate":  change_pct,
+                "total_volume": int(volume),
+                "open":         prev,
+                "high":         float(row.get("HighestPrice", close) or close),
+                "low":          float(row.get("LowestPrice",  close) or close),
+            }
+        except (ValueError, TypeError):
+            continue
+
+    candidates = screen_candidates(snapshots, criteria)
+    log.info("fetch_twse_sim_candidates: %d 候選股（TWSE OpenAPI）", len(candidates))
+    return candidates
 
 
 # ── Deep analysis ─────────────────────────────────────────────────────────────

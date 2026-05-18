@@ -1033,6 +1033,86 @@ def handle_callback(callback_query: dict) -> None:
         send_text(chat_id, "已取消操作。")
         send_main_menu(chat_id)
 
+    # ── 當沖買入確認 ──
+    elif data.startswith("dt_buy:"):
+        code = data.split(":", 1)[1]
+        _handle_dt_buy(chat_id, code)
+    elif data == "dt_buy_all":
+        _handle_dt_buy_all(chat_id)
+    elif data.startswith("dt_skip:"):
+        code = data.split(":", 1)[1]
+        send_text(chat_id, f"⏭️ 已跳過 {code}")
+    elif data == "dt_skip_all":
+        send_text(chat_id, "⏭️ 已跳過所有當沖候選股")
+
+
+def _handle_dt_buy(chat_id: str, code: str) -> None:
+    """當沖買入：取得即時報價 → 執行買單 → 標記持倉為 active。"""
+    import os
+    from daytrading_monitor import (
+        load_daytrading_positions, save_daytrading_positions,
+        mark_position_entered, fetch_current_price,
+    )
+    from daytrading_config import load_daytrading_config
+    from executor import place_stock_order
+
+    positions = load_daytrading_positions()
+    pos = next((p for p in positions if p.code == code and p.status == "watching"), None)
+
+    if pos is None:
+        send_text(chat_id, f"⚠️ {code} 無可用的當沖候選持倉（已成交或不存在）。")
+        return
+
+    api = _get_sj_api()
+    if api is None:
+        send_text(chat_id, f"❌ 無法連線 Shioaji，{code} 買入失敗。")
+        return
+
+    dt_config = load_daytrading_config()
+    send_text(chat_id, f"⏳ 正在為 {code} {pos.name} 下買單（預算 {dt_config.budget_per_stock:,.0f} 元）...")
+
+    price = fetch_current_price(code, api=api)
+    if price is None:
+        send_text(chat_id, f"❌ 無法取得 {code} 即時報價，買入取消。")
+        return
+
+    result = place_stock_order(
+        api=api,
+        code=code, name=pos.name,
+        action="buy",
+        budget=dt_config.budget_per_stock,
+        price=price,
+        hard_limit=float(os.getenv("ORDER_HARD_LIMIT", "150000")),
+    )
+
+    if result.success:
+        mark_position_entered(pos, result.price, result.quantity, result.lot_type)
+        save_daytrading_positions(positions)
+        send_text(
+            chat_id,
+            f"✅ <b>當沖買入成功</b>\n"
+            f"{code} {pos.name}\n"
+            f"買入價 {result.price:,.2f}　"
+            f"數量 {result.quantity}{'張' if result.lot_type == 'common' else '股'}\n"
+            f"金額 {result.amount:,.0f} 元　委託 ID：{result.order_id}",
+        )
+        log.info("DT buy: %s qty=%d price=%.2f id=%s", code, result.quantity, result.price, result.order_id)
+    else:
+        send_text(chat_id, f"❌ {code} 買入失敗：{result.reason}")
+        log.warning("DT buy failed %s: %s", code, result.reason)
+
+
+def _handle_dt_buy_all(chat_id: str) -> None:
+    """全部買入：對所有 watching 當沖候選股依序執行買單。"""
+    from daytrading_monitor import load_daytrading_positions
+    watching = [p for p in load_daytrading_positions() if p.status == "watching"]
+    if not watching:
+        send_text(chat_id, "⚠️ 無可用的當沖候選股（已全部成交或清空）。")
+        return
+    send_text(chat_id, f"⏳ 開始依序買入 {len(watching)} 支候選股...")
+    for pos in watching:
+        _handle_dt_buy(chat_id, pos.code)
+
 
 # ── Message router ─────────────────────────────────────────────────────────────
 

@@ -46,3 +46,12 @@ STOCK_NAMES: dict[str, str] = {
 }
 STOP_LOSS_PCT: float = float(_get("STOP_LOSS_PCT", "5"))
 FORCE_CLOSE_TIME: str = _get("FORCE_CLOSE_TIME", "13:25")
+
+# Day-trading specific (loaded via daytrading_config.load_daytrading_config())
+DT_BUDGET: float           = float(_get("DT_BUDGET", "30000"))
+DT_STOP_LOSS_PCT: float    = float(_get("DT_STOP_LOSS_PCT", "3.0"))
+DT_TAKE_PROFIT_PCT: float  = float(_get("DT_TAKE_PROFIT_PCT", "9.0"))
+DT_TRAILING_START_PCT: float = float(_get("DT_TRAILING_START_PCT", "2.0"))
+DT_TRAILING_STOP_PCT: float  = float(_get("DT_TRAILING_STOP_PCT", "0.5"))
+DT_FORCE_CLOSE_TIME: str   = _get("DT_FORCE_CLOSE_TIME", "13:00")
+DT_MANUAL_CONFIRM: bool    = _get("DT_MANUAL_CONFIRM", "true").lower() == "true"
