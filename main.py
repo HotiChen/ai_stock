@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from daytrading_config import load_daytrading_config, DaytradingConfig
 from deep_analyzer import run_deep_analysis
 from executor import place_stock_order, ExecutionResult, force_stop_loss, _normalize_action
 from logger import get_logger
@@ -627,6 +628,72 @@ class ForceCloseJob:
         return results
 
 
+# ── Day-trading sell-signal executor ─────────────────────────────────────────
+
+def _run_dt_sell_alerts(
+    api,
+    sell_alerts: list,
+    dt_config: "DaytradingConfig",
+    dt_path: str = "data/daytrading_positions.json",
+) -> None:
+    """觸發追蹤停利 / 停損 / 強制平倉時，自動執行賣單並更新持倉狀態。
+
+    所有 DT 賣單均自動執行（不需手動確認），確保及時出場。
+    `require_manual_confirm` 只管理買入確認，不影響出場。
+    """
+    from daytrading_monitor import (
+        load_daytrading_positions,
+        save_daytrading_positions,
+        format_alerts_message,
+    )
+
+    positions = load_daytrading_positions(path=dt_path)
+    pos_map = {p.code: p for p in positions if p.status == "active"}
+    changed = False
+
+    for alert in sell_alerts:
+        code = alert.code
+        pos = pos_map.get(code)
+        if pos is None:
+            log.warning("DT sell alert for %s but no active position found", code)
+            continue
+
+        if pos.quantity <= 0:
+            log.warning("DT sell alert for %s but quantity=0, skipping", code)
+            continue
+
+        success = force_stop_loss(
+            api=api,
+            code=pos.code,
+            name=pos.name,
+            quantity=pos.quantity,
+            lot_type=pos.lot_type,
+        )
+        if success:
+            pos.status = "closed"
+            changed = True
+            log.info(
+                "DT 出場：%s %s reason=%s price=%.2f",
+                code, pos.name, alert.alert_type, alert.price,
+            )
+        else:
+            log.error("DT 出場失敗：%s %s", code, pos.name)
+
+        if TELEGRAM_CHAT_ID:
+            try:
+                from telegram_bot import send_text
+                status_tag = "✅ 出場已送出" if success else "❌ 出場失敗，請手動處理"
+                send_text(
+                    TELEGRAM_CHAT_ID,
+                    f"{status_tag}\n{format_alerts_message([alert])}",
+                )
+            except Exception as e:
+                log.warning("DT sell notify failed: %s", e)
+
+    if changed:
+        save_daytrading_positions(positions, path=dt_path)
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 _RUNNING = True
@@ -663,6 +730,19 @@ def main() -> None:
         os.getenv("SHIOAJI_API_KEY", ""),
         os.getenv("SHIOAJI_SECRET_KEY", ""),
         simulation=SIMULATION,
+    )
+
+    dt_config = load_daytrading_config()
+    log.info(
+        "DT config: budget=%.0f stop_loss=%.1f%% take_profit=%.1f%% "
+        "trailing_start=%.1f%% trailing_stop=%.1f%% force_close=%s manual_confirm=%s",
+        dt_config.budget_per_stock,
+        dt_config.stop_loss_pct,
+        dt_config.take_profit_pct,
+        dt_config.trailing_start_pct,
+        dt_config.trailing_stop_pct,
+        dt_config.force_close_time,
+        dt_config.require_manual_confirm,
     )
 
     monitor: Optional[MonitorAgent] = None
@@ -722,16 +802,20 @@ def main() -> None:
             time.sleep(60)
 
         # 盤中當沖監控（每 30 分鐘，09:15–13:15）
+        # active 持倉觸發出場訊號時自動執行賣單；watching 持倉只發 Telegram 警報
         elif (t.hour, t.minute) in _DT_MONITOR_TIMES:
-            if TELEGRAM_CHAT_ID:
-                try:
-                    from daytrading_monitor import run_daytrading_monitor, format_alerts_message
+            try:
+                from daytrading_monitor import run_daytrading_monitor, format_alerts_message
+                alerts = run_daytrading_monitor(api=api, config=dt_config)
+                sell_alerts = [a for a in alerts if a.sell_required]
+                info_alerts = [a for a in alerts if not a.sell_required]
+                if info_alerts and TELEGRAM_CHAT_ID:
                     from telegram_bot import send_text
-                    alerts = run_daytrading_monitor(api=api)
-                    if alerts:
-                        send_text(TELEGRAM_CHAT_ID, format_alerts_message(alerts))
-                except Exception as e:
-                    log.warning("DayTrading monitor failed: %s", e)
+                    send_text(TELEGRAM_CHAT_ID, format_alerts_message(info_alerts))
+                if sell_alerts:
+                    _run_dt_sell_alerts(api, sell_alerts, dt_config)
+            except Exception as e:
+                log.warning("DayTrading monitor failed: %s", e)
             time.sleep(60)
 
         # 13:25 force-close all positions before market close
