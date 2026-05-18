@@ -698,13 +698,11 @@ def _run_dt_sell_alerts(
 
 _RUNNING = True
 
-_DT_MONITOR_TIMES: frozenset[tuple[int, int]] = frozenset({
-    (9, 15), (9, 30), (9, 45),
-    (10, 0), (10, 30),
-    (11, 0), (11, 30),
-    (12, 0), (12, 30),
-    (13, 0), (13, 15),
-})
+# 盤中當沖監控：09:15–13:15 每 5 分鐘掃描一次
+from datetime import time as _dtime
+_DT_MON_START    = _dtime(9, 15)
+_DT_MON_END      = _dtime(13, 15)
+_DT_MON_INTERVAL = 300   # 秒（5 分鐘）
 
 
 def _handle_signal(sig, frame):
@@ -747,6 +745,7 @@ def main() -> None:
 
     monitor: Optional[MonitorAgent] = None
     approved_picks: list[dict] = []
+    _last_dt_monitor: Optional[datetime] = None   # 上次 DT monitor 執行時間
 
     while _RUNNING:
         now = datetime.now()
@@ -760,6 +759,24 @@ def main() -> None:
         if is_halted():
             time.sleep(30)
             continue
+
+        # ── 每 5 分鐘 DT 監控（09:15–13:15，獨立於一次性排程之外）──────────
+        if _DT_MON_START <= t <= _DT_MON_END:
+            elapsed = (now - _last_dt_monitor).total_seconds() if _last_dt_monitor else _DT_MON_INTERVAL
+            if elapsed >= _DT_MON_INTERVAL:
+                _last_dt_monitor = now
+                try:
+                    from daytrading_monitor import run_daytrading_monitor, format_alerts_message
+                    alerts = run_daytrading_monitor(api=api, config=dt_config)
+                    sell_alerts = [a for a in alerts if a.sell_required]
+                    info_alerts = [a for a in alerts if not a.sell_required]
+                    if info_alerts and TELEGRAM_CHAT_ID:
+                        from telegram_bot import send_text
+                        send_text(TELEGRAM_CHAT_ID, format_alerts_message(info_alerts))
+                    if sell_alerts:
+                        _run_dt_sell_alerts(api, sell_alerts, dt_config)
+                except Exception as e:
+                    log.warning("DayTrading monitor failed: %s", e)
 
         # 08:30 pre-market
         if t.hour == 8 and t.minute == 30:
@@ -799,23 +816,6 @@ def main() -> None:
                     send_text(TELEGRAM_CHAT_ID, report)
                 except Exception as e:
                     log.warning("DayTrading push failed: %s", e)
-            time.sleep(60)
-
-        # 盤中當沖監控（每 30 分鐘，09:15–13:15）
-        # active 持倉觸發出場訊號時自動執行賣單；watching 持倉只發 Telegram 警報
-        elif (t.hour, t.minute) in _DT_MONITOR_TIMES:
-            try:
-                from daytrading_monitor import run_daytrading_monitor, format_alerts_message
-                alerts = run_daytrading_monitor(api=api, config=dt_config)
-                sell_alerts = [a for a in alerts if a.sell_required]
-                info_alerts = [a for a in alerts if not a.sell_required]
-                if info_alerts and TELEGRAM_CHAT_ID:
-                    from telegram_bot import send_text
-                    send_text(TELEGRAM_CHAT_ID, format_alerts_message(info_alerts))
-                if sell_alerts:
-                    _run_dt_sell_alerts(api, sell_alerts, dt_config)
-            except Exception as e:
-                log.warning("DayTrading monitor failed: %s", e)
             time.sleep(60)
 
         # 13:25 force-close all positions before market close
