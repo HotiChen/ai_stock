@@ -184,6 +184,8 @@ def fetch_twse_sim_candidates(
         log.warning("fetch_twse_sim_candidates: TWSE 回傳空資料 — 嘗試 fallback")
         return _fallback_candidates(criteria)
 
+    log.warning("fetch_twse_sim_candidates: TWSE 第一筆 keys=%s, 範例=%s",
+                list(rows[0].keys()), {k: rows[0][k] for k in list(rows[0].keys())[:4]})
     snapshots: dict[str, dict] = {}
     for row in rows:
         code = str(row.get("Code", row.get("SecuritiesCode", ""))).strip()
