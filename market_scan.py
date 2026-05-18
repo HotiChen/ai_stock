@@ -49,11 +49,13 @@ def batch_fetch_snapshots(api, codes: list[str], batch_size: int = 100) -> dict[
         contracts = [c for c in contracts if c is not None]
         if not contracts:
             continue
+        # 從合約物件取名稱（contract.name 就是中文股名）
+        name_map = {c.code: getattr(c, "name", c.code) for c in contracts}
         try:
             snaps = api.snapshots(contracts)
             for snap in snaps:
                 result[snap.code] = {
-                    "name":         snap.code,
+                    "name":         name_map.get(snap.code, snap.code),
                     "close":        snap.close,
                     "change_rate":  snap.change_rate,
                     "change_price": snap.change_price,
