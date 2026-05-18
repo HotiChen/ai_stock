@@ -74,12 +74,14 @@ class TestFetchTwseSimCandidates:
         codes = [r["code"] for r in result]
         assert "1234" not in codes
 
+    @patch("market_scanner._fallback_candidates", return_value=[{"code": "2330", "name": "台積電", "close": 0.0, "change_rate": 0.0, "total_volume": 99999}])
     @patch("market_scanner.requests")
-    def test_returns_empty_on_api_failure(self, mock_req):
+    def test_falls_back_on_api_failure(self, mock_req, mock_fallback):
         from market_scanner import fetch_twse_sim_candidates
         mock_req.get.side_effect = Exception("network error")
         result = fetch_twse_sim_candidates()
-        assert result == []
+        mock_fallback.assert_called_once()
+        assert isinstance(result, list)
 
     @patch("market_scanner.requests")
     def test_candidate_has_required_fields(self, mock_req):

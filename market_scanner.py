@@ -89,6 +89,74 @@ _TWSE_DAY_ALL_URL = (
     "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 )
 
+# 當 TWSE API 與 yfinance 均不可用時的保底股票清單（高流動性台股）
+_FALLBACK_STOCKS: list[tuple[str, str]] = [
+    ("2330", "台積電"),
+    ("2317", "鴻海"),
+    ("2454", "聯發科"),
+    ("2382", "廣達"),
+    ("2603", "長榮"),
+    ("2308", "台達電"),
+    ("2881", "富邦金"),
+    ("2882", "國泰金"),
+    ("2886", "兆豐金"),
+    ("3008", "大立光"),
+    ("2303", "聯電"),
+    ("2412", "中華電"),
+    ("2891", "中信金"),
+    ("2884", "玉山金"),
+    ("2357", "華碩"),
+]
+
+
+def _fetch_yfinance_snapshots(codes_names: list[tuple[str, str]]) -> dict[str, dict]:
+    """用 yfinance 補抓快照；失敗個別略過。"""
+    snapshots: dict[str, dict] = {}
+    try:
+        import yfinance as yf
+    except ImportError:
+        return snapshots
+    for code, name in codes_names:
+        try:
+            ticker = yf.Ticker(f"{code}.TW")
+            info = ticker.fast_info
+            close = getattr(info, "last_price", None) or getattr(info, "previous_close", None)
+            if not close:
+                hist = ticker.history(period="2d")
+                if hist is not None and not hist.empty:
+                    close = float(hist["Close"].iloc[-1])
+            if not close:
+                continue
+            vol = getattr(info, "three_month_average_volume", 0) or 0
+            snapshots[code] = {
+                "code":         code,
+                "name":         name,
+                "close":        float(close),
+                "change_rate":  0.0,
+                "total_volume": int(vol // 1000),
+            }
+        except Exception:
+            continue
+    return snapshots
+
+
+def _fallback_candidates(criteria: ScanCriteria) -> list[dict]:
+    """TWSE 與 yfinance 均失敗時，用保底清單讓流程繼續。"""
+    snaps = _fetch_yfinance_snapshots(_FALLBACK_STOCKS)
+    if not snaps:
+        # yfinance 也失敗：直接回傳保底清單（close=0，讓 AI 仍能分析）
+        result = [
+            {"code": c, "name": n, "close": 0.0, "change_rate": 0.0, "total_volume": 99999}
+            for c, n in _FALLBACK_STOCKS[: criteria.top_n]
+        ]
+        log.warning("fetch_twse_sim_candidates: 使用保底股票清單（無價格資料）")
+        return result
+    candidates = screen_candidates(snaps, ScanCriteria(
+        min_volume=0, min_price=0.0, max_price=999999.0, top_n=criteria.top_n
+    ))
+    log.warning("fetch_twse_sim_candidates: 使用 yfinance 保底清單 %d 支", len(candidates))
+    return candidates
+
 
 def fetch_twse_sim_candidates(
     criteria: ScanCriteria | None = None,
@@ -97,18 +165,24 @@ def fetch_twse_sim_candidates(
     """模擬模式（api=None）時，從 TWSE OpenAPI 取得當日交易資料並篩選候選股。
 
     回傳格式與 screen_candidates() 相同，可直接交給 PremarketJob 使用。
-    TWSE API 僅包含上市股票（TSE），不含上櫃（OTC）。
+    TWSE API 不可用時依序嘗試 yfinance → 保底清單，確保流程不中斷。
     """
-    import requests as _req
-
     criteria = criteria or ScanCriteria()
     try:
-        resp = requests.get(_TWSE_DAY_ALL_URL, timeout=timeout)
+        resp = requests.get(
+            _TWSE_DAY_ALL_URL,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
         resp.raise_for_status()
         rows = resp.json()
     except Exception as e:
-        log.warning("fetch_twse_sim_candidates: TWSE API failed: %s", e)
-        return []
+        log.warning("fetch_twse_sim_candidates: TWSE API failed: %s — 嘗試 fallback", e)
+        return _fallback_candidates(criteria)
+
+    if not rows:
+        log.warning("fetch_twse_sim_candidates: TWSE 回傳空資料 — 嘗試 fallback")
+        return _fallback_candidates(criteria)
 
     snapshots: dict[str, dict] = {}
     for row in rows:
@@ -118,7 +192,7 @@ def fetch_twse_sim_candidates(
             continue
         try:
             close  = float(row.get("ClosingPrice", 0) or 0)
-            prev   = float(row.get("OpeningPrice",  0) or 0)   # TWSE 無前日收盤；用開盤近似
+            prev   = float(row.get("OpeningPrice",  0) or 0)
             change = float(row.get("Change", 0) or 0)
             volume = float(str(row.get("TradeVolume", "0")).replace(",", "") or 0) / 1000
             if close <= 0:
@@ -139,6 +213,10 @@ def fetch_twse_sim_candidates(
             continue
 
     candidates = screen_candidates(snapshots, criteria)
+    if not candidates:
+        log.warning("fetch_twse_sim_candidates: TWSE 篩選後無候選股 — 嘗試 fallback")
+        return _fallback_candidates(criteria)
+
     log.info("fetch_twse_sim_candidates: %d 候選股（TWSE OpenAPI）", len(candidates))
     return candidates
 
