@@ -516,7 +516,7 @@ def query_stock(code: str, api=None) -> str:
             log.warning("_fetch_stock_name error: %s", e)
             name = code
 
-        # 2. 技術指標
+        # 2. 技術指標：Shioaji → yfinance fallback
         indicators = None
         if api is not None:
             try:
@@ -524,11 +524,11 @@ def query_stock(code: str, api=None) -> str:
                 indicators = fetch_indicators(api, code)
             except Exception as e:
                 log.warning("fetch_indicators error for %s: %s", code, e)
-        else:
-            # 嘗試用 yfinance 計算技術指標
+
+        if indicators is None:
+            # yfinance fallback（Shioaji 無資料或 api=None 時）
             try:
                 import yfinance as yf  # type: ignore
-                import numpy as np
                 from technical_indicators import calculate_indicators  # type: ignore
                 df = yf.Ticker(f"{code}.TW").history(period="6mo")
                 if df is not None and not df.empty and len(df) >= 80:

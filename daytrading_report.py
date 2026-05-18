@@ -36,11 +36,13 @@ def _fetch_historical_win_rate(db_path: str) -> Optional[float]:
 
 
 def _get_indicators(code: str, api=None) -> Optional[dict]:
-    """嘗試取技術指標：Shioaji → yfinance → None。"""
+    """嘗試取技術指標：Shioaji → yfinance fallback → None。"""
     if api is not None:
         try:
             from technical_indicators import fetch_indicators
-            return fetch_indicators(api, code)
+            result = fetch_indicators(api, code)
+            if result is not None:
+                return result
         except Exception as e:
             log.debug("fetch_indicators(%s) failed: %s", code, e)
 
