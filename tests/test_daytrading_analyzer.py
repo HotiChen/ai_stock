@@ -36,14 +36,16 @@ def _market(pct=0.5):
     return {"index_change_pct": pct}
 
 
-def _valid_json(action="long", confidence=7):
+def _valid_json(action="long", confidence=7,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0):
     return json.dumps({
         "action": action,
         "confidence": confidence,
-        "entry_low": 99.0,
-        "entry_high": 101.0,
-        "target_price": 105.0,
-        "stop_loss": 97.0,
+        "entry_low": entry_low,
+        "entry_high": entry_high,
+        "target_price": target_price,
+        "stop_loss": stop_loss,
         "timing": "拉回",
         "summary": "量比充足，站上 VWAP，適合逢拉回買進。",
     })
@@ -180,6 +182,95 @@ class TestParseDaytradingResponse:
         assert result.name == "聯發科"
 
 
+# ── Price interval validation (P1) ───────────────────────────────────────────
+
+class TestLongPriceValidation:
+    """action="long" 時必須通過金融邏輯驗證，否則降級為 skip。"""
+
+    def _parse(self, raw):
+        from daytrading_analyzer import parse_daytrading_response
+        return parse_daytrading_response("2330", "台積電", raw)
+
+    def _degraded(self, result):
+        """Assert the result is a properly degraded skip."""
+        assert result.action == "skip"
+        assert result.confidence == 0
+        assert result.timing == "觀望"
+        assert "無效" in result.summary or "跳過" in result.summary
+        assert result.entry_low is None
+        assert result.entry_high is None
+        assert result.target_price is None
+        assert result.stop_loss is None
+
+    # 1. 合法區間正常通過
+    def test_valid_long_passes(self):
+        result = self._parse(_valid_json())
+        assert result.action == "long"
+        assert result.entry_low == 99.0
+        assert result.entry_high == 101.0
+        assert result.target_price == 105.0
+        assert result.stop_loss == 97.0
+
+    # 2. entry_low > entry_high → skip
+    def test_entry_low_gt_entry_high_degrades(self):
+        raw = _valid_json(entry_low=105.0, entry_high=99.0)
+        self._degraded(self._parse(raw))
+
+    # 3. stop_loss == entry_low → skip
+    def test_stop_loss_equal_entry_low_degrades(self):
+        raw = _valid_json(stop_loss=99.0, entry_low=99.0)
+        self._degraded(self._parse(raw))
+
+    # 4. stop_loss > entry_low → skip
+    def test_stop_loss_gt_entry_low_degrades(self):
+        raw = _valid_json(stop_loss=103.0, entry_low=99.0)
+        self._degraded(self._parse(raw))
+
+    # 5. target_price == entry_high → skip
+    def test_target_price_equal_entry_high_degrades(self):
+        raw = _valid_json(target_price=101.0, entry_high=101.0)
+        self._degraded(self._parse(raw))
+
+    # 6. target_price < entry_high → skip
+    def test_target_price_lt_entry_high_degrades(self):
+        raw = _valid_json(target_price=98.0, entry_high=101.0)
+        self._degraded(self._parse(raw))
+
+    # 7. entry_low = 0 → skip
+    def test_zero_entry_low_degrades(self):
+        raw = _valid_json(entry_low=0.0)
+        self._degraded(self._parse(raw))
+
+    # 8. stop_loss 為負數 → skip
+    def test_negative_stop_loss_degrades(self):
+        raw = _valid_json(stop_loss=-5.0)
+        self._degraded(self._parse(raw))
+
+    # 9. entry_low 為 null → skip
+    def test_missing_entry_low_degrades(self):
+        raw = json.dumps({
+            "action": "long", "confidence": 7,
+            "entry_low": None, "entry_high": 101.0,
+            "target_price": 105.0, "stop_loss": 97.0,
+            "timing": "拉回", "summary": "test",
+        })
+        self._degraded(self._parse(raw))
+
+    # 10. action="skip" 即使價格全 null 也正常保留 skip
+    def test_skip_with_null_prices_preserved(self):
+        raw = json.dumps({
+            "action": "skip", "confidence": 0,
+            "entry_low": None, "entry_high": None,
+            "target_price": None, "stop_loss": None,
+            "timing": "觀望", "summary": "不適合",
+        })
+        result = self._parse(raw)
+        assert result.action == "skip"
+        assert result.entry_low is None
+        # 不可因為 null 價格而改變 skip 的 summary
+        assert result.summary == "不適合"
+
+
 # ── run_daytrading_analysis ───────────────────────────────────────────────────
 
 class TestRunDaytradingAnalysis:
@@ -236,30 +327,33 @@ class TestRunDaytradingAnalysis:
 # ── Integration: daytrading_report with AI analysis ──────────────────────────
 
 class TestDaytradingReportWithAI:
-    def _make_pick(self, code="2330", name="台積電", confidence=8):
-        return {"code": code, "name": name, "confidence": confidence}
+    def _make_pick(self, code="2330", name="台積電"):
+        return {"code": code, "name": name}
 
-    def _call(self, picks, with_ai=True):
+    def _call(self, picks, ai_result=None):
         from daytrading_report import build_daytrading_report
         from daytrading_analyzer import DayTradingAnalysis
 
-        ai_result = DayTradingAnalysis(
-            code="2330", name="台積電",
-            action="long", confidence=8,
-            entry_low=99.0, entry_high=101.0,
-            target_price=105.0, stop_loss=97.0,
-            timing="拉回", summary="量比充足，站上 VWAP，適合拉回買進。",
-        )
+        if ai_result is None:
+            ai_result = DayTradingAnalysis(
+                code="2330", name="台積電",
+                action="long", confidence=8,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                timing="拉回", summary="量比充足，站上 VWAP，適合拉回買進。",
+            )
 
-        with patch("research_db.load_daily_plan", return_value=picks), \
+        with patch("daytrading_report._get_stock_universe", return_value=picks), \
              patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
-             patch("daytrading_report._fetch_market", return_value={"index_change_pct": 0.5}), \
+             patch("daytrading_report._fetch_market",
+                   return_value={"index_change_pct": 0.5, "futures_premium_pct": 0.0}), \
              patch("daytrading_report._fetch_chip_data", return_value={}), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("stock_query._fetch_annual_trend",
                    return_value={"error": "skip", "monthly_closes": []}), \
              patch("stock_query._assess_day_trading",
                    return_value={"score": 7, "verdict": "✅ 適合當沖",
+                                 "data_ok": True,
                                  "reasons_good": ["量比充足"], "reasons_bad": []}), \
              patch("daytrading_report.run_daytrading_analysis",
                    return_value=ai_result) as mock_ai:
@@ -281,3 +375,20 @@ class TestDaytradingReportWithAI:
     def test_report_contains_target_and_stop(self):
         report, _ = self._call([self._make_pick()])
         assert "105" in report or "97" in report or "目標" in report
+
+    def test_invalid_long_prices_not_shown_in_report(self):
+        """降級為 skip 的 long（無效價格區間）不得在報表顯示進場建議。"""
+        from daytrading_analyzer import DayTradingAnalysis
+        # 模擬 parse_daytrading_response 已降級為 skip 的結果
+        degraded = DayTradingAnalysis(
+            code="2330", name="台積電",
+            action="skip", confidence=0,
+            entry_low=None, entry_high=None,
+            target_price=None, stop_loss=None,
+            timing="觀望",
+            summary="AI 回傳價格區間無效，已保守跳過",
+        )
+        report, _ = self._call([self._make_pick()], ai_result=degraded)
+        assert "進場區間" not in report
+        # degraded summary 不應出現（report 只在 action=="long" 時顯示 summary）
+        assert "AI 回傳價格區間無效" not in report

@@ -130,6 +130,25 @@ def _extract_json(raw: str) -> dict:
     raise ValueError("no JSON found")
 
 
+def _is_valid_long(
+    entry_low: Optional[float],
+    entry_high: Optional[float],
+    target_price: Optional[float],
+    stop_loss: Optional[float],
+) -> bool:
+    """Return True iff all long price fields satisfy basic trading logic.
+
+    Rules:
+        1. All four prices must be present and > 0
+        2. entry_low <= entry_high
+        3. stop_loss < entry_low
+        4. target_price > entry_high
+    """
+    if any(v is None or v <= 0 for v in (entry_low, entry_high, target_price, stop_loss)):
+        return False
+    return entry_low <= entry_high and stop_loss < entry_low and target_price > entry_high
+
+
 def parse_daytrading_response(code: str, name: str, raw: str) -> DayTradingAnalysis:
     _skip = DayTradingAnalysis(
         code=code, name=name, action="skip", confidence=0,
@@ -158,13 +177,31 @@ def parse_daytrading_response(code: str, name: str, raw: str) -> DayTradingAnaly
         if timing not in ("開盤", "拉回", "突破", "觀望"):
             timing = "觀望"
 
+        el = _float(data.get("entry_low"))
+        eh = _float(data.get("entry_high"))
+        tp = _float(data.get("target_price"))
+        sl = _float(data.get("stop_loss"))
+
+        if action == "long" and not _is_valid_long(el, eh, tp, sl):
+            log.debug(
+                "parse_daytrading_response: invalid long prices (%s "
+                "el=%s eh=%s tp=%s sl=%s) → skip",
+                code, el, eh, tp, sl,
+            )
+            return DayTradingAnalysis(
+                code=code, name=name,
+                action="skip", confidence=0,
+                entry_low=None, entry_high=None,
+                target_price=None, stop_loss=None,
+                timing="觀望",
+                summary="AI 回傳價格區間無效，已保守跳過",
+            )
+
         return DayTradingAnalysis(
             code=code, name=name,
             action=action, confidence=confidence,
-            entry_low=_float(data.get("entry_low")),
-            entry_high=_float(data.get("entry_high")),
-            target_price=_float(data.get("target_price")),
-            stop_loss=_float(data.get("stop_loss")),
+            entry_low=el, entry_high=eh,
+            target_price=tp, stop_loss=sl,
             timing=timing,
             summary=data.get("summary", ""),
         )
