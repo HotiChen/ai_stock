@@ -123,6 +123,152 @@ class TestCheckPriceAlerts:
         assert alert["stop_loss_price"] == 800.0
 
 
+# ── check_price_alerts: trailing stop ────────────────────────────────────────
+
+class TestTrailingStop:
+    """移動停損：漲到 trailing_start_pct 才啟動，停損跟在最高點下方 trailing_gap_pct。"""
+
+    def _pick(self, entry_price=100.0, peak_price=None, **kwargs):
+        p = dict(
+            code="2330", name="台積電",
+            entry_price=entry_price,
+            target_price=120.0,
+            stop_loss_price=95.0,
+        )
+        if peak_price is not None:
+            p["peak_price"] = peak_price
+        p.update(kwargs)
+        return p
+
+    # ── 未達門檻，仍用固定停損/目標 ────────────────────────────────────────────
+
+    def test_below_threshold_uses_fixed_stoploss(self):
+        """gain < 3%：移動停損未啟動，固定停損仍有效。"""
+        from monitor_agent import check_price_alerts
+        # entry=100, current=94 → gain=-6%, 未達 trailing 門檻
+        pick = self._pick()
+        alerts = check_price_alerts("2330", 94.0, pick)
+        types = [a["alert_type"] for a in alerts]
+        assert "stop_loss" in types
+        assert "trailing_stop" not in types
+
+    def test_below_threshold_uses_fixed_target(self):
+        """gain < 3%：移動停損未啟動，固定目標價仍有效。
+        目標設在 entry+2%（低於 3% 啟動門檻）。"""
+        from monitor_agent import check_price_alerts
+        # entry=100, target=101.5（+1.5%），current=101.5 → gain=1.5% < 3% trailing not active
+        pick = self._pick(entry_price=100.0, target_price=101.5, stop_loss_price=95.0)
+        alerts = check_price_alerts("2330", 101.5, pick)
+        types = [a["alert_type"] for a in alerts]
+        assert "target_hit" in types
+        assert "trailing_stop" not in types
+
+    # ── 達到門檻，移動停損接管 ──────────────────────────────────────────────────
+
+    def test_trailing_active_no_trigger_returns_empty(self):
+        """peak 漲到 +3.5%，現價仍在移動停損之上 → 無警報。"""
+        from monitor_agent import check_price_alerts
+        # entry=100, peak=103.5 (+3.5%), trailing_stop=103.5*0.98=101.43
+        # current=102 > 101.43 → no trigger
+        pick = self._pick(peak_price=103.5)
+        alerts = check_price_alerts("2330", 102.0, pick)
+        assert alerts == []
+
+    def test_trailing_stop_triggered(self):
+        """peak 漲到 +5%，現價跌破移動停損 → trailing_stop 警報。"""
+        from monitor_agent import check_price_alerts
+        # entry=100, peak=105 (+5%), trailing_stop=105*0.98=102.9
+        # current=102 < 102.9 → trigger
+        pick = self._pick(peak_price=105.0)
+        alerts = check_price_alerts("2330", 102.0, pick)
+        types = [a["alert_type"] for a in alerts]
+        assert "trailing_stop" in types
+
+    def test_trailing_stop_alert_type(self):
+        from monitor_agent import check_price_alerts
+        pick = self._pick(peak_price=105.0)
+        alerts = check_price_alerts("2330", 102.0, pick)
+        assert alerts[0]["alert_type"] == "trailing_stop"
+
+    def test_trailing_stop_includes_peak_price(self):
+        from monitor_agent import check_price_alerts
+        pick = self._pick(peak_price=106.0)
+        alerts = check_price_alerts("2330", 103.0, pick)
+        a = next(a for a in alerts if a["alert_type"] == "trailing_stop")
+        assert a["peak_price"] == pytest.approx(106.0)
+
+    def test_trailing_stop_includes_trailing_stop_price(self):
+        from monitor_agent import check_price_alerts
+        pick = self._pick(peak_price=106.0)
+        alerts = check_price_alerts("2330", 103.0, pick)
+        a = next(a for a in alerts if a["alert_type"] == "trailing_stop")
+        assert a["trailing_stop"] == pytest.approx(106.0 * 0.98)
+
+    # ── peak_price 在 pick dict 中更新 ──────────────────────────────────────────
+
+    def test_peak_price_updated_when_new_high(self):
+        """tick 比 peak 高 → pick['peak_price'] 更新。"""
+        from monitor_agent import check_price_alerts
+        pick = self._pick(entry_price=100.0, peak_price=102.0)
+        check_price_alerts("2330", 104.0, pick)
+        assert pick["peak_price"] == pytest.approx(104.0)
+
+    def test_peak_price_not_lowered(self):
+        """tick 低於 peak → pick['peak_price'] 不變。"""
+        from monitor_agent import check_price_alerts
+        pick = self._pick(entry_price=100.0, peak_price=106.0)
+        check_price_alerts("2330", 104.0, pick)
+        assert pick["peak_price"] == pytest.approx(106.0)
+
+    def test_peak_initialized_from_entry_when_missing(self):
+        """pick 沒有 peak_price 時，以 entry_price 為起點。"""
+        from monitor_agent import check_price_alerts
+        pick = self._pick(entry_price=100.0)  # no peak_price key
+        check_price_alerts("2330", 101.0, pick)
+        assert pick["peak_price"] == pytest.approx(101.0)
+
+    # ── 移動停損啟動後，固定停損/目標被跳過 ──────────────────────────────────────
+
+    def test_trailing_active_skips_fixed_stoploss(self):
+        """移動停損啟動中（未觸發）：即使現價跌破固定停損，也不發固定停損警報。"""
+        from monitor_agent import check_price_alerts
+        # entry=100, peak=104 (+4%), trailing_stop=104*0.98=101.92
+        # current=99 < fixed stop_loss=95? No — current=99 is above stop_loss=95
+        # Actually let's put stop_loss=100 so current=99 would be below it
+        pick = self._pick(entry_price=100.0, peak_price=104.0, stop_loss_price=100.0)
+        # trailing active (peak +4%), trailing_stop=101.92, current=99 triggers trailing
+        alerts = check_price_alerts("2330", 99.0, pick)
+        types = [a["alert_type"] for a in alerts]
+        # should get trailing_stop, NOT stop_loss
+        assert "trailing_stop" in types
+        assert "stop_loss" not in types
+
+    def test_trailing_active_not_triggered_skips_fixed_target(self):
+        """移動停損啟動中（未觸發）：即使現價超過固定目標，也不發目標價警報。"""
+        from monitor_agent import check_price_alerts
+        # entry=100, peak=104 (+4%), trailing_stop=104*0.98=101.92
+        # current=125 > target_price=120 → but trailing active, return empty
+        pick = self._pick(entry_price=100.0, peak_price=104.0)
+        # current=125 is above trailing_stop=101.92, so not triggered → empty
+        alerts = check_price_alerts("2330", 125.0, pick)
+        assert alerts == []
+
+    # ── 無 entry_price 時走舊邏輯 ────────────────────────────────────────────────
+
+    def test_no_entry_price_falls_back_to_fixed_alerts(self):
+        """entry_price 為 None：移動停損不啟動，固定停損/目標照常。"""
+        from monitor_agent import check_price_alerts
+        pick = dict(
+            code="2330", name="台積電",
+            target_price=120.0,
+            stop_loss_price=95.0,
+            # no entry_price
+        )
+        alerts = check_price_alerts("2330", 94.0, pick)
+        types = [a["alert_type"] for a in alerts]
+        assert "stop_loss" in types
+
+
 # ── get_snapshot ──────────────────────────────────────────────────────────────
 
 class TestGetSnapshot:

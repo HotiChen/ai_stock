@@ -28,39 +28,86 @@ log = get_logger(__name__)
 
 # ── Pure logic ────────────────────────────────────────────────────────────────
 
-def check_price_alerts(code: str, current_price: float, pick: dict) -> list[dict]:
+_TRAILING_START_PCT = 3.0   # 漲到 3% 才啟動移動停損（預設值，可由 MonitorAgent 覆蓋）
+_TRAILING_GAP_PCT   = 2.0   # 移動停損永遠在最高點下方 2%（預設值）
+
+
+def check_price_alerts(
+    code: str,
+    current_price: float,
+    pick: dict,
+    trailing_start_pct: float = _TRAILING_START_PCT,
+    trailing_gap_pct: float = _TRAILING_GAP_PCT,
+) -> list[dict]:
     """
-    Compare current_price against target_price and stop_loss_price in pick.
-    Returns a (possibly empty) list of alert dicts ready for save_alert().
+    每個 tick 呼叫一次。pick 是 mutable dict，會在這裡更新 peak_price。
+
+    參數
+    ----
+    trailing_start_pct : 移動停損啟動門檻（預設 3%）
+    trailing_gap_pct   : 停損點與最高點的距離（預設 2%）
+
+    觸發規則（依優先順序）：
+    1. 移動停損：進場後漲超過 trailing_start_pct，停損跟著最高點 -trailing_gap_pct
+    2. AI 目標價：現價 >= target_price
+    3. AI 停損價：現價 <= stop_loss_price（移動停損未啟動前的保護）
     """
     alerts = []
-    target    = pick.get("target_price")
-    stop_loss = pick.get("stop_loss_price")
-    name      = pick.get("name", code)
+    name         = pick.get("name", code)
+    entry_price  = pick.get("entry_price")
+    target       = pick.get("target_price")
+    stop_loss    = pick.get("stop_loss_price")
+    now          = datetime.now()
 
-    if target is not None and current_price >= target:
-        alerts.append({
-            "code":          code,
-            "name":          name,
-            "alert_type":    "target_hit",
-            "message":       f"{code} {name} 達到目標價 {target}，現價 {current_price}",
-            "severity":      "high",
-            "created_at":    datetime.now(),
+    def _alert(alert_type: str, message: str, **extra) -> dict:
+        return {
+            "code": code, "name": name,
+            "alert_type": alert_type, "message": message,
+            "severity": "high", "created_at": now,
             "current_price": current_price,
-            "target_price":  target,
-        })
+            **extra,
+        }
 
+    # ── 移動停損（有進場價才能算）──────────────────────────────────
+    if entry_price is not None and entry_price > 0:
+        gain_pct = (current_price - entry_price) / entry_price * 100
+
+        # 更新最高點（只升不降）
+        peak = pick.get("peak_price") or entry_price
+        if current_price > peak:
+            pick["peak_price"] = current_price
+            peak = current_price
+
+        peak_gain_pct = (peak - entry_price) / entry_price * 100
+
+        if peak_gain_pct >= trailing_start_pct:
+            trailing_stop = peak * (1 - trailing_gap_pct / 100)
+            if current_price <= trailing_stop:
+                return [_alert(
+                    "trailing_stop",
+                    f"{name} 移動停損觸發：最高 +{peak_gain_pct:.1f}%，"
+                    f"現價 +{gain_pct:.1f}%，停損 {trailing_stop:,.1f}",
+                    trailing_stop=trailing_stop,
+                    peak_price=peak,
+                )]
+            # 啟動中，跳過固定停損（避免重複警報）
+            return alerts
+
+    # ── AI 目標價 ──────────────────────────────────────────────────
+    if target is not None and current_price >= target:
+        alerts.append(_alert(
+            "target_hit",
+            f"{name} 達到目標價 {target:,.1f}，現價 {current_price:,.1f}",
+            target_price=target,
+        ))
+
+    # ── AI 停損價（移動停損未啟動前的保護）──────────────────────────
     if stop_loss is not None and current_price <= stop_loss:
-        alerts.append({
-            "code":             code,
-            "name":             name,
-            "alert_type":       "stop_loss",
-            "message":          f"{code} {name} 觸及停損價 {stop_loss}，現價 {current_price}",
-            "severity":         "high",
-            "created_at":       datetime.now(),
-            "current_price":    current_price,
-            "stop_loss_price":  stop_loss,
-        })
+        alerts.append(_alert(
+            "stop_loss",
+            f"{name} 觸及停損價 {stop_loss:,.1f}，現價 {current_price:,.1f}",
+            stop_loss_price=stop_loss,
+        ))
 
     return alerts
 
@@ -171,12 +218,16 @@ class MonitorAgent:
         db_path: str,
         telegram_chat_id: Optional[str],
         api: Optional[sj.Shioaji] = None,
+        trailing_start_pct: float = _TRAILING_START_PCT,
+        trailing_gap_pct: float = _TRAILING_GAP_PCT,
     ) -> None:
-        self._api_key          = api_key
-        self._secret_key       = secret_key
-        self._simulation       = simulation
-        self._db_path          = db_path
-        self._telegram_chat_id = telegram_chat_id
+        self._api_key              = api_key
+        self._secret_key           = secret_key
+        self._simulation           = simulation
+        self._db_path              = db_path
+        self._telegram_chat_id     = telegram_chat_id
+        self._trailing_start_pct   = trailing_start_pct
+        self._trailing_gap_pct     = trailing_gap_pct
 
         self.running: bool              = False
         self._api: Optional[sj.Shioaji] = api
@@ -216,13 +267,19 @@ class MonitorAgent:
     def _subscribe_ticks(self) -> None:
         """每支持倉股票訂閱 tick，有新成交就立刻比對停損/目標價。"""
         watchlist = self._watchlist
+        trailing_start = self._trailing_start_pct
+        trailing_gap   = self._trailing_gap_pct
 
         @self._api.on_tick_stk_v1()
         def _on_tick(exchange, tick):
             price = float(tick.close)
             for pick in watchlist:
                 if pick.get("code") == tick.code:
-                    alerts = check_price_alerts(tick.code, price, pick)
+                    alerts = check_price_alerts(
+                        tick.code, price, pick,
+                        trailing_start_pct=trailing_start,
+                        trailing_gap_pct=trailing_gap,
+                    )
                     for a in alerts:
                         self._alert_queue.put(a)
                     break
