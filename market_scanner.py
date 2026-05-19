@@ -66,20 +66,18 @@ def screen_candidates(snapshots: dict[str, dict], criteria: ScanCriteria) -> lis
 # ── API helpers ───────────────────────────────────────────────────────────────
 
 def get_all_stock_codes(api) -> list[str]:
-    """Return all unique stock codes from TSE + OTC + OES exchanges."""
-    codes: list[str] = []
+    """Return unique stock codes eligible for day trading from TSE + OTC + OES."""
+    from shioaji.constant import DayTrade
+    seen: set[str] = set()
+    unique: list[str] = []
     for exchange in ("TSE", "OTC", "OES"):
         try:
             for c in getattr(api.Contracts.Stocks, exchange, []):
-                codes.append(c.code)
+                if c.code not in seen and c.day_trade != DayTrade.No:
+                    seen.add(c.code)
+                    unique.append(c.code)
         except Exception:
             pass
-    seen: set[str] = set()
-    unique = []
-    for c in codes:
-        if c not in seen:
-            seen.add(c)
-            unique.append(c)
     return unique
 
 
