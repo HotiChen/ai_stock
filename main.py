@@ -908,6 +908,8 @@ def main() -> None:
                         api_key="", secret_key="", simulation=False,
                         db_path=DB_PATH, telegram_chat_id=TELEGRAM_CHAT_ID,
                         api=api,
+                        trailing_start_pct=dt_config.trailing_start_pct,
+                        trailing_gap_pct=dt_config.trailing_gap_pct,
                     )
                     _dt_agent.set_watchlist(watchlist)
                     _dt_agent.start()

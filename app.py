@@ -19,6 +19,7 @@ from market_scan import batch_fetch_snapshots, get_top_gainers, get_top_losers, 
 from strategies import calc_position_pnl, check_dip_buy, trailing_stop_triggered
 from themes import THEME_GROUPS, calc_theme_stats, get_theme_detail_rows, get_theme_momentum_label, rank_themes
 from stock_detail import build_signal_badges, get_fundamental_verdict
+from daytrading_config import DaytradingConfig, load_daytrading_config, save_daytrading_config
 from trading_rules import (
     TradingRules,
     calc_max_quantity,
@@ -1920,6 +1921,79 @@ def tab_rules():
         save_rules(new_rules)
         st.session_state.rules = new_rules
         st.success("✅ 規範已儲存！")
+
+    # ── 當沖參數 ──────────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("⚡ 當沖參數設定")
+    st.caption("調整後點「儲存」，下次 main.py 啟動時生效；盤中不會即時套用到已啟動的監控。")
+
+    if "dt_cfg" not in st.session_state:
+        st.session_state.dt_cfg = load_daytrading_config()
+    dt_cfg: DaytradingConfig = st.session_state.dt_cfg
+
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        st.markdown("**💰 資金 / 執行**")
+        new_budget = st.number_input(
+            "每支股票預算（元）",
+            min_value=10_000, max_value=500_000,
+            value=int(dt_cfg.budget_per_stock), step=5_000,
+            help="當沖每支股票最多使用多少元",
+        )
+        new_force_close = st.text_input(
+            "強制平倉時間（HH:MM）",
+            value=dt_cfg.force_close_time,
+            help="到達此時間無條件賣出所有當沖倉位，避免產生交割義務",
+        )
+        new_manual = st.checkbox(
+            "買入前需 Telegram 手動確認",
+            value=dt_cfg.require_manual_confirm,
+            help="關閉後系統自動下單，請確認帳戶設定無誤再關閉",
+        )
+
+    with dc2:
+        st.markdown("**🎯 停損 / 停利**")
+        new_dt_stop = st.slider(
+            "停損線（跌幾 % 認賠）",
+            min_value=0.5, max_value=10.0, value=float(dt_cfg.stop_loss_pct), step=0.5,
+            help="買入後跌超過此 % 立即賣出",
+        )
+        new_dt_tp = st.slider(
+            "天花板停利（漲幾 % 出場）",
+            min_value=1.0, max_value=15.0, value=float(dt_cfg.take_profit_pct), step=0.5,
+            help="漲幅達此 % 立即賣出（漲停前出場）",
+        )
+        st.markdown("**📈 移動停損**")
+        new_trailing_start = st.slider(
+            "啟動門檻（漲到幾 % 開始跟蹤）",
+            min_value=1.0, max_value=8.0, value=float(dt_cfg.trailing_start_pct), step=0.5,
+            help="漲幅達此值後，停損點開始跟著最高點移動",
+        )
+        new_trailing_gap = st.slider(
+            "間距（停損點在最高點下方幾 %）",
+            min_value=0.5, max_value=5.0, value=float(dt_cfg.trailing_gap_pct), step=0.5,
+            help="例：設 2%，最高點 +5% → 停損跟在 +3%",
+        )
+
+    st.markdown(
+        f"**預覽：** 漲到 **+{new_trailing_start:.1f}%** 開始移動停損，"
+        f"停損永遠在最高點下方 **{new_trailing_gap:.1f}%**　｜　"
+        f"固定停損 **-{new_dt_stop:.1f}%**　｜　天花板 **+{new_dt_tp:.1f}%**"
+    )
+
+    if st.button("💾 儲存當沖參數", type="primary", key="save_dt_cfg"):
+        new_cfg = DaytradingConfig(
+            budget_per_stock=float(new_budget),
+            stop_loss_pct=new_dt_stop,
+            take_profit_pct=new_dt_tp,
+            trailing_start_pct=new_trailing_start,
+            trailing_gap_pct=new_trailing_gap,
+            force_close_time=new_force_close.strip(),
+            require_manual_confirm=new_manual,
+        )
+        save_daytrading_config(new_cfg)
+        st.session_state.dt_cfg = new_cfg
+        st.success("✅ 當沖參數已儲存！下次啟動 main.py 時生效。")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
