@@ -1601,7 +1601,9 @@ def _render_strategy_tracker():
 
 
 def tab_ai():
-    log_tab, chat_tab, tracker_tab = st.tabs(["📋 決策記錄", "💬 AI 顧問對話", "📈 策略追蹤"])
+    log_tab, chat_tab, tracker_tab, dt_tab = st.tabs(
+        ["📋 決策記錄", "💬 AI 顧問對話", "📈 策略追蹤", "⚡ 當沖策略"]
+    )
 
     # ── 決策記錄 ──────────────────────────────────────────────────
     with log_tab:
@@ -1774,6 +1776,27 @@ def tab_ai():
     # ── 策略追蹤 ───────────────────────────────────────────────────
     with tracker_tab:
         _render_strategy_tracker()
+
+    # ── 當沖策略 ───────────────────────────────────────────────────
+    with dt_tab:
+        st.caption("掃描全市場，依技術評分選出今日當沖候選股，並執行 AI 深度分析。")
+        if st.button("⚡ 產生當沖報告", type="primary"):
+            with st.spinner("掃描中，約需 10–30 秒..."):
+                try:
+                    from daytrading_report import build_daytrading_report
+                    report = build_daytrading_report(api=None)
+                    st.session_state["_dt_report"] = report
+                except Exception as e:
+                    st.session_state["_dt_report"] = f"⚠️ 產生失敗：{e}"
+            st.rerun()
+        if "_dt_report" in st.session_state:
+            st.markdown(
+                st.session_state["_dt_report"]
+                    .replace("<b>", "**").replace("</b>", "**")
+                    .replace("<i>", "*").replace("</i>", "*")
+                    .replace("<br>", "\n"),
+                unsafe_allow_html=False,
+            )
 
 
 # ── Tab 7: 交易規範 ───────────────────────────────────────────────────────────
