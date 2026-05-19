@@ -288,6 +288,29 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
     except Exception as e:
         log.warning("save_daytrading_positions failed: %s", e)
 
+    # 8c. 存預測至複盤 DB（所有 qualified long，供收盤後驗收）
+    try:
+        from daytrading_db import DaytradingDB, DTPrediction
+        predictions = []
+        for r in qualified[:8]:
+            ai = ai_map.get(r["code"])
+            predictions.append(DTPrediction(
+                date=date.today().isoformat(),
+                code=r["code"], name=r["name"],
+                dt_score=r["dt_score"],
+                action=ai.action if ai else "skip",
+                entry_low=ai.entry_low if ai else None,
+                entry_high=ai.entry_high if ai else None,
+                target_price=ai.target_price if ai else None,
+                stop_loss=ai.stop_loss if ai else None,
+                ai_summary=ai.summary if ai else "",
+            ))
+        if predictions:
+            n = DaytradingDB(db_path).save_predictions(predictions)
+            log.info("daytrading_db: saved %d predictions", n)
+    except Exception as e:
+        log.warning("save_predictions failed: %s", e)
+
     # 9. 組合報告
     lines = [
         "⚡ <b>今日當沖預測</b>",
