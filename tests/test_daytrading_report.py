@@ -21,25 +21,6 @@ def _make_assessment(score=7, verdict="✅ 適合當沖", good=None, bad=None, d
     }
 
 
-class TestConfidenceToWinPct:
-    def test_confidence_0_gives_30_pct(self):
-        from daytrading_report import _confidence_to_win_pct
-        assert _confidence_to_win_pct(0) == 30.0
-
-    def test_confidence_10_gives_80_pct(self):
-        from daytrading_report import _confidence_to_win_pct
-        assert _confidence_to_win_pct(10) == 80.0
-
-    def test_confidence_5_gives_55_pct(self):
-        from daytrading_report import _confidence_to_win_pct
-        assert _confidence_to_win_pct(5) == 55.0
-
-    def test_out_of_range_clamped(self):
-        from daytrading_report import _confidence_to_win_pct
-        assert _confidence_to_win_pct(-5) == 30.0
-        assert _confidence_to_win_pct(99) == 80.0
-
-
 class TestBuildDaytradingReport:
     def _call(self, picks, assessment_score=7, assessment_data_ok=True,
               hist_win_rate=None, market=None, chip_today=None):
@@ -84,10 +65,17 @@ class TestBuildDaytradingReport:
         assert "2330" in report
         assert "台積電" in report
 
-    def test_report_contains_win_pct(self):
-        report = self._call([_make_pick(confidence=8)])
-        assert "預測勝率" in report
-        assert "%" in report
+    def test_report_shows_technical_score(self):
+        """報表顯示技術評分 x/10，不顯示偽勝率百分比。"""
+        report = self._call([_make_pick()])
+        assert "技術評分" in report or "當沖" in report
+        assert "預測勝率" not in report
+
+    def test_report_does_not_map_score_to_win_pct(self):
+        """dt_score 不應被映射成百分比後以勝率名義顯示。"""
+        report = self._call([_make_pick()], assessment_score=7)
+        assert "預測勝率" not in report
+        assert "80%" not in report  # 7/10 → 65% 這類映射值不應出現
 
     def test_low_score_stocks_excluded(self):
         """score < 4 → 不顯示"""
@@ -108,7 +96,21 @@ class TestBuildDaytradingReport:
 
     def test_disclaimer_present(self):
         report = self._call([_make_pick()])
-        assert "非保證獲利" in report
+        assert "技術評分為啟發式指標" in report
+
+    def test_disclaimer_does_not_call_score_a_win_rate(self):
+        """disclaimer 不得把技術評分稱為勝率。"""
+        report = self._call([_make_pick()])
+        assert "勝率為統計估算" not in report
+
+    def test_hist_win_rate_and_score_are_separate(self):
+        """歷史勝率與技術評分是獨立欄位，不混稱。"""
+        report = self._call([_make_pick()], hist_win_rate=62.5)
+        # 歷史勝率有明確來源標籤
+        assert "近 30 日實際勝率" in report
+        assert "62.5%" in report
+        # 技術評分仍以 /10 形式出現
+        assert "/10" in report
 
     def test_market_label_shown_in_report(self):
         report = self._call([_make_pick()], market={"index_change_pct": 1.2})
@@ -219,14 +221,15 @@ class TestDataSufficiencyGating:
         mock_ai.assert_not_called()
 
     def test_high_score_with_data_produces_normal_report(self):
-        """data_ok=True + score >= 4 → 正常報表，含預測勝率與股票代號。"""
+        """data_ok=True + score >= 4 → 正常報表，含技術評分與股票代號。"""
         picks = [_make_pick("2330", "台積電")]
         assessment = _make_assessment(score=8, data_ok=True,
                                       verdict="✅ 適合當沖")
         report = self._call_with_assessment(picks, assessment)
         assert "2330" in report
         assert "台積電" in report
-        assert "預測勝率" in report
+        assert "8/10" in report        # 技術評分以 x/10 呈現
+        assert "預測勝率" not in report  # 不得偽裝成勝率
 
 
 class TestAssessDayTradingChipMarket:

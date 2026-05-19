@@ -1,8 +1,11 @@
 """
 daytrading_report.py — 今日當沖預測報告
 
-從 daily_plans 撈今日候選股（08:30 已過 AI + 風控篩選），
-計算技術指標當沖評分 + AI 信心勝率估算，回傳 Telegram HTML 格式報告。
+掃描全市場股票，計算技術指標當沖評分（0-10），回傳 Telegram HTML 格式報告。
+報表只呈現：
+  - 技術評分（dt_score / 10）：來自 _assess_day_trading() 的 heuristic 評分
+  - 系統近 30 日實際勝率（hist_win_rate）：來自 learning_db 的歷史回測統計
+兩者語義不同，不得混稱。
 """
 from __future__ import annotations
 
@@ -15,11 +18,6 @@ from daytrading_analyzer import run_daytrading_analysis
 log = logging.getLogger(__name__)
 
 DB_PATH = "data/learning.db"
-
-# confidence (0-10) → 勝率估算
-# 公式：30% + confidence/10 * 50%  → 範圍 30%~80%
-def _confidence_to_win_pct(confidence: int) -> float:
-    return round(30.0 + (max(0, min(10, confidence)) / 10.0) * 50.0, 1)
 
 
 def _fetch_historical_win_rate(db_path: str) -> Optional[float]:
@@ -231,16 +229,13 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
         assessment = _assess_day_trading(indicators, annual, chip=chip, market=market)
         dt_score   = assessment.get("score", 0)
         data_ok    = assessment.get("data_ok", True)
-        win_pct    = round(30.0 + (dt_score / 10.0) * 50.0, 1)
 
         results.append({
             "code":         code,
             "name":         name,
-            "confidence":   5,
             "dt_score":     dt_score,
             "data_ok":      data_ok,
             "verdict":      assessment.get("verdict", "—"),
-            "win_pct":      win_pct,
             "reasons_good": assessment.get("reasons_good", []),
             "reasons_bad":  assessment.get("reasons_bad", []),
             "indicators":   indicators,
@@ -319,9 +314,8 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
 
         lines.append(
             f"<b>{r['code']} {r['name']}</b>  "
-            f"{r['verdict']}（當沖 {r['dt_score']}/10）"
+            f"{r['verdict']}（技術評分 {r['dt_score']}/10）"
         )
-        lines.append(f"  🎯 預測勝率 <b>{r['win_pct']}%</b>")
         if price != "—":
             lines.append(f"  現價 {price_str}　RSI {rsi_str}　量比 {vr_str}")
 
@@ -357,7 +351,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
         lines.append("")
 
     lines.append(
-        f"<i>⚠️ 勝率為統計估算，非保證獲利。\n"
+        f"<i>⚠️ 技術評分為啟發式指標，非模型校準機率，不代表實際獲利機率。\n"
         f"資料時間：{date.today().strftime('%Y/%m/%d')} 盤前分析</i>"
     )
 
