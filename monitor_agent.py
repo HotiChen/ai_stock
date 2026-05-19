@@ -1,31 +1,29 @@
 from __future__ import annotations
 
 """
-Monitor agent: watches Shioaji simulation ticks, fires price alerts.
+Monitor agent: watches Shioaji ticks, fires price alerts.
 
 Flow:
   MonitorAgent.start()
-    └─ ensure_connected()          → sj.Shioaji(simulation=True).login()
-    └─ AlertWorker thread          → drains queue, saves to DB, sends Telegram
-    └─ _poll_loop() thread         → api.snapshots() every POLL_INTERVAL seconds,
-                                     calls check_price_alerts(), enqueues hits
+    └─ ensure_connected()   → sj.Shioaji(simulation=True).login()
+    └─ AlertWorker thread   → drains queue, saves to DB, sends Telegram
+    └─ _subscribe_ticks()   → api.quote.subscribe() per position
+                               on_tick_stk_v1 callback → check_price_alerts()
+                               → enqueue alert if triggered
 """
 
-import os
 import queue
 import threading
-import time
 from datetime import datetime
 from typing import Optional
 
 import shioaji as sj
+from shioaji.constant import QuoteType, QuoteVersion
 
 from logger import get_logger
 from research_db import init_db, save_alert, mark_alert_sent
 
 log = get_logger(__name__)
-
-POLL_INTERVAL = int(os.getenv("MONITOR_POLL_SECONDS", "30"))
 
 
 # ── Pure logic ────────────────────────────────────────────────────────────────
@@ -180,13 +178,13 @@ class MonitorAgent:
         self._db_path          = db_path
         self._telegram_chat_id = telegram_chat_id
 
-        self.running: bool            = False
+        self.running: bool              = False
         self._api: Optional[sj.Shioaji] = api
-        self._watchlist: list[dict]   = []
-        self._alert_queue: queue.Queue = queue.Queue()
-        self._worker: Optional[AlertWorker] = None
+        self._watchlist: list[dict]     = []
+        self._alert_queue: queue.Queue  = queue.Queue()
+        self._worker: Optional[AlertWorker]        = None
         self._worker_thread: Optional[threading.Thread] = None
-        self._poll_thread: Optional[threading.Thread]   = None
+        self._subscribed_codes: list[str] = []
 
         init_db(db_path)
 
@@ -202,30 +200,62 @@ class MonitorAgent:
         self._worker_thread = self._worker.start_thread()
 
         if self._api is not None:
-            self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
-            self._poll_thread.start()
+            self._subscribe_ticks()
 
         log.info("MonitorAgent started (simulation=%s)", self._simulation)
 
     def stop(self) -> None:
         self.running = False
+        if self._api is not None:
+            self._unsubscribe_ticks()
         self._alert_queue.put(None)  # poison pill for worker
         if self._worker_thread:
             self._worker_thread.join(timeout=5)
-        if self._poll_thread:
-            self._poll_thread.join(timeout=5)
         log.info("MonitorAgent stopped")
 
-    def _poll_loop(self) -> None:
-        while self.running:
-            for pick in self._watchlist:
-                code = pick.get("code")
-                if not code:
-                    continue
-                snap = get_snapshot(self._api, code)
-                if snap is None:
-                    continue
-                alerts = check_price_alerts(code, snap["close"], pick)
-                for alert in alerts:
-                    self._alert_queue.put(alert)
-            time.sleep(POLL_INTERVAL)
+    def _subscribe_ticks(self) -> None:
+        """每支持倉股票訂閱 tick，有新成交就立刻比對停損/目標價。"""
+        watchlist = self._watchlist
+
+        @self._api.on_tick_stk_v1()
+        def _on_tick(exchange, tick):
+            price = float(tick.close)
+            for pick in watchlist:
+                if pick.get("code") == tick.code:
+                    alerts = check_price_alerts(tick.code, price, pick)
+                    for a in alerts:
+                        self._alert_queue.put(a)
+                    break
+
+        for pick in watchlist:
+            code = pick.get("code")
+            if not code:
+                continue
+            contract = self._api.Contracts.Stocks.get(code)
+            if contract is None:
+                continue
+            try:
+                self._api.quote.subscribe(
+                    contract,
+                    quote_type=QuoteType.Tick,
+                    version=QuoteVersion.v1,
+                )
+                self._subscribed_codes.append(code)
+                log.info("subscribed tick: %s", code)
+            except Exception as e:
+                log.warning("subscribe(%s) failed: %s", code, e)
+
+    def _unsubscribe_ticks(self) -> None:
+        for code in self._subscribed_codes:
+            contract = self._api.Contracts.Stocks.get(code)
+            if contract is None:
+                continue
+            try:
+                self._api.quote.unsubscribe(
+                    contract,
+                    quote_type=QuoteType.Tick,
+                    version=QuoteVersion.v1,
+                )
+            except Exception as e:
+                log.debug("unsubscribe(%s) failed: %s", code, e)
+        self._subscribed_codes.clear()

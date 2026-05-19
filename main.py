@@ -766,9 +766,7 @@ _RUNNING = True
 
 # 盤中當沖監控：09:15–13:15 每 5 分鐘掃描一次
 from datetime import time as _dtime
-_DT_MON_START    = _dtime(9, 15)
-_DT_MON_END      = _dtime(13, 15)
-_DT_MON_INTERVAL = 300   # 秒（5 分鐘）
+_DT_MON_END = _dtime(13, 15)   # tick 訂閱到此時段結束後取消
 
 
 def _handle_signal(sig, frame):
@@ -811,7 +809,7 @@ def main() -> None:
 
     monitor: Optional[MonitorAgent] = None
     approved_picks: list[dict] = []
-    _last_dt_monitor: Optional[datetime] = None   # 上次 DT monitor 執行時間
+    _dt_agent = None   # MonitorAgent（tick 訂閱，09:05 下單後啟動）
 
     while _RUNNING:
         now = datetime.now()
@@ -826,23 +824,11 @@ def main() -> None:
             time.sleep(30)
             continue
 
-        # ── 每 5 分鐘 DT 監控（09:15–13:15，獨立於一次性排程之外）──────────
-        if _DT_MON_START <= t <= _DT_MON_END:
-            elapsed = (now - _last_dt_monitor).total_seconds() if _last_dt_monitor else _DT_MON_INTERVAL
-            if elapsed >= _DT_MON_INTERVAL:
-                _last_dt_monitor = now
-                try:
-                    from daytrading_monitor import run_daytrading_monitor, format_alerts_message
-                    alerts = run_daytrading_monitor(api=api, config=dt_config)
-                    sell_alerts = [a for a in alerts if a.sell_required]
-                    info_alerts = [a for a in alerts if not a.sell_required]
-                    if info_alerts and TELEGRAM_CHAT_ID:
-                        from telegram_bot import send_text
-                        send_text(TELEGRAM_CHAT_ID, format_alerts_message(info_alerts))
-                    if sell_alerts:
-                        _run_dt_sell_alerts(api, sell_alerts, dt_config)
-                except Exception as e:
-                    log.warning("DayTrading monitor failed: %s", e)
+        # ── 13:15 停止 tick 訂閱 ────────────────────────────────────────
+        if t >= _DT_MON_END and _dt_agent is not None:
+            _dt_agent.stop()
+            _dt_agent = None
+            log.info("DT tick monitor stopped at 13:15")
 
         # 08:30 pre-market
         if t.hour == 8 and t.minute == 30:
@@ -890,6 +876,33 @@ def main() -> None:
                         _auto_buy_dt_positions(api, dt_watching, dt_config)
             except Exception as e:
                 log.warning("DayTrading push failed: %s", e)
+
+            # 下單後啟動 tick 訂閱監控（取代 5 分鐘 polling）
+            try:
+                from daytrading_monitor import load_daytrading_positions
+                from monitor_agent import MonitorAgent
+                positions = load_daytrading_positions()
+                watchlist = [
+                    {
+                        "code":            p.code,
+                        "name":            p.name,
+                        "target_price":    p.target_price,
+                        "stop_loss_price": p.stop_loss,
+                    }
+                    for p in positions if p.status in ("watching", "active")
+                ]
+                if watchlist and api is not None:
+                    _dt_agent = MonitorAgent(
+                        api_key="", secret_key="", simulation=False,
+                        db_path=DB_PATH, telegram_chat_id=TELEGRAM_CHAT_ID,
+                        api=api,
+                    )
+                    _dt_agent.set_watchlist(watchlist)
+                    _dt_agent.start()
+                    log.info("DT tick monitor started for %d positions", len(watchlist))
+            except Exception as e:
+                log.warning("DT tick monitor start failed: %s", e)
+
             time.sleep(60)
 
         # 13:25 force-close all positions before market close

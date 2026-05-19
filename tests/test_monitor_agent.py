@@ -356,7 +356,7 @@ class TestMonitorAgent:
         assert agent.running is False
 
     @patch("monitor_agent.ensure_connected")
-    def test_stop_joins_poll_thread(self, mock_connect, tmp_path):
+    def test_stop_joins_worker_thread(self, mock_connect, tmp_path):
         from monitor_agent import MonitorAgent
         mock_connect.return_value = MagicMock()
         agent = MonitorAgent(
@@ -364,10 +364,9 @@ class TestMonitorAgent:
             db_path=str(tmp_path / "test.db"), telegram_chat_id=None,
         )
         agent.start()
-        mock_poll = MagicMock()
-        agent._poll_thread = mock_poll
         agent.stop()
-        mock_poll.join.assert_called_once()
+        # worker thread should have been joined (no longer alive after stop)
+        assert agent._worker_thread is None or not agent._worker_thread.is_alive()
 
     @patch("monitor_agent.ensure_connected")
     def test_connection_failure_does_not_raise(self, mock_connect, tmp_path):
