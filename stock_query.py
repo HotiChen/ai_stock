@@ -108,18 +108,28 @@ def _fetch_annual_trend(code: str, api=None) -> dict:
 
 def _assess_day_trading(
     indicators: Optional[dict],
-    annual: dict,
     chip: Optional[dict] = None,
     market: Optional[dict] = None,
 ) -> dict:
     """從技術指標、法人籌碼、大盤狀況評估當沖適合度。
 
+    Args:
+        indicators: 技術指標 dict（volume_ratio / RSI / ATR / KD / VWAP 等）。
+                    傳入 None 時代表資料不可用，直接回傳 data_ok=False。
+        chip:       法人籌碼 dict（foreign_net / investment_trust_net 等），可為 None。
+        market:     大盤方向 dict（index_change_pct / futures_premium_pct），可為 None。
+
     Returns:
         dict with keys:
-            verdict  — "✅ 適合當沖" / "🟡 尚可" / "❌ 不建議當沖"
-            score    — int 0–10
+            verdict      — "✅ 適合當沖" / "🟡 尚可" / "❌ 不建議當沖" / "⚠️ 資料不足"
+            score        — int 0–10
+            data_ok      — bool；indicators=None 時為 False，否則為 True
             reasons_good — list[str]
             reasons_bad  — list[str]
+
+    Note:
+        年度走勢（annual）對盤中當沖評分無實際作用，已從簽名移除。
+        若需年度趨勢分析，請改用 format_query_report / query_stock 路徑。
     """
     reasons_good: list[str] = []
     reasons_bad:  list[str] = []
@@ -573,7 +583,7 @@ def query_stock(code: str, api=None) -> str:
 
         # 6. 當沖評估
         try:
-            dt_assessment = _assess_day_trading(indicators, annual)
+            dt_assessment = _assess_day_trading(indicators)
         except Exception as e:
             log.warning("_assess_day_trading error: %s", e)
             dt_assessment = {"verdict": "🟡 尚可", "score": 5,

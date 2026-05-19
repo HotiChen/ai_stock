@@ -52,7 +52,6 @@ class TestBuildDaytradingReport:
              patch("daytrading_report._fetch_chip_data", return_value=chip_today), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("chip_data.get_continuous_buy_days", side_effect=_mock_cont), \
-             patch("stock_query._fetch_annual_trend", return_value={"error": "skip", "monthly_closes": []}), \
              patch("stock_query._assess_day_trading", return_value=assessment):
             return build_daytrading_report(api=None, db_path=":memory:")
 
@@ -135,6 +134,24 @@ class TestBuildDaytradingReport:
         report = self._call([_make_pick("2330")], chip_today=chip_today)
         assert "連買 4 日" in report
 
+    def test_annual_trend_not_fetched_during_dt_scoring(self):
+        """build_daytrading_report 不應在當沖評分路徑呼叫 _fetch_annual_trend。"""
+        from daytrading_report import build_daytrading_report
+        assessment = _make_assessment(score=7, data_ok=True)
+        market = {"index_change_pct": 0.0, "futures_premium_pct": 0.0}
+        with patch("daytrading_report._get_stock_universe",
+                   return_value=[_make_pick()]), \
+             patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
+             patch("daytrading_report._fetch_market", return_value=market), \
+             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._get_indicators", return_value=None), \
+             patch("stock_query._assess_day_trading", return_value=assessment), \
+             patch("daytrading_report.run_daytrading_analysis",
+                   return_value=MagicMock(action="skip")), \
+             patch("stock_query._fetch_annual_trend") as mock_annual:
+            build_daytrading_report(api=None, db_path=":memory:")
+        mock_annual.assert_not_called()
+
 
 # ===========================================================================
 # P0 fix: 資料不足 / 門檻 / AI 呼叫防護
@@ -152,7 +169,6 @@ class TestDataSufficiencyGating:
              patch("daytrading_report._fetch_market", return_value=market), \
              patch("daytrading_report._fetch_chip_data", return_value={}), \
              patch("daytrading_report._get_indicators", return_value=None), \
-             patch("stock_query._fetch_annual_trend", return_value={"error": "skip", "monthly_closes": []}), \
              patch("stock_query._assess_day_trading", return_value=assessment):
             return build_daytrading_report(api=None, db_path=":memory:")
 
@@ -193,8 +209,6 @@ class TestDataSufficiencyGating:
                    return_value={"index_change_pct": 0.0, "futures_premium_pct": 0.0}), \
              patch("daytrading_report._fetch_chip_data", return_value={}), \
              patch("daytrading_report._get_indicators", return_value=None), \
-             patch("stock_query._fetch_annual_trend",
-                   return_value={"error": "skip", "monthly_closes": []}), \
              patch("stock_query._assess_day_trading", return_value=assessment), \
              patch("daytrading_report.run_daytrading_analysis") as mock_ai:
             from daytrading_report import build_daytrading_report
@@ -212,8 +226,6 @@ class TestDataSufficiencyGating:
                    return_value={"index_change_pct": 0.0, "futures_premium_pct": 0.0}), \
              patch("daytrading_report._fetch_chip_data", return_value={}), \
              patch("daytrading_report._get_indicators", return_value=None), \
-             patch("stock_query._fetch_annual_trend",
-                   return_value={"error": "skip", "monthly_closes": []}), \
              patch("stock_query._assess_day_trading", return_value=assessment), \
              patch("daytrading_report.run_daytrading_analysis") as mock_ai:
             from daytrading_report import build_daytrading_report
@@ -243,14 +255,10 @@ class TestAssessDayTradingChipMarket:
             "KD_K": 55.0, "KD_D": 50.0,
         }
 
-    def _annual(self):
-        return {"error": None, "monthly_closes": [], "change_pct": 0}
-
     def _assess(self, chip=None, market=None, volume_ratio=1.5, rsi=55.0):
         from stock_query import _assess_day_trading
         return _assess_day_trading(
             self._base_indicators(volume_ratio, rsi),
-            self._annual(),
             chip=chip,
             market=market,
         )

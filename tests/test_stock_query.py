@@ -65,7 +65,11 @@ def _make_annual(
 # ===========================================================================
 
 class TestAssessDayTrading:
-    """Tests 1-4: _assess_day_trading(indicators, annual) -> dict"""
+    """Tests 1-4: _assess_day_trading(indicators) -> dict
+
+    Signature: _assess_day_trading(indicators, chip=None, market=None)
+    Note: annual parameter was removed — DT scoring does not use annual trend data.
+    """
 
     def _import(self):
         from stock_query import _assess_day_trading
@@ -73,61 +77,50 @@ class TestAssessDayTrading:
 
     def test_high_volume_healthy_rsi_is_suitable(self):
         """Test 1: volume_ratio>=2.0 + healthy RSI → 適合當沖, score>=6"""
-        _assess_day_trading = self._import()
         ind = _make_indicators(volume_ratio=2.5, RSI=55.0)
-        annual = _make_annual()
-        result = _assess_day_trading(ind, annual)
+        result = self._import()(ind)
         assert "適合" in result["verdict"]
         assert result["score"] >= 6
 
     def test_low_volume_is_not_recommended(self):
         """Test 2: volume_ratio<0.8 → 不建議當沖, reasons_bad has volume message"""
-        _assess_day_trading = self._import()
         ind = _make_indicators(volume_ratio=0.5)
-        annual = _make_annual()
-        result = _assess_day_trading(ind, annual)
+        result = self._import()(ind)
         assert "不建議" in result["verdict"]
-        reasons_bad_text = " ".join(result["reasons_bad"])
-        # Should mention volume/量
         assert any("量" in r or "volume" in r.lower() for r in result["reasons_bad"])
 
     def test_overbought_rsi_adds_bad_reason(self):
         """Test 3: RSI>75 → reasons_bad contains overbought warning"""
-        _assess_day_trading = self._import()
         ind = _make_indicators(RSI=80.0, volume_ratio=2.0)
-        annual = _make_annual()
-        result = _assess_day_trading(ind, annual)
-        reasons_bad_text = " ".join(result["reasons_bad"])
+        result = self._import()(ind)
         assert any("超買" in r or "RSI" in r for r in result["reasons_bad"])
 
     def test_none_indicators_does_not_raise(self):
         """Test 4: indicators=None → returns dict, verdict not empty, no exception"""
-        _assess_day_trading = self._import()
-        annual = _make_annual()
-        result = _assess_day_trading(None, annual)
+        result = self._import()(None)
         assert isinstance(result, dict)
         assert "verdict" in result
         assert result["verdict"]  # not empty
 
     def test_none_indicators_data_ok_is_false(self):
         """Test 4a: indicators=None → data_ok=False（不得進入可交易名單）"""
-        result = self._import()(None, _make_annual())
+        result = self._import()(None)
         assert result.get("data_ok") is False
 
     def test_none_indicators_score_is_zero(self):
         """Test 4b: indicators=None → score=0（不可給出中性可交易分數）"""
-        result = self._import()(None, _make_annual())
+        result = self._import()(None)
         assert result["score"] == 0
 
     def test_none_indicators_verdict_indicates_insufficient(self):
         """Test 4c: indicators=None → verdict 明確標示資料不足，不可為「尚可」"""
-        result = self._import()(None, _make_annual())
+        result = self._import()(None)
         assert "資料不足" in result["verdict"]
         assert "尚可" not in result["verdict"]
 
     def test_valid_indicators_data_ok_is_true(self):
         """Test 4d: 有效 indicators → data_ok=True"""
-        result = self._import()(_make_indicators(), _make_annual())
+        result = self._import()(_make_indicators())
         assert result.get("data_ok") is True
 
 

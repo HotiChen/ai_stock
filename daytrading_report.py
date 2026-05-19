@@ -165,7 +165,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
     再對前 3 名執行 AI 當沖深度分析，產生進場區間/目標/停損。
     不依賴 research.db，獨立運作。
     """
-    from stock_query import _assess_day_trading, _fetch_annual_trend
+    from stock_query import _assess_day_trading
 
     today_str = date.today().strftime("%Y%m%d")
 
@@ -209,7 +209,6 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             continue
 
         indicators = _get_indicators(code, api=api)
-        annual     = _fetch_annual_trend(code, api=api)
 
         # 法人籌碼：今日單日資料 + 連續買超天數（上限 _MAX_CHIP_PICKS 支）
         chip = chip_today.get(code)
@@ -226,7 +225,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             except Exception as e:
                 log.debug("get_continuous_buy_days(%s) failed: %s", code, e)
 
-        assessment = _assess_day_trading(indicators, annual, chip=chip, market=market)
+        assessment = _assess_day_trading(indicators, chip=chip, market=market)
         dt_score   = assessment.get("score", 0)
         data_ok    = assessment.get("data_ok", True)
 
