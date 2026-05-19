@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 """
-Main scheduler — three daily jobs:
-  08:30  PremarketJob  : AI analysis + risk filter + Telegram confirmation
-  09:00  MarketOpenJob : execute orders + start MonitorAgent
-  13:35  PostMarketJob : stop monitor + save daily summary
+Main scheduler — daily jobs:
+  08:30  PremarketJob      : AI analysis + risk filter + Telegram confirmation
+         DaytradingReport  : 當沖預測 → Telegram（開盤前 30 分鐘推播）
+  09:00  MarketOpenJob     : execute swing orders
+  09:05  DT execution      : 當沖買入確認 or 自動買入 + 啟動 tick 監控
+  13:15  Stop tick monitor
+  13:25  ForceCloseJob     : 強制平倉當沖部位
+  13:35  PostMarketJob     : stop monitor + save daily summary
+  13:35  DaytradingReview  : 收盤後檢討當日預測準確度
 
 Run: python3 main.py
 """
@@ -830,8 +835,9 @@ def main() -> None:
             _dt_agent = None
             log.info("DT tick monitor stopped at 13:15")
 
-        # 08:30 pre-market
+        # 08:30 pre-market：波段選股 + 當沖預測報告（同時推播 Telegram）
         if t.hour == 8 and t.minute == 30:
+            # 波段選股（原有邏輯）
             job = PremarketJob(
                 candidates=None,
                 capital=CAPITAL,
@@ -841,6 +847,17 @@ def main() -> None:
                 api=api,
             )
             approved_picks = job.run()
+
+            # 當沖預測：在開盤前 30 分鐘推播
+            try:
+                from daytrading_report import build_daytrading_report
+                report = build_daytrading_report(api=api, db_path=DB_PATH)
+                if TELEGRAM_CHAT_ID:
+                    from telegram_bot import send_text
+                    send_text(TELEGRAM_CHAT_ID, report)
+            except Exception as e:
+                log.warning("DayTrading report push failed: %s", e)
+
             time.sleep(60)
 
         # 09:00 market open
@@ -858,15 +875,10 @@ def main() -> None:
                 monitor = job.run()
             time.sleep(60)
 
-        # 09:05 推播當沖預測報告，並依設定送出買入確認或自動買入
+        # 09:05 依設定送出買入確認或自動買入，並啟動 tick 監控
         elif t.hour == 9 and t.minute == 5:
             try:
-                from daytrading_report import build_daytrading_report
                 from daytrading_monitor import load_daytrading_positions
-                report = build_daytrading_report(api=api, db_path=DB_PATH)
-                if TELEGRAM_CHAT_ID:
-                    from telegram_bot import send_text
-                    send_text(TELEGRAM_CHAT_ID, report)
                 dt_watching = [p for p in load_daytrading_positions() if p.status == "watching"]
                 if dt_watching:
                     if dt_config.require_manual_confirm:
@@ -875,7 +887,7 @@ def main() -> None:
                     else:
                         _auto_buy_dt_positions(api, dt_watching, dt_config)
             except Exception as e:
-                log.warning("DayTrading push failed: %s", e)
+                log.warning("DayTrading execution failed: %s", e)
 
             # 下單後啟動 tick 訂閱監控（取代 5 分鐘 polling）
             try:
