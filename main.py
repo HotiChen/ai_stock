@@ -910,6 +910,17 @@ def main() -> None:
             notify_market_close(total_pnl=total_pnl, trade_count=len(trades))
             monitor = None
             approved_picks = []
+
+            # 當沖預測複盤：回填今日 OHLC + 判斷是否預測正確
+            try:
+                from daytrading_review import run_daytrading_review
+                review_msg = run_daytrading_review()
+                if review_msg:
+                    from telegram_bot import send_text
+                    send_text(CHAT_ID, review_msg)
+            except Exception as e:
+                log.warning("daytrading_review failed: %s", e)
+
             time.sleep(60)
 
         else:

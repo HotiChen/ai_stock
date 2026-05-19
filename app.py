@@ -1780,7 +1780,8 @@ def tab_ai():
     # ── 當沖策略 ───────────────────────────────────────────────────
     with dt_tab:
         st.caption("掃描全市場，依技術評分選出今日當沖候選股，並執行 AI 深度分析。")
-        if st.button("⚡ 產生當沖報告", type="primary"):
+        col_btn, col_refresh = st.columns([2, 1])
+        if col_btn.button("⚡ 產生當沖報告", type="primary"):
             with st.spinner("掃描中，約需 10–30 秒..."):
                 try:
                     from daytrading_report import build_daytrading_report
@@ -1797,6 +1798,49 @@ def tab_ai():
                     .replace("<br>", "\n"),
                 unsafe_allow_html=False,
             )
+
+        st.divider()
+        st.markdown("#### 📊 歷史複盤（近 14 日）")
+        try:
+            from daytrading_db import DaytradingDB
+            db = DaytradingDB()
+            stats = db.win_rate_summary(days=30)
+            history = db.recent_history(days=14)
+
+            if stats["total"] > 0:
+                wr = (stats["win_rate"] or 0) * 100
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("近 30 日預測", f"{stats['total']} 筆")
+                c2.metric("達標", stats["wins"])
+                c3.metric("停損", stats["losses"])
+                c4.metric("勝率", f"{wr:.1f}%")
+
+            if history:
+                import pandas as pd
+                rows = []
+                for r in history:
+                    outcome_label = {
+                        "hit_target": "✅ 達目標",
+                        "hit_stop":   "❌ 觸停損",
+                        "neutral":    "⬜ 未觸發",
+                    }.get(r["outcome"], r["outcome"])
+                    rows.append({
+                        "日期":   r["date"],
+                        "代號":   r["code"],
+                        "名稱":   r["name"],
+                        "評分":   r["dt_score"],
+                        "目標價": r["target_price"],
+                        "停損價": r["stop_loss"],
+                        "最高":   r["daily_high"],
+                        "最低":   r["daily_low"],
+                        "收盤":   r["daily_close"],
+                        "結果":   outcome_label,
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("尚無複盤記錄，收盤後自動回填。")
+        except Exception as e:
+            st.caption(f"複盤資料暫時無法讀取：{e}")
 
 
 # ── Tab 7: 交易規範 ───────────────────────────────────────────────────────────
