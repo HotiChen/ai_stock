@@ -2,13 +2,16 @@ from __future__ import annotations
 
 """
 Main scheduler — daily jobs:
-  08:30  PremarketJob      : AI analysis + risk filter + Telegram confirmation
+  08:30  PremarketJob      : AI 波段選股 + 風控 + Telegram 確認
          DaytradingReport  : 當沖預測 → Telegram（開盤前 30 分鐘推播）
-  09:00  MarketOpenJob     : execute swing orders
-  09:05  DT execution      : 當沖買入確認 or 自動買入 + 啟動 tick 監控
-  13:15  Stop tick monitor
+  09:00  MarketOpenJob     : 波段下單
+  09:05  DT 開盤確認       : 量能/方向確認，過濾候選（不符合 → skipped）
+  09:10  DT 進場           : 下當沖買單 + 啟動 tick 監控
+  10:00  DT 盤中檢查       : 持倉損益報告 + 剩餘候選提示（可二次進場）
+  13:00  DT 出場警報       : 30 分鐘倒數提醒 + 損益預覽
+  13:15  停止 tick 監控
   13:25  ForceCloseJob     : 強制平倉當沖部位
-  13:35  PostMarketJob     : stop monitor + save daily summary
+  13:35  PostMarketJob     : 停監控 + 存每日摘要
   13:35  DaytradingReview  : 收盤後檢討當日預測準確度
 
 Run: python3 main.py
@@ -765,6 +768,185 @@ def _run_dt_sell_alerts(
         save_daytrading_positions(positions, path=dt_path)
 
 
+# ── DT Opening Confirmation (9:05) ───────────────────────────────────────────
+
+def _opening_confirm_dt_positions(
+    api,
+    dt_config: "DaytradingConfig",
+    dt_path: str = "data/daytrading_positions.json",
+) -> None:
+    """9:05 開盤確認：量能/方向 OK → 保留 watching；不符合 → 標記 skipped。"""
+    from daytrading_monitor import (
+        load_daytrading_positions, save_daytrading_positions, mark_position_skipped,
+    )
+    from monitor_agent import get_snapshot
+
+    all_positions = load_daytrading_positions(path=dt_path)
+    watching      = [p for p in all_positions if p.status == "watching"]
+    if not watching:
+        log.info("DT 9:05 確認：無 watching 持倉")
+        return
+
+    confirmed: list = []
+    skipped:   list = []
+    snap_cache: dict = {}
+
+    for pos in watching:
+        snap = get_snapshot(api, pos.code) if api is not None else None
+        snap_cache[pos.code] = snap or {}
+
+        volume_ok    = snap is not None and snap.get("volume", 0) > 0
+        direction_ok = snap is not None and snap.get("change_price", 0.0) >= 0
+
+        if volume_ok and direction_ok:
+            confirmed.append(pos)
+        else:
+            mark_position_skipped(pos)
+            skipped.append(pos)
+            log.info(
+                "DT 9:05 略過 %s %s (volume_ok=%s direction_ok=%s)",
+                pos.code, pos.name, volume_ok, direction_ok,
+            )
+
+    if skipped:
+        save_daytrading_positions(all_positions, path=dt_path)
+
+    # Telegram 報告
+    if not TELEGRAM_CHAT_ID:
+        log.info("DT 9:05 確認：%d 確認 / %d 略過", len(confirmed), len(skipped))
+        return
+
+    try:
+        from telegram_bot import send_text
+        lines = ["⚡ <b>當沖開盤確認 09:05</b>", "━━━━━━━━━━━━━━━━"]
+        if confirmed:
+            for pos in confirmed:
+                s   = snap_cache.get(pos.code, {})
+                chg = s.get("change_price", 0.0)
+                chg_str = f"{chg:+.2f}" if isinstance(chg, (int, float)) else str(chg)
+                lines.append(
+                    f"✅ <b>{pos.code} {pos.name}</b>　"
+                    f"現價 {s.get('close', '—')}　量 {s.get('volume', '—')}　{chg_str}"
+                )
+        if skipped:
+            lines.append("")
+            lines.append(f"⏭ 略過：{', '.join(p.code for p in skipped)}")
+        if confirmed:
+            action = "送出買入確認" if dt_config.require_manual_confirm else "自動買入"
+            lines.append(f"\n→ 09:10 將{action} {len(confirmed)} 支")
+        else:
+            lines.append("\n今日無符合開盤條件的當沖候選股")
+        send_text(TELEGRAM_CHAT_ID, "\n".join(lines))
+    except Exception as e:
+        log.warning("DT 9:05 確認通知失敗: %s", e)
+
+    log.info("DT 9:05 確認：%d 確認 / %d 略過", len(confirmed), len(skipped))
+
+
+# ── DT Mid-session Check (10:00) ─────────────────────────────────────────────
+
+def _mid_session_check(
+    api,
+    dt_path: str = "data/daytrading_positions.json",
+) -> None:
+    """10:00 盤中檢查：active 損益報告 + 剩餘 watching 候選提示。"""
+    from daytrading_monitor import load_daytrading_positions, fetch_current_price
+
+    positions = load_daytrading_positions(path=dt_path)
+    active    = [p for p in positions if p.status == "active"]
+    watching  = [p for p in positions if p.status == "watching"]
+
+    if not active and not watching:
+        return
+    if not TELEGRAM_CHAT_ID:
+        return
+
+    lines = ["📊 <b>當沖盤中檢查 10:00</b>", "━━━━━━━━━━━━━━━━"]
+
+    if active:
+        lines.append("<b>📌 持倉損益</b>")
+        for pos in active:
+            price = fetch_current_price(pos.code, api=api)
+            if price is not None and pos.entry_price:
+                multiplier = 1000 if pos.lot_type == "common" else 1
+                pnl        = (price - pos.entry_price) * pos.quantity * multiplier
+                pnl_pct    = (price - pos.entry_price) / pos.entry_price * 100
+                tag        = "🟢" if pnl >= 0 else "🔴"
+                lines.append(
+                    f"{tag} <b>{pos.code} {pos.name}</b>　"
+                    f"買 {pos.entry_price:.2f} → 現 {price:.2f}　"
+                    f"損益 {pnl:+,.0f} 元（{pnl_pct:+.1f}%）"
+                )
+            else:
+                lines.append(f"⬜ <b>{pos.code} {pos.name}</b>　無法取得報價")
+
+    if watching:
+        lines.append("")
+        lines.append("<b>👀 仍在觀察中（可二次進場）</b>")
+        for pos in watching:
+            price     = fetch_current_price(pos.code, api=api)
+            price_str = f"{price:.2f}" if price is not None else "—"
+            lines.append(f"  · <b>{pos.code} {pos.name}</b>　現價 {price_str}")
+
+    try:
+        from telegram_bot import send_text
+        send_text(TELEGRAM_CHAT_ID, "\n".join(lines))
+    except Exception as e:
+        log.warning("DT 10:00 盤中通知失敗: %s", e)
+
+
+# ── DT Exit Warning (13:00) ───────────────────────────────────────────────────
+
+def _exit_warning(
+    api,
+    dt_path: str = "data/daytrading_positions.json",
+) -> None:
+    """13:00 出場警報：距強制平倉 30 分鐘提醒，附各持倉損益。"""
+    from daytrading_monitor import load_daytrading_positions, fetch_current_price
+
+    positions = load_daytrading_positions(path=dt_path)
+    active    = [p for p in positions if p.status == "active"]
+
+    if not TELEGRAM_CHAT_ID:
+        return
+
+    lines = [
+        "⏰ <b>當沖出場警報 13:00</b>",
+        "距強制平倉還有 <b>30 分鐘</b>，請評估出場時機",
+        "━━━━━━━━━━━━━━━━",
+    ]
+
+    if not active:
+        lines.append("目前無 active 持倉。")
+    else:
+        total_pnl = 0.0
+        for pos in active:
+            price = fetch_current_price(pos.code, api=api)
+            if price is not None and pos.entry_price:
+                multiplier = 1000 if pos.lot_type == "common" else 1
+                pnl        = (price - pos.entry_price) * pos.quantity * multiplier
+                pnl_pct    = (price - pos.entry_price) / pos.entry_price * 100
+                total_pnl += pnl
+                tag        = "🟢" if pnl >= 0 else "🔴"
+                lines.append(
+                    f"{tag} <b>{pos.code} {pos.name}</b>　"
+                    f"買 {pos.entry_price:.2f} → 現 {price:.2f}　"
+                    f"損益 {pnl:+,.0f} 元（{pnl_pct:+.1f}%）"
+                )
+            else:
+                lines.append(f"⬜ <b>{pos.code} {pos.name}</b>　無法取得報價")
+        lines.append(f"\n💰 合計損益：<b>{total_pnl:+,.0f} 元</b>")
+        lines.append("<i>⚠️ 13:25 系統將自動強制平倉</i>")
+
+    try:
+        from telegram_bot import send_text
+        send_text(TELEGRAM_CHAT_ID, "\n".join(lines))
+    except Exception as e:
+        log.warning("DT 13:00 出場警報失敗: %s", e)
+
+    log.info("DT 出場警報已送出，%d 個 active 持倉", len(active))
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 _RUNNING = True
@@ -875,8 +1057,16 @@ def main() -> None:
                 monitor = job.run()
             time.sleep(60)
 
-        # 09:05 依設定送出買入確認或自動買入，並啟動 tick 監控
+        # 09:05 開盤確認：量能/方向 OK → 保留 watching；不符合 → skipped
         elif t.hour == 9 and t.minute == 5:
+            try:
+                _opening_confirm_dt_positions(api, dt_config)
+            except Exception as e:
+                log.warning("DT 開盤確認失敗: %s", e)
+            time.sleep(60)
+
+        # 09:10 當沖下單進場（第一波）+ 啟動 tick 監控
+        elif t.hour == 9 and t.minute == 10:
             try:
                 from daytrading_monitor import load_daytrading_positions
                 dt_watching = [p for p in load_daytrading_positions() if p.status == "watching"]
@@ -886,10 +1076,12 @@ def main() -> None:
                             send_dt_buy_confirmation(dt_watching, TELEGRAM_CHAT_ID, dt_config.budget_per_stock)
                     else:
                         _auto_buy_dt_positions(api, dt_watching, dt_config)
+                else:
+                    log.info("DT 9:10 進場：無 watching 持倉（9:05 全數過濾）")
             except Exception as e:
-                log.warning("DayTrading execution failed: %s", e)
+                log.warning("DT 9:10 下單失敗: %s", e)
 
-            # 下單後啟動 tick 訂閱監控（取代 5 分鐘 polling）
+            # 下單後啟動 tick 訂閱監控
             try:
                 from daytrading_monitor import load_daytrading_positions
                 from monitor_agent import MonitorAgent
@@ -913,10 +1105,25 @@ def main() -> None:
                     )
                     _dt_agent.set_watchlist(watchlist)
                     _dt_agent.start()
-                    log.info("DT tick monitor started for %d positions", len(watchlist))
+                    log.info("DT tick 監控啟動，%d 個持倉", len(watchlist))
             except Exception as e:
-                log.warning("DT tick monitor start failed: %s", e)
+                log.warning("DT tick 監控啟動失敗: %s", e)
+            time.sleep(60)
 
+        # 10:00 盤中檢查：持倉損益 + 剩餘候選（可選擇二次進場）
+        elif t.hour == 10 and t.minute == 0:
+            try:
+                _mid_session_check(api)
+            except Exception as e:
+                log.warning("DT 盤中檢查失敗: %s", e)
+            time.sleep(60)
+
+        # 13:00 出場警報：30 分鐘倒數提醒
+        elif t.hour == 13 and t.minute == 0:
+            try:
+                _exit_warning(api)
+            except Exception as e:
+                log.warning("DT 出場警報失敗: %s", e)
             time.sleep(60)
 
         # 13:25 force-close all positions before market close

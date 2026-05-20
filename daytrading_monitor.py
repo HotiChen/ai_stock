@@ -37,7 +37,7 @@ class DaytradingPosition:
     target_price: Optional[float]
     stop_loss:    Optional[float]
     dt_score:     int
-    status:       str = "watching"    # watching | active | closed
+    status:       str = "watching"    # watching | active | closed | skipped
     alerts_sent:  list = field(default_factory=list)
     # ── 實際成交後填寫 ─────────────────────────────────────────────────────
     entry_price:  Optional[float] = None   # 實際買入均價
@@ -312,6 +312,11 @@ def mark_position_entered(
     pos.peak_price  = entry_price   # 初始峰值 = 進場價
     pos.quantity    = quantity
     pos.lot_type    = lot_type
+
+
+def mark_position_skipped(pos: DaytradingPosition) -> None:
+    """9:05 開盤確認時過濾掉的候選：標記為 skipped，不再進場。"""
+    pos.status = "skipped"
 
 
 # ── Main monitor pass ─────────────────────────────────────────────────────────
