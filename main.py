@@ -775,11 +775,12 @@ def _opening_confirm_dt_positions(
     dt_config: "DaytradingConfig",
     dt_path: str = "data/daytrading_positions.json",
 ) -> None:
-    """9:05 開盤確認：量能/方向 OK → 保留 watching；不符合 → 標記 skipped。"""
+    """9:05 開盤再確認：AI 結合 8:30 預測 + 當前大盤氣氛，給出進場或放棄建議。"""
     from daytrading_monitor import (
         load_daytrading_positions, save_daytrading_positions, mark_position_skipped,
     )
     from monitor_agent import get_snapshot
+    from daytrading_analyzer import run_opening_reconfirm
 
     all_positions = load_daytrading_positions(path=dt_path)
     watching      = [p for p in all_positions if p.status == "watching"]
@@ -787,60 +788,109 @@ def _opening_confirm_dt_positions(
         log.info("DT 9:05 確認：無 watching 持倉")
         return
 
+    # 大盤氣氛（一次抓，所有股票共用）
+    from daytrading_report import _fetch_market
+    market = _fetch_market()
+    log.info(
+        "DT 9:05 大盤：index=%+.2f%% futures=%+.2f%%",
+        market.get("index_change_pct", 0),
+        market.get("futures_premium_pct", 0),
+    )
+
     confirmed: list = []
     skipped:   list = []
+    reasons:   dict = {}   # code → reason string
     snap_cache: dict = {}
+    changed = False
 
     for pos in watching:
         snap = get_snapshot(api, pos.code) if api is not None else None
         snap_cache[pos.code] = snap or {}
 
-        volume_ok    = snap is not None and snap.get("volume", 0) > 0
-        direction_ok = snap is not None and snap.get("change_price", 0.0) >= 0
+        current_price = snap["close"]        if snap else 0.0
+        change_price  = snap.get("change_price", 0.0) if snap else 0.0
+        volume        = snap.get("volume",       0)   if snap else 0
 
-        if volume_ok and direction_ok:
+        result = run_opening_reconfirm(
+            code=pos.code, name=pos.name,
+            dt_score=pos.dt_score,
+            entry_low=pos.entry_low, entry_high=pos.entry_high,
+            target_price=pos.target_price, stop_loss=pos.stop_loss,
+            ai_summary=pos.ai_summary,
+            current_price=current_price,
+            change_price=change_price,
+            volume=volume,
+            market=market,
+        )
+
+        if result.proceed:
+            # AI 可能調整進場區間
+            if result.updated_entry_low is not None:
+                pos.entry_low  = result.updated_entry_low
+                changed = True
+            if result.updated_entry_high is not None:
+                pos.entry_high = result.updated_entry_high
+                changed = True
             confirmed.append(pos)
+            log.info("DT 9:05 確認進場 %s %s: %s", pos.code, pos.name, result.reason)
         else:
             mark_position_skipped(pos)
             skipped.append(pos)
-            log.info(
-                "DT 9:05 略過 %s %s (volume_ok=%s direction_ok=%s)",
-                pos.code, pos.name, volume_ok, direction_ok,
-            )
+            reasons[pos.code] = result.reason
+            changed = True
+            log.info("DT 9:05 放棄 %s %s: %s", pos.code, pos.name, result.reason)
 
-    if skipped:
+    if changed:
         save_daytrading_positions(all_positions, path=dt_path)
 
-    # Telegram 報告
+    log.info("DT 9:05 確認：%d 繼續 / %d 放棄", len(confirmed), len(skipped))
+
     if not TELEGRAM_CHAT_ID:
-        log.info("DT 9:05 確認：%d 確認 / %d 略過", len(confirmed), len(skipped))
         return
 
     try:
         from telegram_bot import send_text
-        lines = ["⚡ <b>當沖開盤確認 09:05</b>", "━━━━━━━━━━━━━━━━"]
+        idx_pct = market.get("index_change_pct", 0.0)
+        fp_pct  = market.get("futures_premium_pct", 0.0)
+        idx_arrow = "📈" if idx_pct > 0 else ("📉" if idx_pct < 0 else "📊")
+
+        lines = [
+            "⚡ <b>當沖開盤確認 09:05</b>",
+            f"{idx_arrow} 大盤 {idx_pct:+.2f}%　台指期溢貼水 {fp_pct:+.2f}%",
+            "━━━━━━━━━━━━━━━━",
+        ]
+
         if confirmed:
             for pos in confirmed:
                 s   = snap_cache.get(pos.code, {})
                 chg = s.get("change_price", 0.0)
-                chg_str = f"{chg:+.2f}" if isinstance(chg, (int, float)) else str(chg)
-                lines.append(
-                    f"✅ <b>{pos.code} {pos.name}</b>　"
-                    f"現價 {s.get('close', '—')}　量 {s.get('volume', '—')}　{chg_str}"
+                entry_str = (
+                    f"{pos.entry_low:,.1f}–{pos.entry_high:,.1f}"
+                    if pos.entry_low and pos.entry_high else "—"
                 )
+                lines.append(
+                    f"✅ <b>{pos.code} {pos.name}</b>\n"
+                    f"   現價 {s.get('close', '—')}　漲跌 {chg:+.2f}　進場區間 {entry_str}"
+                )
+
         if skipped:
             lines.append("")
-            lines.append(f"⏭ 略過：{', '.join(p.code for p in skipped)}")
+            lines.append("❌ <b>AI 建議放棄</b>")
+            for pos in skipped:
+                lines.append(
+                    f"  · <b>{pos.code} {pos.name}</b>　{reasons.get(pos.code, '')}"
+                )
+
+        lines.append("")
         if confirmed:
             action = "送出買入確認" if dt_config.require_manual_confirm else "自動買入"
-            lines.append(f"\n→ 09:10 將{action} {len(confirmed)} 支")
+            lines.append(f"→ 09:10 將{action} {len(confirmed)} 支")
         else:
-            lines.append("\n今日無符合開盤條件的當沖候選股")
+            lines.append("<i>今日 AI 建議放棄所有當沖候選</i>")
+
         send_text(TELEGRAM_CHAT_ID, "\n".join(lines))
     except Exception as e:
         log.warning("DT 9:05 確認通知失敗: %s", e)
-
-    log.info("DT 9:05 確認：%d 確認 / %d 略過", len(confirmed), len(skipped))
 
 
 # ── DT Mid-session Check (10:00) ─────────────────────────────────────────────

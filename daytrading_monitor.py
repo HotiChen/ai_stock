@@ -39,6 +39,7 @@ class DaytradingPosition:
     dt_score:     int
     status:       str = "watching"    # watching | active | closed | skipped
     alerts_sent:  list = field(default_factory=list)
+    ai_summary:   str  = ""           # 8:30 盤前 AI 建議摘要（供 9:05 再確認使用）
     # ── 實際成交後填寫 ─────────────────────────────────────────────────────
     entry_price:  Optional[float] = None   # 實際買入均價
     peak_price:   Optional[float] = None   # 持倉期間最高達到的價格
@@ -261,6 +262,7 @@ def save_daytrading_positions(
             "dt_score":     p.dt_score,
             "status":       p.status,
             "alerts_sent":  p.alerts_sent,
+            "ai_summary":   p.ai_summary,
             "entry_price":  p.entry_price,
             "peak_price":   p.peak_price,
             "quantity":     p.quantity,
@@ -288,6 +290,7 @@ def load_daytrading_positions(path: str = _DEFAULT_PATH) -> list[DaytradingPosit
                 dt_score=d.get("dt_score", 0),
                 status=d.get("status", "watching"),
                 alerts_sent=d.get("alerts_sent", []),
+                ai_summary=d.get("ai_summary", ""),
                 entry_price=d.get("entry_price"),
                 peak_price=d.get("peak_price"),
                 quantity=d.get("quantity", 0),

@@ -279,6 +279,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
                 entry_low=ai.entry_low, entry_high=ai.entry_high,
                 target_price=ai.target_price, stop_loss=ai.stop_loss,
                 dt_score=r["dt_score"],
+                ai_summary=ai.summary,
             )
             for r in qualified[:3]
             if (ai := ai_map.get(r["code"])) and ai.action == "long"

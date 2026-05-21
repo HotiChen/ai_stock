@@ -210,6 +210,124 @@ def parse_daytrading_response(code: str, name: str, raw: str) -> DayTradingAnaly
         return _skip
 
 
+# ── Opening Re-confirmation (9:05) ───────────────────────────────────────────
+
+@dataclass
+class OpeningReconfirm:
+    code:               str
+    name:               str
+    proceed:            bool
+    reason:             str
+    updated_entry_low:  Optional[float]  # None = 維持 8:30 原值
+    updated_entry_high: Optional[float]  # None = 維持 8:30 原值
+
+
+def build_opening_reconfirm_prompt(
+    code: str,
+    name: str,
+    dt_score: int,
+    entry_low: Optional[float],
+    entry_high: Optional[float],
+    target_price: Optional[float],
+    stop_loss: Optional[float],
+    ai_summary: str,
+    current_price: float,
+    change_price: float,
+    volume: int,
+    market: dict,
+) -> str:
+    idx_pct = market.get("index_change_pct", 0.0)
+    fp_pct  = market.get("futures_premium_pct", 0.0)
+
+    entry_str  = f"{entry_low:,.1f}–{entry_high:,.1f}" if entry_low and entry_high else "未設定"
+    target_str = f"{target_price:,.1f}" if target_price else "未設定"
+    stop_str   = f"{stop_loss:,.1f}"    if stop_loss    else "未設定"
+
+    if entry_low and entry_high:
+        if current_price < entry_low:
+            position_hint = f"（低於進場區間 {entry_low - current_price:.1f} 元，尚未到位）"
+        elif current_price > entry_high:
+            position_hint = f"（超出進場區間 {current_price - entry_high:.1f} 元，可能錯過）"
+        else:
+            position_hint = "（在進場區間內）"
+    else:
+        position_hint = ""
+
+    return f"""你是台股當沖交易專家。以下是早上 8:30 的盤前預測，現在是 9:05（開盤 5 分鐘後），請結合大盤氣氛判斷是否繼續進場。
+
+【8:30 盤前預測】
+{code} {name}　評分 {dt_score}/10
+進場區間 {entry_str}　目標 {target_str}　停損 {stop_str}
+AI 結論：{ai_summary or "無"}
+
+【9:05 開盤實況】
+現價 {current_price:,.1f} {position_hint}
+開盤漲跌 {change_price:+.2f} 元　成交量 {volume} 張
+
+【大盤氣氛】
+加權指數 {idx_pct:+.2f}%　台指期溢貼水 {fp_pct:+.2f}%
+
+請綜合判斷：
+1. 現價是否仍在合理進場位置
+2. 大盤方向是否支持做多
+3. 量能與開盤氣氛是否確認盤前預測
+
+只回答 JSON（不要其他文字）：
+{{
+  "proceed": true 或 false,
+  "reason": "一句話說明繼續或放棄的原因",
+  "updated_entry_low": 更新的進場低點（若維持原值填 null）,
+  "updated_entry_high": 更新的進場高點（若維持原值填 null）
+}}"""
+
+
+def run_opening_reconfirm(
+    code: str,
+    name: str,
+    dt_score: int,
+    entry_low: Optional[float],
+    entry_high: Optional[float],
+    target_price: Optional[float],
+    stop_loss: Optional[float],
+    ai_summary: str,
+    current_price: float,
+    change_price: float,
+    volume: int,
+    market: dict,
+) -> OpeningReconfirm:
+    """9:05 開盤再確認：結合 8:30 預測 + 當前大盤氣氛，AI 判斷是否繼續進場。"""
+    _skip = OpeningReconfirm(
+        code=code, name=name, proceed=False,
+        reason="AI 分析失敗，保守放棄",
+        updated_entry_low=None, updated_entry_high=None,
+    )
+    try:
+        prompt = build_opening_reconfirm_prompt(
+            code, name, dt_score,
+            entry_low, entry_high, target_price, stop_loss, ai_summary,
+            current_price, change_price, volume, market,
+        )
+        raw  = call_haiku(prompt)
+        data = _extract_json(raw)
+
+        def _f(v) -> Optional[float]:
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        return OpeningReconfirm(
+            code=code, name=name,
+            proceed=bool(data.get("proceed", False)),
+            reason=str(data.get("reason", "")),
+            updated_entry_low=_f(data.get("updated_entry_low")),
+            updated_entry_high=_f(data.get("updated_entry_high")),
+        )
+    except Exception as e:
+        log.warning("run_opening_reconfirm(%s) failed: %s", code, e)
+        return _skip
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def run_daytrading_analysis(
