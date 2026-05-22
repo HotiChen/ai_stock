@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "Review the Python file that was just modified. The modified file path is in tool_input.file_path. If the file does not end in .py, output nothing and stop. Otherwise, review it for: naming clarity, DRY violations, overly broad exception handling, and security issues. Only report MUST FIX level problems. Be concise — one line per issue maximum.",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "Before finishing, check if any Python files were modified this turn by running: git diff HEAD --name-only | grep '\\.py$'. For each changed .py file, review it for MUST FIX issues only: naming clarity, DRY violations, overly broad exception handling, security issues. If no .py files were changed, output nothing. Be concise — one line per issue maximum.",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
