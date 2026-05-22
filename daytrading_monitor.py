@@ -14,6 +14,8 @@ daytrading_monitor.py — 當沖盤中即時監控 + 追蹤停利邏輯
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 from dataclasses import dataclass, field
@@ -21,9 +23,24 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Optional
 
+from atomic_json import atomic_write_json, atomic_read_json
+
 log = logging.getLogger(__name__)
 
 _DEFAULT_PATH = "data/daytrading_positions.json"
+
+
+@contextlib.contextmanager
+def _flock(path: str):
+    """Cross-process exclusive lock around read–modify–write on *path*."""
+    lock_path = path + ".lock"
+    Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -37,8 +54,9 @@ class DaytradingPosition:
     target_price: Optional[float]
     stop_loss:    Optional[float]
     dt_score:     int
-    status:       str = "watching"    # watching | active | closed
+    status:       str = "watching"    # watching | active | closed | skipped
     alerts_sent:  list = field(default_factory=list)
+    ai_summary:   str  = ""           # 8:30 盤前 AI 建議摘要（供 9:05 再確認使用）
     # ── 實際成交後填寫 ─────────────────────────────────────────────────────
     entry_price:  Optional[float] = None   # 實際買入均價
     peak_price:   Optional[float] = None   # 持倉期間最高達到的價格
@@ -249,7 +267,6 @@ def save_daytrading_positions(
     positions: list[DaytradingPosition],
     path: str = _DEFAULT_PATH,
 ) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
     data = [
         {
             "code":         p.code,
@@ -261,6 +278,7 @@ def save_daytrading_positions(
             "dt_score":     p.dt_score,
             "status":       p.status,
             "alerts_sent":  p.alerts_sent,
+            "ai_summary":   p.ai_summary,
             "entry_price":  p.entry_price,
             "peak_price":   p.peak_price,
             "quantity":     p.quantity,
@@ -268,15 +286,17 @@ def save_daytrading_positions(
         }
         for p in positions
     ]
-    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(path, data)
 
 
 def load_daytrading_positions(path: str = _DEFAULT_PATH) -> list[DaytradingPosition]:
-    p = Path(path)
-    if not p.exists():
+    if not Path(path).exists():
+        return []
+    data = atomic_read_json(path)
+    if data is None:
+        log.error("load_daytrading_positions: file corrupt or unreadable (%s)", path)
         return []
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
         return [
             DaytradingPosition(
                 code=d["code"],
@@ -288,6 +308,7 @@ def load_daytrading_positions(path: str = _DEFAULT_PATH) -> list[DaytradingPosit
                 dt_score=d.get("dt_score", 0),
                 status=d.get("status", "watching"),
                 alerts_sent=d.get("alerts_sent", []),
+                ai_summary=d.get("ai_summary", ""),
                 entry_price=d.get("entry_price"),
                 peak_price=d.get("peak_price"),
                 quantity=d.get("quantity", 0),
@@ -295,8 +316,8 @@ def load_daytrading_positions(path: str = _DEFAULT_PATH) -> list[DaytradingPosit
             )
             for d in data
         ]
-    except Exception as e:
-        log.error("load_daytrading_positions failed: %s", e)
+    except (KeyError, TypeError) as e:
+        log.error("load_daytrading_positions: schema error — %s", e)
         return []
 
 
@@ -314,6 +335,11 @@ def mark_position_entered(
     pos.lot_type    = lot_type
 
 
+def mark_position_skipped(pos: DaytradingPosition) -> None:
+    """9:05 開盤確認時過濾掉的候選：標記為 skipped，不再進場。"""
+    pos.status = "skipped"
+
+
 # ── Main monitor pass ─────────────────────────────────────────────────────────
 
 def run_daytrading_monitor(
@@ -326,37 +352,38 @@ def run_daytrading_monitor(
     警報中 sell_required=True 的項目代表已觸發出場訊號，
     呼叫方應負責執行賣單並將 pos.status 標為 'closed'。
     """
-    positions = load_daytrading_positions(path=path)
-    if not positions:
-        return []
+    with _flock(path):
+        positions = load_daytrading_positions(path=path)
+        if not positions:
+            return []
 
-    all_alerts: list[DaytradingAlert] = []
-    changed = False
+        all_alerts: list[DaytradingAlert] = []
+        changed = False
 
-    for pos in positions:
-        if pos.status == "closed":
-            continue
+        for pos in positions:
+            if pos.status in ("closed", "skipped"):
+                continue
 
-        price = fetch_current_price(pos.code, api=api)
-        if price is None:
-            log.debug("無法取得 %s 即時價格，跳過", pos.code)
-            continue
+            price = fetch_current_price(pos.code, api=api)
+            if price is None:
+                log.debug("無法取得 %s 即時價格，跳過", pos.code)
+                continue
 
-        # active 持倉：先更新峰值，再檢查追蹤停利
-        if pos.status == "active":
-            if update_peak_price(pos, price):
+            # active 持倉：先更新峰值，再檢查追蹤停利
+            if pos.status == "active":
+                if update_peak_price(pos, price):
+                    changed = True
+
+            alerts = check_position_alerts(pos, price, config=config)
+
+            for a in alerts:
+                pos.alerts_sent.append(a.alert_type)
                 changed = True
 
-        alerts = check_position_alerts(pos, price, config=config)
+            all_alerts.extend(alerts)
 
-        for a in alerts:
-            pos.alerts_sent.append(a.alert_type)
-            changed = True
-
-        all_alerts.extend(alerts)
-
-    if changed:
-        save_daytrading_positions(positions, path=path)
+        if changed:
+            save_daytrading_positions(positions, path=path)
 
     return all_alerts
 

@@ -16,6 +16,7 @@ Run: python3 main.py
 
 import os
 import signal
+import sqlite3
 import time
 from collections import defaultdict
 from datetime import datetime, date
@@ -357,12 +358,14 @@ class MarketOpenJob:
                     date.today(),
                 )
             return picks
-        except Exception as e:
-            log.warning(
-                "MarketOpenJob: DB read failed — DEGRADED MODE, "
-                "falling back to in-memory picks. Cause: %s", e,
+        except (OSError, sqlite3.Error) as e:
+            log.error(
+                "MarketOpenJob: DB read failed — ABORTING to avoid overriding user rejection. "
+                "Cause: %s", e, exc_info=True,
             )
-            return self._picks
+            # Return empty list: safer than silently re-using in-memory picks which
+            # may include candidates the user explicitly rejected after 08:30.
+            return []
 
     def run(self) -> MonitorAgent:
         picks_to_execute = self._resolve_picks()

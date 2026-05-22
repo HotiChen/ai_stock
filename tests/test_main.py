@@ -9,6 +9,7 @@ Three jobs:
   13:35 PostMarketJob → stop MonitorAgent + save daily summary to DB
 """
 
+import sqlite3
 from datetime import datetime, date
 from unittest.mock import MagicMock, patch, call
 import pytest
@@ -288,9 +289,11 @@ class TestMarketOpenJob:
              "target_price": 900.0, "stop_loss_price": 800.0},
         ]
 
+    @patch("main.load_daily_plan")
     @patch("main.place_stock_order")
     @patch("main.MonitorAgent")
-    def test_market_open_places_orders(self, mock_monitor_cls, mock_place):
+    def test_market_open_places_orders(self, mock_monitor_cls, mock_place, mock_load):
+        mock_load.return_value = self._approved()
         mock_place.return_value = MagicMock(success=True, order_id="X1",
                                             code="2330", action="buy")
         mock_monitor = MagicMock()
@@ -833,18 +836,14 @@ class TestMarketOpenJobResolvePicks:
             "DB 為 [] 代表使用者已拒絕或無計劃，不得 fallback 到 memory picks 下單"
         )
 
-    @patch("main.load_daily_plan", side_effect=Exception("DB connection lost"))
+    @patch("main.load_daily_plan", side_effect=sqlite3.OperationalError("no such table"))
     @patch("main.place_stock_order")
     @patch("main.MonitorAgent")
-    def test_db_exception_fallback_to_memory_with_warning(
+    def test_db_exception_aborts_orders(
         self, mock_monitor_cls, mock_place, _mock_load, tmp_path
     ):
-        """DB 讀取拋例外 → DEGRADED MODE：fallback 到 memory picks 並繼續下單。"""
+        """DB 讀取拋 sqlite3 error → 中止下單，不 fallback 到 memory picks。"""
         from main import MarketOpenJob
-        from research_db import init_db
-
-        db_path = str(tmp_path / "t.db")
-        init_db(db_path)
 
         mock_place.return_value = MagicMock(success=False)
         mock_monitor_cls.return_value = MagicMock()
@@ -853,17 +852,15 @@ class TestMarketOpenJobResolvePicks:
             api=MagicMock(),
             approved_picks=[{"code": "2330", "name": "台積電", "budget": 5000.0,
                              "sector": "半導體"}],
-            db_path=db_path,
+            db_path=str(tmp_path / "t.db"),
             telegram_chat_id=None,
             hard_limit=500_000,
             prior_orders=[],
         )
         job.run()
 
-        assert mock_place.call_count == 1, \
-            "DB 例外時應 fallback 到 memory picks，仍嘗試下單"
-        assert mock_place.call_args[1]["code"] == "2330", \
-            "fallback 時應使用 memory picks 中的 2330"
+        assert mock_place.call_count == 0, \
+            "DB sqlite3 error 時不得 fallback 到 memory picks，應中止下單"
 
     @patch("main.place_stock_order")
     @patch("main.MonitorAgent")
@@ -905,13 +902,16 @@ class TestMarketOpenJobResolvePicks:
 
 
 class TestMarketOpenJobUsesPriorOrders:
+    @patch("main.load_daily_plan")
     @patch("main.place_stock_order")
     @patch("main.MonitorAgent")
     @patch("main.load_prior_orders")
     def test_09_job_passes_prior_orders_to_executor(
-        self, mock_prior, mock_monitor_cls, mock_place
+        self, mock_prior, mock_monitor_cls, mock_place, mock_load
     ):
         """09:00 job must call load_prior_orders and pass result to place_stock_order."""
+        picks = [{"code": "2330", "name": "台積電", "budget": 5000.0}]
+        mock_load.return_value = picks
         mock_prior.return_value = [{"code": "0050", "action": "buy"}]
         mock_place.return_value = MagicMock(success=False)
         mock_monitor_cls.return_value = MagicMock()
@@ -919,7 +919,7 @@ class TestMarketOpenJobUsesPriorOrders:
         from main import MarketOpenJob
         job = MarketOpenJob(
             api=MagicMock(),
-            approved_picks=[{"code": "2330", "name": "台積電", "budget": 5000.0}],
+            approved_picks=picks,
             db_path=":memory:", telegram_chat_id=None,
             hard_limit=500_000, prior_orders=None,  # None triggers auto-load
         )
