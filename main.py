@@ -818,6 +818,15 @@ def main() -> None:
     monitor: Optional[MonitorAgent] = None
     approved_picks: list[dict] = []
     _dt_agent = None   # MonitorAgent（tick 訂閱，09:05 下單後啟動）
+    _jobs_fired: dict[str, date] = {}  # job_name → last fired date (idempotency guard)
+
+    def _once(job_name: str) -> bool:
+        """Return True and mark fired iff this job hasn't run today. Thread-safe via GIL."""
+        today = date.today()
+        if _jobs_fired.get(job_name) == today:
+            return False
+        _jobs_fired[job_name] = today
+        return True
 
     while _RUNNING:
         now = datetime.now()
@@ -839,7 +848,7 @@ def main() -> None:
             log.info("DT tick monitor stopped at 13:15")
 
         # 08:30 pre-market：波段選股 + 當沖預測報告（同時推播 Telegram）
-        if t.hour == 8 and t.minute == 30:
+        if t.hour == 8 and t.minute == 30 and _once("premarket"):
             # 波段選股（原有邏輯）
             job = PremarketJob(
                 candidates=None,
@@ -864,7 +873,7 @@ def main() -> None:
             time.sleep(60)
 
         # 09:00 market open
-        elif t.hour == 9 and t.minute == 0:
+        elif t.hour == 9 and t.minute == 0 and _once("market_open"):
             notify_market_open()
             if api and approved_picks:
                 job = MarketOpenJob(
@@ -879,7 +888,7 @@ def main() -> None:
             time.sleep(60)
 
         # 09:05 依設定送出買入確認或自動買入，並啟動 tick 監控
-        elif t.hour == 9 and t.minute == 5:
+        elif t.hour == 9 and t.minute == 5 and _once("dt_open"):
             try:
                 from daytrading_monitor import load_daytrading_positions
                 dt_watching = [p for p in load_daytrading_positions() if p.status == "watching"]
@@ -921,13 +930,13 @@ def main() -> None:
             time.sleep(60)
 
         # 13:25 force-close all positions before market close
-        elif t.hour == 13 and t.minute == 25:
+        elif t.hour == 13 and t.minute == 25 and _once("force_close"):
             if api:
                 ForceCloseJob(api=api, db_path=DB_PATH).run()
             time.sleep(60)
 
         # 13:35 post-market
-        elif t.hour == 13 and t.minute == 35:
+        elif t.hour == 13 and t.minute == 35 and _once("post_market"):
             job = PostMarketJob(
                 monitor=monitor,
                 db_path=DB_PATH,
