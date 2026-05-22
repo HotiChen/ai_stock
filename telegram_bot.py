@@ -301,6 +301,9 @@ def _handle_set_stop_loss(chat_id: str, text: str) -> None:
     except ValueError:
         send_text(chat_id, _FORMAT_HINT)
         return
+    if price <= 0:
+        send_text(chat_id, "❌ 停損價必須大於 0，請重新輸入。")
+        return
 
     _save_stop_loss(code, price)   # H5: 持久化到 data/stop_loss.json
 
@@ -968,9 +971,15 @@ def handle_callback(callback_query: dict) -> None:
         send_text(chat_id, "❌ 全部拒絕，今日計劃已清除，不執行任何下單。")
     elif data.startswith("approve:"):
         code = data.split(":", 1)[1]
+        if not _valid_stock_code(code):
+            log.warning("handle_callback: invalid stock code in approve: %r", code)
+            return
         send_text(chat_id, f"✅ {code} 已批准，開盤時將執行此筆委託。")
     elif data.startswith("reject:"):
         code = data.split(":", 1)[1]
+        if not _valid_stock_code(code):
+            log.warning("handle_callback: invalid stock code in reject: %r", code)
+            return
         reject_pick_from_plan(date.today(), code, DB_PATH)
         send_text(chat_id, f"❌ {code} 已從今日計劃中移除。")
 
@@ -1036,11 +1045,17 @@ def handle_callback(callback_query: dict) -> None:
     # ── 當沖買入確認 ──
     elif data.startswith("dt_buy:"):
         code = data.split(":", 1)[1]
+        if not _valid_stock_code(code):
+            log.warning("handle_callback: invalid stock code in dt_buy: %r", code)
+            return
         _handle_dt_buy(chat_id, code)
     elif data == "dt_buy_all":
         _handle_dt_buy_all(chat_id)
     elif data.startswith("dt_skip:"):
         code = data.split(":", 1)[1]
+        if not _valid_stock_code(code):
+            log.warning("handle_callback: invalid stock code in dt_skip: %r", code)
+            return
         send_text(chat_id, f"⏭️ 已跳過 {code}")
     elif data == "dt_skip_all":
         send_text(chat_id, "⏭️ 已跳過所有當沖候選股")
@@ -1134,6 +1149,12 @@ _HANDLER_NAMES: dict[str, str] = {
     "🔄 撤銷所有委託":  "handle_cancel_all",
     "💥 一鍵全平倉":    "handle_liquidate_all",
 }
+
+
+def _valid_stock_code(code: str) -> bool:
+    """台灣股票代號白名單：4–6 位純數字。"""
+    import re
+    return bool(re.fullmatch(r'\d{4,6}', code))
 
 
 def _is_authorized(update: dict) -> bool:
@@ -1235,6 +1256,14 @@ def process_update(update: dict) -> None:
 # ── Long polling loop ──────────────────────────────────────────────────────────
 
 def run() -> None:
+    if not BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set — bot cannot start")
+    if not CHAT_ID:
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID is not set — bot would silently reject all updates and "
+            "all outbound send_text() calls would target an empty chat_id. "
+            "Set TELEGRAM_CHAT_ID in .env before starting."
+        )
     os.makedirs("data", exist_ok=True)
     init_db(DB_PATH)
     log.info("Telegram bot started (long polling)")
