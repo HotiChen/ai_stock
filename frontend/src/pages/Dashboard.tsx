@@ -1,5 +1,5 @@
 // 02 Dashboard 總覽 — Wave 2-F 完整實作
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import AppChrome from '../components/AppChrome';
 import Kpi from '../components/Kpi';

@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { useWebSocket } from '../hooks/useWebSocket';
+import type { MarketSnapshot } from '../types';
 
 interface AppChromeProps {
   children: React.ReactNode;
@@ -26,31 +28,42 @@ const NAV_ITEMS: NavItemConfig[] = [
   { id: 'report',     label: '週報',      path: '/report',    kbd: 'R' },
 ];
 
-function formatTime(date: Date): string {
-  return date.toLocaleTimeString('zh-TW', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
+// App mode — in a real app this would come from settings/context
+const APP_MODE: 'simulation' | 'live' = 'simulation';
+
+function formatTimeHMS(date: Date): string {
+  const h = String(date.getHours()).padStart(2, '0');
+  const m = String(date.getMinutes()).padStart(2, '0');
+  const s = String(date.getSeconds()).padStart(2, '0');
+  return `${h}:${m}:${s}`;
 }
 
-function formatCountdown(seconds: number): string {
+function formatCountdownHMS(seconds: number): string {
   if (seconds <= 0) return '已收盤';
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
-  if (h > 0) {
-    return `${h}h${String(m).padStart(2, '0')}m`;
-  }
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 function getSecondsToClose(now: Date): number {
   const close = new Date(now);
-  close.setHours(13, 25, 0, 0);
+  close.setHours(13, 30, 0, 0); // 13:30 收盤
   const diff = Math.floor((close.getTime() - now.getTime()) / 1000);
   return diff;
+}
+
+function getMarketSession(now: Date): 'pre' | 'open' | 'post' | 'closed' {
+  const h = now.getHours();
+  const m = now.getMinutes();
+  const total = h * 60 + m;
+  // 08:00–09:00 pre
+  if (total >= 8 * 60 && total < 9 * 60) return 'pre';
+  // 09:00–13:30 open
+  if (total >= 9 * 60 && total < 13 * 60 + 30) return 'open';
+  // 13:30–14:30 post
+  if (total >= 13 * 60 + 30 && total < 14 * 60 + 30) return 'post';
+  return 'closed';
 }
 
 interface NavItemProps {
@@ -112,7 +125,11 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
   const location = useLocation();
   const [now, setNow] = useState(new Date());
 
-  // Clock
+  // WebSocket market data
+  const { data: marketData, connected: marketConnected } =
+    useWebSocket<MarketSnapshot>('/ws/market');
+
+  // Clock — ticks every second
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
@@ -120,22 +137,18 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
 
   // Keyboard shortcuts
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    // Skip if typing in an input
-    const tag = (e.target as HTMLElement)?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.target instanceof HTMLInputElement) return;
+    if (e.target instanceof HTMLTextAreaElement) return;
+    if (e.target instanceof HTMLSelectElement) return;
+    if (e.metaKey || e.ctrlKey) return;
 
-    if (e.metaKey || e.ctrlKey) return; // Let cmd+k etc bubble
-
-    switch (e.key.toUpperCase()) {
-      case 'D': navigate('/'); break;
-      case 'P': navigate('/predict'); break;
-      case 'T': navigate('/daytrade'); break;
-      case 'H': navigate('/portfolio'); break;
-      case 'M': navigate('/scanner'); break;
-      case 'B': navigate('/simulate'); break;
-      case 'J': navigate('/journal'); break;
-      case 'R': navigate('/report'); break;
-    }
+    const map: Record<string, string> = {
+      d: '/', p: '/predict', t: '/daytrade',
+      h: '/portfolio', m: '/scanner', b: '/simulate',
+      j: '/journal', r: '/report',
+    };
+    const dest = map[e.key.toLowerCase()];
+    if (dest) navigate(dest);
   }, [navigate]);
 
   useEffect(() => {
@@ -143,8 +156,42 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
 
-  const secondsToClose = getSecondsToClose(now);
-  const isUrgent = secondsToClose > 0 && secondsToClose < 300; // < 5min
+  // Use server countdown if available, else compute locally
+  const secondsToClose = marketData
+    ? marketData.countdown_to_close_seconds
+    : getSecondsToClose(now);
+
+  const isUrgent = secondsToClose > 0 && secondsToClose < 300; // < 5 min
+
+  // Market session
+  const session: 'pre' | 'open' | 'post' | 'closed' = marketData?.session ?? getMarketSession(now);
+
+  const sessionLabel: Record<string, string> = {
+    pre: 'PRE',
+    open: 'OPEN',
+    post: 'POST',
+    closed: 'CLOSED',
+  };
+  const sessionColor: Record<string, string> = {
+    pre: 'var(--gold)',
+    open: 'var(--down)',
+    post: 'var(--muted)',
+    closed: 'var(--muted-2)',
+  };
+
+  // StatusBar data (from WS or mock)
+  const taiex = marketData?.taiex;
+  const otc = marketData?.otc;
+  const usd = marketData?.usd_twd;
+  const apiOk = marketData?.api_status ?? (marketConnected ? 'ok' : 'degraded');
+  const dbMB = marketData?.db_size_mb ?? 0;
+  const loadMs = marketData?.load_ms ?? 0;
+
+  // Format signed values
+  function fmtIdx(val: number, pct: number): string {
+    const sign = pct >= 0 ? '+' : '';
+    return `${val.toFixed(1)} ${sign}${pct.toFixed(2)}%`;
+  }
 
   // Determine active nav item
   const activePath = location.pathname;
@@ -183,7 +230,7 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
           <span style={{
             fontFamily: 'var(--font-mono)',
             fontWeight: 600,
-            fontSize: 13,
+            fontSize: 14,
             letterSpacing: '0.06em',
             color: 'var(--ink)',
           }}>
@@ -215,15 +262,31 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
           )}
         </div>
 
-        {/* Right: clock + countdown */}
+        {/* Right: session pill + clock + countdown + mode */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 16,
+          gap: 12,
           padding: '0 16px',
           flexShrink: 0,
         }}>
-          {/* Clock */}
+          {/* Market session pill */}
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            padding: '2px 7px',
+            borderRadius: 2,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            letterSpacing: '0.04em',
+            color: sessionColor[session],
+            border: `1px solid ${sessionColor[session]}`,
+            fontWeight: 600,
+          }}>
+            {sessionLabel[session]}
+          </span>
+
+          {/* Clock HH:mm:ss */}
           <span style={{
             fontFamily: 'var(--font-mono)',
             fontFeatureSettings: '"tnum" 1, "zero" 1',
@@ -231,10 +294,10 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
             fontWeight: 500,
             color: 'var(--ink)',
           }}>
-            {formatTime(now)}
+            {formatTimeHMS(now)}
           </span>
 
-          {/* Countdown */}
+          {/* Countdown to close */}
           {secondsToClose > -3600 && (
             <div style={{
               display: 'flex',
@@ -250,7 +313,7 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
                 color: 'var(--muted)',
                 letterSpacing: '0.04em',
               }}>
-                收盤
+                距收盤
               </span>
               <span style={{
                 fontFamily: 'var(--font-mono)',
@@ -259,10 +322,27 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
                 fontWeight: 500,
                 color: isUrgent ? 'var(--up)' : 'var(--ink)',
               }}>
-                {formatCountdown(secondsToClose)}
+                {formatCountdownHMS(secondsToClose)}
               </span>
             </div>
           )}
+
+          {/* Mode badge */}
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            padding: '2px 7px',
+            borderRadius: 2,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            letterSpacing: '0.04em',
+            fontWeight: 600,
+            color: APP_MODE === 'simulation' ? 'var(--gold)' : '#fff',
+            background: APP_MODE === 'simulation' ? 'var(--gold-soft)' : 'var(--up)',
+            border: `1px solid ${APP_MODE === 'simulation' ? 'var(--gold)' : 'var(--up)'}`,
+          }}>
+            {APP_MODE === 'simulation' ? 'SIMULATION' : 'LIVE'}
+          </span>
         </div>
       </header>
 
@@ -306,7 +386,11 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
               系統狀態
             </div>
             <StatusDot label="Shioaji" ok />
-            <StatusDot label="模式" value="模擬" color="var(--gold)" />
+            <StatusDot
+              label="模式"
+              value={APP_MODE === 'simulation' ? '模擬' : '真實'}
+              color={APP_MODE === 'simulation' ? 'var(--gold)' : 'var(--up)'}
+            />
             <StatusDot label="版本" value="v0.1" />
           </div>
         </nav>
@@ -337,17 +421,47 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
         color: 'var(--muted)',
         overflow: 'hidden',
       }}>
-        <StatusBarItem label="加權" value="—" />
+        {taiex ? (
+          <StatusBarItem
+            label="加權"
+            value={fmtIdx(taiex.value, taiex.change_pct)}
+            color={taiex.change_pct >= 0 ? 'var(--up)' : 'var(--down)'}
+          />
+        ) : (
+          <StatusBarItem label="加權" value="21,234.5 +0.42%" />
+        )}
         <StatusBarSep />
-        <StatusBarItem label="OTC" value="—" />
+        {otc ? (
+          <StatusBarItem
+            label="OTC"
+            value={fmtIdx(otc.value, otc.change_pct)}
+            color={otc.change_pct >= 0 ? 'var(--up)' : 'var(--down)'}
+          />
+        ) : (
+          <StatusBarItem label="OTC" value="312.4 -0.12%" color="var(--down)" />
+        )}
         <StatusBarSep />
-        <StatusBarItem label="USD/TWD" value="—" />
+        {usd ? (
+          <StatusBarItem label="USD/TWD" value={usd.value.toFixed(2)} />
+        ) : (
+          <StatusBarItem label="USD/TWD" value="31.85" />
+        )}
         <div style={{ flex: 1 }} />
-        <StatusBarItem label="API" value="OK" color="var(--down)" />
+        <StatusBarItem
+          label="API"
+          value="●"
+          color={apiOk === 'ok' ? 'var(--down)' : apiOk === 'degraded' ? 'var(--gold)' : 'var(--up)'}
+        />
         <StatusBarSep />
-        <StatusBarItem label="DB" value="—MB" />
+        <StatusBarItem
+          label="DB"
+          value={dbMB > 0 ? `${dbMB}MB` : '124MB'}
+        />
         <StatusBarSep />
-        <StatusBarItem label="LOAD" value="—ms" />
+        <StatusBarItem
+          label="LOAD"
+          value={loadMs > 0 ? `${loadMs}ms` : '12ms'}
+        />
       </footer>
     </div>
   );

@@ -4,7 +4,7 @@ import Sparkline from './Sparkline';
 interface KpiProps {
   label: string;
   value: React.ReactNode;  // 可以是數字或字串
-  sub?: string;
+  sub?: React.ReactNode;
   spark?: number[];
   valueColor?: string;
 }
