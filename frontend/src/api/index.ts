@@ -3,6 +3,8 @@ import type {
   User,
   LoginResponse,
   TopNRun,
+  DeepAnalysis,
+  ReasoningTrace,
   DaytradeLive,
 } from '../types';
 
@@ -52,6 +54,31 @@ export const api = {
 
   // Predict
   getTopN: () => apiFetch<TopNRun>('/predict/today'),
+
+  getDeepAnalysis: (code: string) => apiFetch<DeepAnalysis>(`/predict/${code}`),
+
+  getReasoning: (code: string, runId?: string) =>
+    apiFetch<ReasoningTrace>(`/predict/${code}/reasoning${runId ? '?run_id=' + runId : ''}`),
+
+  approveRun: (runId: string) =>
+    apiFetch<void>('/predict/approve-all', {
+      method: 'POST',
+      body: JSON.stringify({ run_id: runId }),
+    }),
+
+  approvePick: (runId: string, code: string) =>
+    apiFetch<void>('/predict/approve', {
+      method: 'POST',
+      body: JSON.stringify({ run_id: runId, code }),
+    }),
+
+  rejectPick: (runId: string, code: string) =>
+    apiFetch<void>('/predict/reject', {
+      method: 'POST',
+      body: JSON.stringify({ run_id: runId, code }),
+    }),
+
+  runPremarket: () => apiFetch<TopNRun>('/predict/run', { method: 'POST' }),
 
   // Daytrade
   getDaytradeLive: () => apiFetch<DaytradeLive>('/daytrade/live'),
