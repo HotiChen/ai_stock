@@ -6,6 +6,9 @@ import type {
   DeepAnalysis,
   ReasoningTrace,
   DaytradeLive,
+  ChartView,
+  OrderTicket,
+  OrderResult,
 } from '../types';
 
 const BASE = '/api';
@@ -82,4 +85,23 @@ export const api = {
 
   // Daytrade
   getDaytradeLive: () => apiFetch<DaytradeLive>('/daytrade/live'),
+
+  getChartData: (code: string) => apiFetch<ChartView>(`/daytrade/${code}/chart`),
+
+  closePick: (code: string) =>
+    apiFetch<void>('/daytrade/close', { method: 'POST', body: JSON.stringify({ code }) }),
+
+  closeAll: () => apiFetch<void>('/daytrade/close-all', { method: 'POST' }),
+
+  adjustTp: (code: string, value: number) =>
+    apiFetch<void>('/daytrade/adjust-tp', { method: 'POST', body: JSON.stringify({ code, value }) }),
+
+  adjustSl: (code: string, value: number) =>
+    apiFetch<void>('/daytrade/adjust-sl', { method: 'POST', body: JSON.stringify({ code, value }) }),
+
+  previewOrder: (params: Record<string, unknown>) =>
+    apiFetch<OrderTicket>('/order/preview', { method: 'POST', body: JSON.stringify(params) }),
+
+  submitOrder: (ticket: OrderTicket) =>
+    apiFetch<OrderResult>('/order/submit', { method: 'POST', body: JSON.stringify(ticket) }),
 };
