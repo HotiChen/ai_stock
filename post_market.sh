@@ -2,8 +2,9 @@
 # post_market.sh — 每日 13:35 收盤後自動執行（排在 main.py 的 crontab 之後）
 #
 # 執行順序：
-#   1. adaptive_scorer  — 更新學習配置（勝率區間 + 最佳閾值）
-#   2. notion_reporter  — 推送今日報告到 Notion
+#   1. adaptive_scorer    — 更新學習配置（勝率區間 + 最佳閾值）
+#   2. dt_paper_trade     — 執行今日模擬倉，更新 paper_trading.db
+#   3. notion_reporter    — 推送今日報告到 Notion
 #
 # Crontab 範例（與 main.py 同用一台主機）：
 #   35 13 * * 1-5  cd /home/user/ai_stock && bash post_market.sh >> logs/post_market.log 2>&1
@@ -25,12 +26,17 @@ fi
 echo "[$(date '+%H:%M:%S')] ── 開始收盤後學習任務 ──"
 
 # 1. 更新學習配置
-echo "[$(date '+%H:%M:%S')] 步驟 1／2：更新 AI 學習配置..."
+echo "[$(date '+%H:%M:%S')] 步驟 1／3：更新 AI 學習配置..."
 python3 adaptive_scorer.py --days 90
 echo "[$(date '+%H:%M:%S')] adaptive_scorer 完成"
 
-# 2. 推送 Notion 報告
-echo "[$(date '+%H:%M:%S')] 步驟 2／2：推送報告到 Notion..."
+# 2. 執行今日模擬倉
+echo "[$(date '+%H:%M:%S')] 步驟 2／3：執行今日模擬倉..."
+python3 dt_paper_trade.py --run
+echo "[$(date '+%H:%M:%S')] dt_paper_trade 完成"
+
+# 3. 推送 Notion 報告
+echo "[$(date '+%H:%M:%S')] 步驟 3／3：推送報告到 Notion..."
 python3 notion_reporter.py
 echo "[$(date '+%H:%M:%S')] notion_reporter 完成"
 
