@@ -537,3 +537,84 @@ export interface MarketSnapshot {
   db_size_mb: number;
   load_ms: number;
 }
+
+// ============================================================
+// 05.4 週報
+// ============================================================
+
+export interface DailyDetail {
+  date: string;         // "2026-05-26"
+  weekday: string;      // "一"
+  pnl: number;
+  trades: number;
+  winrate: number;
+}
+
+export interface WeeklyReport {
+  week_label: string;   // "Week 21 · 2026"
+  narrative: string;    // AI 敘事段落
+  net_pnl: number;
+  net_pnl_pct: number;
+  winrate: number;
+  trades: number;
+  best_trade_pnl: number;
+  avg_daily_pnl: number;
+  daily_details: DailyDetail[];
+  confidence_winrate: { tier: string; winrate: number; trades: number }[];
+  sector_winrate: { sector: string; winrate: number; trades: number }[];
+  next_week_suggestions: string[];
+}
+
+// ============================================================
+// 05.5 大盤掃描
+// ============================================================
+
+export interface SectorHeat {
+  name: string;
+  count: number;
+  change_pct: number;
+  up_count: number;
+  down_count: number;
+  leaders: string[];   // code list
+}
+
+export interface NewsItem {
+  id: string;
+  source: string;
+  time: string;
+  headline: string;
+  url?: string;
+}
+
+export interface IndexData {
+  name: string;
+  value: number;
+  change: number;
+  change_pct: number;
+}
+
+export interface MarketScan {
+  indices: {
+    taiex: IndexData;
+    otc: IndexData;
+    tsmc_adr: IndexData;
+    usd_twd: IndexData;
+    vix: IndexData;
+    futures: IndexData;
+  };
+  sectors: SectorHeat[];
+  ai_signals: Pick[];
+  news: NewsItem[];
+}
+
+// ============================================================
+// 05.3 回測參數
+// ============================================================
+
+export interface BacktestParams {
+  start: string;
+  end: string;
+  strategy: string;
+  initial_capital: number;
+  slippage: number;
+}

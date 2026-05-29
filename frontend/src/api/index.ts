@@ -9,6 +9,13 @@ import type {
   ChartView,
   OrderTicket,
   OrderResult,
+  PortfolioSummary,
+  JournalEntry,
+  ChatMessage,
+  BacktestResult,
+  BacktestParams,
+  WeeklyReport,
+  MarketScan,
 } from '../types';
 
 const BASE = '/api';
@@ -104,4 +111,34 @@ export const api = {
 
   submitOrder: (ticket: OrderTicket) =>
     apiFetch<OrderResult>('/order/submit', { method: 'POST', body: JSON.stringify(ticket) }),
+
+  // Portfolio
+  getPortfolio: () => apiFetch<PortfolioSummary>('/portfolio'),
+
+  // Journal
+  getJournal: () => apiFetch<JournalEntry[]>('/journal'),
+
+  // Chat (SSE — returns raw Response, not parsed JSON)
+  sendChat: (messages: ChatMessage[]) =>
+    fetch('/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${localStorage.getItem('access_token') ?? ''}`,
+      },
+      body: JSON.stringify({ messages }),
+    }),
+
+  // Backtest
+  runBacktest: (params: BacktestParams) =>
+    apiFetch<BacktestResult>('/backtest', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  // Weekly Report
+  getWeeklyReport: () => apiFetch<WeeklyReport>('/report/weekly'),
+
+  // Scanner
+  getScanner: () => apiFetch<MarketScan>('/scanner'),
 };
