@@ -17,7 +17,8 @@ export function useWebSocket<T>(url: string, onMessage?: (data: T) => void) {
     if (!mountedRef.current) return;
 
     try {
-      const ws = new WebSocket(`ws://localhost:8000${url}`);
+      const wsBase = `ws://${window.location.hostname}:1234`;
+      const ws = new WebSocket(`${wsBase}${url}`);
       wsRef.current = ws;
 
       ws.onopen = () => {

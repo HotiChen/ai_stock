@@ -240,8 +240,8 @@ function PaperTradeTab() {
     (async () => {
       try {
         const [s, h] = await Promise.all([
-          fetch('/api/paper-trade/summary', { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()),
-          fetch('/api/paper-trade/history',  { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }).then(r => r.json()),
+          fetch('/api/paper-trade/summary', { headers: { Authorization: `Bearer ${localStorage.getItem('access_token')}` } }).then(r => r.json()),
+          fetch('/api/paper-trade/history',  { headers: { Authorization: `Bearer ${localStorage.getItem('access_token')}` } }).then(r => r.json()),
         ]);
         setSummary(s);
         setHistory(h);
