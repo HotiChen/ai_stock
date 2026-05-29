@@ -177,7 +177,7 @@ def _score_stock(closes: list[float], today_open: float) -> int:
 # ── 下載 kbars ────────────────────────────────────────────────────────────────
 
 def _fetch_kbars(api, code: str, start: str, end: str) -> list[dict]:
-    """回傳 [{date, open, high, low, close}]，依日期升序。"""
+    """回傳 [{date, open, high, low, close}]，依日期升序。相容 Shioaji 新舊版本。"""
     try:
         import pandas as pd
         contract = api.Contracts.Stocks.get(code)
@@ -185,27 +185,46 @@ def _fetch_kbars(api, code: str, start: str, end: str) -> list[dict]:
             log.warning("找不到合約：%s", code)
             return []
         kbars = api.kbars(contract, start=start, end=end)
-        if not kbars or not kbars.get("Close"):
+        if not kbars:
             return []
-        df = pd.DataFrame({**kbars})
-        # 欄位標準化
-        df.columns = [c.capitalize() for c in df.columns]
-        if "Ts" in df.columns:
-            df["date"] = pd.to_datetime(df["Ts"], unit="ns").dt.strftime("%Y-%m-%d")
+
+        # Shioaji 1.5+ 回傳 KBars 物件，直接存取屬性
+        try:
+            df = pd.DataFrame({
+                "ts":    kbars.ts,
+                "Open":  kbars.Open,
+                "High":  kbars.High,
+                "Low":   kbars.Low,
+                "Close": kbars.Close,
+            })
+        except AttributeError:
+            # 舊版：dict-like，可 unpack
+            df = pd.DataFrame({**kbars})
+            df.columns = [c.capitalize() for c in df.columns]
+            if "Ts" in df.columns:
+                df = df.rename(columns={"Ts": "ts"})
+
+        if df.empty:
+            return []
+
+        # 時間戳轉日期字串
+        if "ts" in df.columns:
+            df["date"] = pd.to_datetime(df["ts"], unit="ns").dt.strftime("%Y-%m-%d")
         elif "Date" in df.columns:
             df["date"] = df["Date"].astype(str)
         else:
             return []
+
         df = df.sort_values("date")
         result = []
         for _, row in df.iterrows():
-            result.append({
-                "date":  row["date"],
-                "open":  float(row.get("Open", 0) or 0),
-                "high":  float(row.get("High", 0) or 0),
-                "low":   float(row.get("Low",  0) or 0),
-                "close": float(row.get("Close",0) or 0),
-            })
+            o = float(row.get("Open",  0) or 0)
+            h = float(row.get("High",  0) or 0)
+            l = float(row.get("Low",   0) or 0)
+            c = float(row.get("Close", 0) or 0)
+            if o <= 0:
+                continue
+            result.append({"date": row["date"], "open": o, "high": h, "low": l, "close": c})
         return result
     except Exception as e:
         log.warning("_fetch_kbars %s 失敗：%s", code, e)
