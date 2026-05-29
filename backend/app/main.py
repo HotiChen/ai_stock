@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import auth, dashboard, predict, daytrade, order, portfolio, journal, chat, backtest, report, scanner, settings, market
+from .routers import auth, dashboard, predict, daytrade, order, portfolio, journal, chat, backtest, report, scanner, settings, market, paper_trade
 from .ws import daytrade as ws_daytrade
 from .ws import market as ws_market
 from .ws import chart as ws_chart
@@ -30,6 +30,7 @@ app.include_router(report.router)
 app.include_router(scanner.router)
 app.include_router(settings.router)
 app.include_router(market.router)
+app.include_router(paper_trade.router)
 
 # WebSocket routers
 app.include_router(ws_daytrade.router)
