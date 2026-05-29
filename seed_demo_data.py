@@ -61,14 +61,23 @@ _SL_PCT    = 0.03
 # ── 載入 .env ─────────────────────────────────────────────────────────────────
 
 def _load_env() -> None:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).parent / ".env", override=False)
+        return
+    except ImportError:
+        pass
+    # fallback: 手動解析（處理有無引號）
     env_path = Path(__file__).parent / ".env"
     if not env_path.exists():
         return
     for line in env_path.read_text().splitlines():
         line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        v = v.strip().strip('"').strip("'")
+        os.environ.setdefault(k.strip(), v)
 
 
 # ── Shioaji 登入 ──────────────────────────────────────────────────────────────
