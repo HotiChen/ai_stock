@@ -1,16 +1,13 @@
 """
 youtube_analyzer.py — 每日 YouTube 名嘴分析模組
 
-自動抓取指定頻道最新影片字幕，用 Gemini AI 分析當日觀點，
+直接將 YouTube URL 傳給 Gemini，讓 AI 自行觀看影片並分析當日觀點，
 結果存入 data/youtube_analysis.json 並推送 Telegram。
 
 用法：
     python3 youtube_analyzer.py              # 分析今天最新影片
     python3 youtube_analyzer.py --send       # 分析 + 推 Telegram
     python3 youtube_analyzer.py --days 3     # 最近 3 天的影片
-
-套件需求：
-    pip install youtube-transcript-api feedparser
 """
 from __future__ import annotations
 
@@ -36,42 +33,39 @@ CHANNELS = [
 ]
 
 _OUTPUT_PATH = "data/youtube_analysis.json"
-_TRANSCRIPT_LANGS = ["zh-TW", "zh-Hant", "zh", "en"]
 
 
-# ── RSS 取最新影片 ─────────────────────────────────────────────────────────────
+# ── yt-dlp 取最新影片清單 ─────────────────────────────────────────────────────
 
 def _get_recent_videos(channel_id: str, days: int = 1) -> list[dict]:
-    """透過 yt-dlp 取得最近 N 天的影片清單（含描述）。"""
+    """透過 yt-dlp 取得最近 N 天的影片清單。"""
     try:
-        import subprocess, json as _json
+        import subprocess
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y%m%d")
         cmd = [
             "yt-dlp",
             "--flat-playlist",
             "--no-check-certificates",
-            "--print", "%(id)s\t%(title)s\t%(description)s\t%(upload_date)s",
+            "--print", "%(id)s\t%(title)s\t%(upload_date)s",
             "--playlist-end", "10",
             f"https://www.youtube.com/channel/{channel_id}/videos",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         videos = []
         for line in result.stdout.splitlines():
-            parts = line.split("\t", 3)
+            parts = line.split("\t", 2)
             if len(parts) < 2:
                 continue
-            vid_id     = parts[0].strip()
-            title      = parts[1].strip()
-            description = parts[2].strip() if len(parts) > 2 else ""
-            upload_date = parts[3].strip() if len(parts) > 3 else ""
+            vid_id      = parts[0].strip()
+            title       = parts[1].strip()
+            upload_date = parts[2].strip() if len(parts) > 2 else ""
             if upload_date and upload_date < cutoff:
                 continue
             videos.append({
-                "video_id":    vid_id,
-                "title":       title,
-                "description": description[:1000],
-                "url":         f"https://www.youtube.com/watch?v={vid_id}",
-                "published":   upload_date,
+                "video_id":  vid_id,
+                "title":     title,
+                "url":       f"https://www.youtube.com/watch?v={vid_id}",
+                "published": upload_date,
             })
         return videos
     except Exception as e:
@@ -79,59 +73,11 @@ def _get_recent_videos(channel_id: str, days: int = 1) -> list[dict]:
         return []
 
 
-# ── 取字幕（yt-dlp 自動字幕）─────────────────────────────────────────────────
+# ── Gemini 直接分析 YouTube 影片 ──────────────────────────────────────────────
 
-def _get_transcript(video_id: str) -> str:
-    """嘗試用 yt-dlp 抓自動字幕，失敗則回傳空字串。"""
-    import subprocess, tempfile, os, glob
+_ANALYSIS_PROMPT = """你是一位台股分析師助理。請觀看這支影片，分析其中的台股投資觀點。
 
-    # 先試 youtube-transcript-api
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        segments = YouTubeTranscriptApi.get_transcript(video_id, languages=_TRANSCRIPT_LANGS)
-        text = " ".join(s["text"] for s in segments)
-        return re.sub(r"\s+", " ", text).strip()
-    except Exception:
-        pass
-
-    # 改用 yt-dlp 下載自動字幕
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cmd = [
-                "yt-dlp",
-                "--no-check-certificates",
-                "--write-auto-sub",
-                "--sub-lang", "zh-TW,zh-Hant,zh,en",
-                "--sub-format", "vtt",
-                "--skip-download",
-                "--output", os.path.join(tmpdir, "%(id)s.%(ext)s"),
-                f"https://www.youtube.com/watch?v={video_id}",
-            ]
-            subprocess.run(cmd, capture_output=True, timeout=60)
-
-            # 找 .vtt 檔案
-            vtt_files = glob.glob(os.path.join(tmpdir, "*.vtt"))
-            if not vtt_files:
-                return ""
-
-            raw = open(vtt_files[0], encoding="utf-8").read()
-            # 清除 VTT 格式標記，取純文字
-            text = re.sub(r"WEBVTT.*?\n\n", "", raw, flags=re.DOTALL)
-            text = re.sub(r"\d{2}:\d{2}:\d{2}\.\d+ --> .*\n", "", text)
-            text = re.sub(r"<[^>]+>", "", text)
-            text = re.sub(r"\n+", " ", text).strip()
-            return text[:4000]
-    except Exception as e:
-        log.info("yt-dlp 字幕失敗 %s：%s", video_id, e)
-        return ""
-
-
-# ── Gemini 分析 ───────────────────────────────────────────────────────────────
-
-_ANALYSIS_PROMPT = """
-你是一位台股分析師助理。以下是今天一位台股財經 YouTuber 的影片內容。
-
-請分析並以 JSON 格式回傳：
+請以 JSON 格式回傳：
 {{
   "sentiment": "bullish" | "bearish" | "neutral",
   "sentiment_zh": "看多" | "看空" | "中性",
@@ -145,48 +91,48 @@ _ANALYSIS_PROMPT = """
 }}
 
 影片標題：{title}
-{content_label}：
-{content}
 
 只回傳 JSON，不要其他說明。
-"""
+如果影片與台股無關，sentiment 設為 neutral，key_stocks/key_sectors 填空陣列，one_line 填「非台股相關內容」。"""
 
 
-def _analyze_with_ai(title: str, transcript: str, description: str = "") -> dict:
-    """用 Gemini 分析字幕或描述，回傳結構化結果。"""
-    if transcript:
-        content = transcript[:3000]
-        content_label = "字幕內容（前 3000 字）"
-    elif description:
-        content = description[:1000]
-        content_label = "影片描述"
-        log.info("    （無字幕，改用描述分析）")
-    else:
-        return {"error": "no_content", "one_line": "無字幕與描述，無法分析"}
-
+def _analyze_video(video_url: str, title: str) -> dict:
+    """直接把 YouTube URL 丟給 Gemini，讓它看完影片再分析。"""
     try:
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from ai_client import call_gemini_with_search, call_gemini
+        from google import genai
+        from google.genai import types
 
-        prompt = _ANALYSIS_PROMPT.format(
-            title=title,
-            content_label=content_label,
-            content=content,
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY 未設定")
+
+        client = genai.Client(api_key=api_key)
+        prompt = _ANALYSIS_PROMPT.format(title=title)
+
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=types.Content(
+                role="user",
+                parts=[
+                    types.Part(
+                        file_data=types.FileData(
+                            file_uri=video_url,
+                            mime_type="video/youtube",
+                        )
+                    ),
+                    types.Part(text=prompt),
+                ],
+            ),
         )
-        # 先試 Gemini Search（有新聞 grounding）
-        try:
-            raw = call_gemini_with_search(prompt)
-        except Exception:
-            raw = call_gemini(prompt)
 
-        # 取出 JSON
+        raw = resp.text or ""
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             return json.loads(match.group())
         return {"error": "parse_failed", "raw": raw[:200], "one_line": "AI 分析格式錯誤"}
+
     except Exception as e:
-        log.warning("AI 分析失敗：%s", e)
+        log.warning("Gemini 影片分析失敗 %s：%s", video_url, e)
         return {"error": str(e), "one_line": "AI 分析失敗"}
 
 
@@ -251,9 +197,7 @@ def _send_telegram(results: list[dict]) -> None:
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 
 def run(days: int = 1, send_telegram: bool = False) -> list[dict]:
-    """
-    分析所有頻道最近 N 天影片，回傳結果清單，並存檔。
-    """
+    """分析所有頻道最近 N 天影片，回傳結果清單，並存檔。"""
     from dotenv import load_dotenv
     load_dotenv(override=True)
 
@@ -269,22 +213,18 @@ def run(days: int = 1, send_telegram: bool = False) -> list[dict]:
             all_results.append({"channel_name": channel["name"], "videos": []})
             continue
 
-        log.info("  找到 %d 支影片", len(videos))
+        log.info("  找到 %d 支影片，交給 Gemini 逐一分析...", len(videos))
         analyzed_videos = []
 
         for v in videos:
-            log.info("  分析：%s", v["title"])
-            transcript = _get_transcript(v["video_id"])
-            analysis   = _analyze_with_ai(v["title"], transcript, v.get("description", ""))
-
-            v["transcript_len"] = len(transcript)
-            v["analysis"]       = analysis
+            log.info("  分析：%s", v["title"][:60])
+            analysis = _analyze_video(v["url"], v["title"])
+            v["analysis"] = analysis
             analyzed_videos.append(v)
 
-            # 簡易 log
             log.info("    → %s  |  %s",
                      analysis.get("sentiment_zh", "—"),
-                     analysis.get("one_line", "—")[:50])
+                     analysis.get("one_line", "—")[:60])
 
         all_results.append({
             "channel_name": channel["name"],
@@ -293,7 +233,6 @@ def run(days: int = 1, send_telegram: bool = False) -> list[dict]:
             "videos":       analyzed_videos,
         })
 
-    # 存檔
     output = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "channels": all_results,
@@ -317,6 +256,8 @@ def get_latest_summary() -> str:
         for ch in data.get("channels", []):
             for v in ch.get("videos", []):
                 a = v.get("analysis", {})
+                if a.get("one_line") in ("非台股相關內容", None, ""):
+                    continue
                 lines.append(f"・{ch['channel_name']}：{a.get('one_line', '—')}")
                 stocks = a.get("key_stocks", [])[:2]
                 for s in stocks:
@@ -328,12 +269,10 @@ def get_latest_summary() -> str:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="YouTube 名嘴每日分析")
-    parser.add_argument("--days",   type=int, default=1,           help="分析最近幾天的影片（預設 1）")
-    parser.add_argument("--send",   action="store_true",            help="推送到 Telegram")
+    parser.add_argument("--days", type=int, default=1, help="分析最近幾天的影片（預設 1）")
+    parser.add_argument("--send", action="store_true",  help="推送到 Telegram")
     args = parser.parse_args()
 
     results = run(days=args.days, send_telegram=args.send)
-
-    # 印出摘要
     print()
     print(get_latest_summary())
