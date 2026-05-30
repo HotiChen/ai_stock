@@ -23,13 +23,13 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 # ── 監控頻道清單（可新增）────────────────────────────────────────────────────
+# url 可以是 channel/videos、playlist?list=...、或 @handle
 CHANNELS = [
-    {
-        "name": "股市名嘴",
-        "channel_id": "UCuzqko_GKcj9922M1gUo__w",
-    },
-    # 新增頻道只要加一行：
-    # {"name": "XXX財經", "channel_id": "UC..."},
+    {"name": "股市名嘴",        "url": "https://www.youtube.com/channel/UCuzqko_GKcj9922M1gUo__w/videos"},
+    {"name": "EBC 東森財經",    "url": "https://www.youtube.com/@EBCmoneyshow"},
+    {"name": "財經播放清單 A1", "url": "https://www.youtube.com/playlist?list=PLVu0pIxQ7F-yvxR_dCP_zBgChK3s84b99"},
+    {"name": "財經播放清單 A2", "url": "https://www.youtube.com/playlist?list=PLVu0pIxQ7F-y5amt3ePI8nlFGLvMZtBPF"},
+    {"name": "財經播放清單 B",  "url": "https://www.youtube.com/playlist?list=PL9mUJWHev0Kl3SNj3xMRV0SkD9K2TY2HA"},
 ]
 
 _OUTPUT_PATH = "data/youtube_analysis.json"
@@ -37,8 +37,8 @@ _OUTPUT_PATH = "data/youtube_analysis.json"
 
 # ── yt-dlp 取最新影片清單 ─────────────────────────────────────────────────────
 
-def _get_recent_videos(channel_id: str, days: int = 1) -> list[dict]:
-    """透過 yt-dlp 取得最近 N 天的影片清單。"""
+def _get_recent_videos(channel_url: str, days: int = 1) -> list[dict]:
+    """透過 yt-dlp 取得最近 N 天的影片清單（支援 channel、playlist、@handle）。"""
     try:
         import subprocess
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y%m%d")
@@ -47,8 +47,8 @@ def _get_recent_videos(channel_id: str, days: int = 1) -> list[dict]:
             "--flat-playlist",
             "--no-check-certificates",
             "--print", "%(id)s\t%(title)s\t%(description)s\t%(upload_date)s",
-            "--playlist-end", "10",
-            f"https://www.youtube.com/channel/{channel_id}/videos",
+            "--playlist-end", "5",
+            channel_url,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         videos = []
@@ -234,8 +234,8 @@ def run(days: int = 1, send_telegram: bool = False) -> list[dict]:
     all_results = []
 
     for channel in CHANNELS:
-        log.info("處理頻道：%s (%s)", channel["name"], channel["channel_id"])
-        videos = _get_recent_videos(channel["channel_id"], days=days)
+        log.info("處理頻道：%s", channel["name"])
+        videos = _get_recent_videos(channel["url"], days=days)
 
         if not videos:
             log.info("  無新影片（最近 %d 天）", days)
