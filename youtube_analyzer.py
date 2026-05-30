@@ -122,14 +122,14 @@ def _get_transcript(video_id: str) -> str:
             text = re.sub(r"\n+", " ", text).strip()
             return text[:4000]
     except Exception as e:
-        log.debug("yt-dlp 字幕失敗 %s：%s", video_id, e)
+        log.info("yt-dlp 字幕失敗 %s：%s", video_id, e)
         return ""
 
 
 # ── Gemini 分析 ───────────────────────────────────────────────────────────────
 
 _ANALYSIS_PROMPT = """
-你是一位台股分析師助理。以下是今天一位台股財經 YouTuber 的影片字幕內容。
+你是一位台股分析師助理。以下是今天一位台股財經 YouTuber 的影片內容。
 
 請分析並以 JSON 格式回傳：
 {{
@@ -145,17 +145,24 @@ _ANALYSIS_PROMPT = """
 }}
 
 影片標題：{title}
-字幕內容（前 3000 字）：
-{transcript}
+{content_label}：
+{content}
 
 只回傳 JSON，不要其他說明。
 """
 
 
-def _analyze_with_ai(title: str, transcript: str) -> dict:
-    """用 Gemini 分析字幕，回傳結構化結果。"""
-    if not transcript:
-        return {"error": "no_transcript", "one_line": "無字幕，無法分析"}
+def _analyze_with_ai(title: str, transcript: str, description: str = "") -> dict:
+    """用 Gemini 分析字幕或描述，回傳結構化結果。"""
+    if transcript:
+        content = transcript[:3000]
+        content_label = "字幕內容（前 3000 字）"
+    elif description:
+        content = description[:1000]
+        content_label = "影片描述"
+        log.info("    （無字幕，改用描述分析）")
+    else:
+        return {"error": "no_content", "one_line": "無字幕與描述，無法分析"}
 
     try:
         import sys
@@ -164,7 +171,8 @@ def _analyze_with_ai(title: str, transcript: str) -> dict:
 
         prompt = _ANALYSIS_PROMPT.format(
             title=title,
-            transcript=transcript[:3000],
+            content_label=content_label,
+            content=content,
         )
         # 先試 Gemini Search（有新聞 grounding）
         try:
@@ -267,7 +275,7 @@ def run(days: int = 1, send_telegram: bool = False) -> list[dict]:
         for v in videos:
             log.info("  分析：%s", v["title"])
             transcript = _get_transcript(v["video_id"])
-            analysis   = _analyze_with_ai(v["title"], transcript)
+            analysis   = _analyze_with_ai(v["title"], transcript, v.get("description", ""))
 
             v["transcript_len"] = len(transcript)
             v["analysis"]       = analysis
