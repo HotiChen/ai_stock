@@ -42,48 +42,87 @@ _TRANSCRIPT_LANGS = ["zh-TW", "zh-Hant", "zh", "en"]
 # ── RSS 取最新影片 ─────────────────────────────────────────────────────────────
 
 def _get_recent_videos(channel_id: str, days: int = 1) -> list[dict]:
-    """透過 YouTube RSS 取得最近 N 天的影片清單。"""
+    """透過 yt-dlp 取得最近 N 天的影片清單（含描述）。"""
     try:
-        import feedparser
-        url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-        feed = feedparser.parse(url)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        import subprocess, json as _json
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y%m%d")
+        cmd = [
+            "yt-dlp",
+            "--flat-playlist",
+            "--no-check-certificates",
+            "--print", "%(id)s\t%(title)s\t%(description)s\t%(upload_date)s",
+            "--playlist-end", "10",
+            f"https://www.youtube.com/channel/{channel_id}/videos",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         videos = []
-        for entry in feed.entries:
-            published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-            if published >= cutoff:
-                videos.append({
-                    "video_id": entry.yt_videoid,
-                    "title":    entry.title,
-                    "url":      entry.link,
-                    "published": published.strftime("%Y-%m-%d %H:%M"),
-                })
+        for line in result.stdout.splitlines():
+            parts = line.split("\t", 3)
+            if len(parts) < 2:
+                continue
+            vid_id     = parts[0].strip()
+            title      = parts[1].strip()
+            description = parts[2].strip() if len(parts) > 2 else ""
+            upload_date = parts[3].strip() if len(parts) > 3 else ""
+            if upload_date and upload_date < cutoff:
+                continue
+            videos.append({
+                "video_id":    vid_id,
+                "title":       title,
+                "description": description[:1000],
+                "url":         f"https://www.youtube.com/watch?v={vid_id}",
+                "published":   upload_date,
+            })
         return videos
     except Exception as e:
-        log.warning("RSS 取影片失敗：%s", e)
+        log.warning("yt-dlp 取影片失敗：%s", e)
         return []
 
 
-# ── 取字幕 ────────────────────────────────────────────────────────────────────
+# ── 取字幕（yt-dlp 自動字幕）─────────────────────────────────────────────────
 
 def _get_transcript(video_id: str) -> str:
-    """取影片字幕，回傳純文字。"""
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound
-        try:
-            segments = YouTubeTranscriptApi.get_transcript(video_id, languages=_TRANSCRIPT_LANGS)
-        except NoTranscriptFound:
-            # 嘗試自動產生字幕
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            transcript = transcript_list.find_generated_transcript(_TRANSCRIPT_LANGS)
-            segments = transcript.fetch()
+    """嘗試用 yt-dlp 抓自動字幕，失敗則回傳空字串。"""
+    import subprocess, tempfile, os, glob
 
+    # 先試 youtube-transcript-api
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        segments = YouTubeTranscriptApi.get_transcript(video_id, languages=_TRANSCRIPT_LANGS)
         text = " ".join(s["text"] for s in segments)
-        # 清除多餘空白與換行
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
+        return re.sub(r"\s+", " ", text).strip()
+    except Exception:
+        pass
+
+    # 改用 yt-dlp 下載自動字幕
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd = [
+                "yt-dlp",
+                "--no-check-certificates",
+                "--write-auto-sub",
+                "--sub-lang", "zh-TW,zh-Hant,zh,en",
+                "--sub-format", "vtt",
+                "--skip-download",
+                "--output", os.path.join(tmpdir, "%(id)s.%(ext)s"),
+                f"https://www.youtube.com/watch?v={video_id}",
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=60)
+
+            # 找 .vtt 檔案
+            vtt_files = glob.glob(os.path.join(tmpdir, "*.vtt"))
+            if not vtt_files:
+                return ""
+
+            raw = open(vtt_files[0], encoding="utf-8").read()
+            # 清除 VTT 格式標記，取純文字
+            text = re.sub(r"WEBVTT.*?\n\n", "", raw, flags=re.DOTALL)
+            text = re.sub(r"\d{2}:\d{2}:\d{2}\.\d+ --> .*\n", "", text)
+            text = re.sub(r"<[^>]+>", "", text)
+            text = re.sub(r"\n+", " ", text).strip()
+            return text[:4000]
     except Exception as e:
-        log.warning("字幕取得失敗 %s：%s", video_id, e)
+        log.debug("yt-dlp 字幕失敗 %s：%s", video_id, e)
         return ""
 
 
