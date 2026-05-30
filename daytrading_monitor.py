@@ -10,7 +10,7 @@ daytrading_monitor.py — 當沖盤中即時監控 + 追蹤停利邏輯
   1. 跌幅 >= stop_loss_pct        → 停損出場
   2. 漲幅 >= take_profit_pct      → 漲停前天花板出場
   3. 時間 >= force_close_time     → 強制平倉（避免交割）
-  4. 峰值漲幅 >= trailing_start_pct 且峰值回落 >= trailing_stop_pct → 追蹤停利
+  4. 峰值漲幅 >= trailing_start_pct 且峰值回落 >= trailing_gap_pct → 追蹤停利
 """
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def check_trailing_stop(
     2. 漲幅 >= take_profit_pct      → 天花板停利（漲停前出場）
     3. 時間 >= force_close_time     → 強制平倉
     4. 峰值漲幅 >= trailing_start_pct
-       且峰值回落 >= trailing_stop_pct → 追蹤停利觸發
+       且峰值回落 >= trailing_gap_pct → 追蹤停利觸發
     """
     now = current_time or datetime.now()
     gain_pct = (current_price - entry_price) / entry_price * 100
@@ -132,7 +132,7 @@ def check_trailing_stop(
 
     # 4. 追蹤停利（峰值漲幅達門檻後，從峰值回落觸發）
     if peak_gain_pct >= config.trailing_start_pct:
-        if peak_drop_pct <= -config.trailing_stop_pct:
+        if peak_drop_pct <= -config.trailing_gap_pct:
             return _sell(
                 "trailing_stop",
                 f"追蹤停利：高點 +{peak_gain_pct:.2f}% → 回落 {abs(peak_drop_pct):.2f}%，"

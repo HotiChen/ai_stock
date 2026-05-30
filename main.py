@@ -1142,6 +1142,9 @@ def main() -> None:
                         "name":            p.name,
                         "target_price":    p.target_price,
                         "stop_loss_price": p.stop_loss,
+                        "entry_price":     p.entry_price,
+                        "quantity":        p.quantity,
+                        "lot_type":        p.lot_type,
                     }
                     for p in positions if p.status in ("watching", "active")
                 ]
@@ -1152,10 +1155,11 @@ def main() -> None:
                         api=api,
                         trailing_start_pct=dt_config.trailing_start_pct,
                         trailing_gap_pct=dt_config.trailing_gap_pct,
+                        auto_execute=True,
                     )
                     _dt_agent.set_watchlist(watchlist)
                     _dt_agent.start()
-                    log.info("DT tick 監控啟動，%d 個持倉", len(watchlist))
+                    log.info("DT tick 監控啟動，%d 個持倉（auto_execute=True）", len(watchlist))
             except Exception as e:
                 log.warning("DT tick 監控啟動失敗: %s", e)
             time.sleep(60)

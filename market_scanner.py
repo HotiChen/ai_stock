@@ -19,10 +19,11 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ScanCriteria:
-    min_volume:  int   = 5_000    # 最低成交量（張）
-    min_price:   float = 10.0     # 最低股價（避免地雷股）
-    max_price:   float = 5_000.0  # 最高股價（避免流動性差）
-    top_n:       int   = 20       # 進入深度分析的候選數
+    min_volume:       int   = 500      # 最低成交量（張，絕對流動性門檻）
+    min_volume_ratio: float = 1.5      # 最低量比（相對於均量的倍數）
+    min_price:        float = 10.0     # 最低股價（避免地雷股）
+    max_price:        float = 5_000.0  # 最高股價（避免流動性差）
+    top_n:            int   = 20       # 進入深度分析的候選數
 
 
 @dataclass
@@ -38,10 +39,17 @@ class ScanResult:
 # ── Scoring & screening ───────────────────────────────────────────────────────
 
 def score_snapshot(snap: dict) -> float:
-    """Composite score = abs(change_rate) × log1p(volume). Higher = more interesting."""
+    """Composite score. Higher = more interesting.
+
+    若 snapshot 有 volume_ratio 欄位：score = abs(change_rate) * volume_ratio
+    否則 fallback：score = abs(change_rate) * log1p(volume)
+    """
     import math
-    volume = snap.get("total_volume", 0)
     change = abs(snap.get("change_rate", 0.0))
+    volume_ratio = snap.get("volume_ratio")
+    if volume_ratio is not None:
+        return change * float(volume_ratio)
+    volume = snap.get("total_volume", 0)
     return change * math.log1p(max(volume, 0))
 
 
@@ -54,6 +62,10 @@ def screen_candidates(snapshots: dict[str, dict], criteria: ScanCriteria) -> lis
         if volume < criteria.min_volume:
             continue
         if price < criteria.min_price or price > criteria.max_price:
+            continue
+        # 相對量能過濾：若 snapshot 有 volume_ratio，強制比對 min_volume_ratio
+        volume_ratio = snap.get("volume_ratio")
+        if volume_ratio is not None and float(volume_ratio) < criteria.min_volume_ratio:
             continue
         row = dict(snap)
         row["code"] = code

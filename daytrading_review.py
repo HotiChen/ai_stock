@@ -19,41 +19,84 @@ log = logging.getLogger(__name__)
 _DEFAULT_DB = "data/daytrading_review.db"
 
 
-def _fetch_ohlc(code: str) -> Optional[dict]:
-    """抓今日 OHLC，失敗回 None。"""
+def _fetch_intraday_bars(code: str) -> Optional[list[dict]]:
+    """抓今日分鐘 K 線，回傳 list of {open, high, low, close} 或 None。
+
+    優先使用 yfinance 1m interval 取今日盤中資料。
+    若失敗（非今日或資料不足），fallback 回日 K 邏輯。
+    """
+    try:
+        import yfinance as yf
+        df = yf.Ticker(f"{code}.TW").history(period="1d", interval="1m")
+        if df is not None and not df.empty and len(df) >= 5:
+            bars = [
+                {
+                    "open":  float(r["Open"]),
+                    "high":  float(r["High"]),
+                    "low":   float(r["Low"]),
+                    "close": float(r["Close"]),
+                }
+                for _, r in df.iterrows()
+            ]
+            return bars
+    except Exception as e:
+        log.debug("_fetch_intraday_bars(%s) 1m failed: %s", code, e)
+
+    # Fallback：日 K 線（period="2d"，取最後一根）
     try:
         import yfinance as yf
         df = yf.Ticker(f"{code}.TW").history(period="2d")
-        if df is None or df.empty:
-            return None
-        row = df.iloc[-1]
-        return {
-            "open":  float(row["Open"]),
-            "high":  float(row["High"]),
-            "low":   float(row["Low"]),
-            "close": float(row["Close"]),
-        }
+        if df is not None and not df.empty:
+            row = df.iloc[-1]
+            return [{
+                "open":  float(row["Open"]),
+                "high":  float(row["High"]),
+                "low":   float(row["Low"]),
+                "close": float(row["Close"]),
+            }]
     except Exception as e:
-        log.debug("_fetch_ohlc(%s) failed: %s", code, e)
-        return None
+        log.debug("_fetch_intraday_bars(%s) daily fallback failed: %s", code, e)
+
+    return None
+
+
+def _ohlc_from_bars(bars: list[dict]) -> dict:
+    """從 bar 清單彙總出當日 OHLC（供複盤摘要顯示用）。"""
+    return {
+        "open":  bars[0]["open"],
+        "high":  max(b["high"]  for b in bars),
+        "low":   min(b["low"]   for b in bars),
+        "close": bars[-1]["close"],
+    }
 
 
 def _determine_outcome(
     target_price: Optional[float],
     stop_loss:    Optional[float],
-    ohlc:         dict,
+    bars: list[dict],
 ) -> tuple[str, Optional[int]]:
-    """
-    回傳 (outcome, was_correct)。
-    保守原則：若當日同時觸及目標與停損，視為停損（先跌後漲無法確認）。
-    """
-    hit_target = target_price is not None and ohlc["high"] >= target_price
-    hit_stop   = stop_loss    is not None and ohlc["low"]  <= stop_loss
+    """逐 bar 掃描，按時間順序找第一個觸及 target 或 stop 的 bar。
 
-    if hit_stop:
-        return "hit_stop", 0
-    if hit_target:
-        return "hit_target", 1
+    規則
+    ----
+    - 先碰到 high >= target_price → hit_target，was_correct = 1
+    - 先碰到 low  <= stop_loss   → hit_stop，  was_correct = 0
+    - 同一根 bar 同時觸及         → 保守視為 hit_stop（無法確認先後）
+    - 都沒碰到                    → neutral，  was_correct = None
+
+    若僅有一根日 K（fallback），保留原始保守邏輯（stop 優先）。
+    """
+    for bar in bars:
+        hit_target = target_price is not None and bar["high"] >= target_price
+        hit_stop   = stop_loss    is not None and bar["low"]  <= stop_loss
+
+        if hit_stop and hit_target:
+            return "hit_stop", 0    # 保守：同一根 bar 無法確認先後
+        if hit_stop:
+            return "hit_stop", 0
+        if hit_target:
+            return "hit_target", 1
+
     return "neutral", None
 
 
@@ -80,13 +123,14 @@ def run_daytrading_review(
     results = []
     for row in rows:
         code = row["code"]
-        ohlc = _fetch_ohlc(code)
-        if ohlc is None:
-            log.warning("review: 無法取得 %s 收盤資料，跳過", code)
+        bars = _fetch_intraday_bars(code)
+        if bars is None:
+            log.warning("review: 無法取得 %s 分鐘 K 線資料，跳過", code)
             continue
 
+        ohlc = _ohlc_from_bars(bars)
         outcome, was_correct = _determine_outcome(
-            row["target_price"], row["stop_loss"], ohlc
+            row["target_price"], row["stop_loss"], bars
         )
         review = DTReview(
             date=today, code=code,
