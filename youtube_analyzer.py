@@ -46,26 +46,28 @@ def _get_recent_videos(channel_id: str, days: int = 1) -> list[dict]:
             "yt-dlp",
             "--flat-playlist",
             "--no-check-certificates",
-            "--print", "%(id)s\t%(title)s\t%(upload_date)s",
+            "--print", "%(id)s\t%(title)s\t%(description)s\t%(upload_date)s",
             "--playlist-end", "10",
             f"https://www.youtube.com/channel/{channel_id}/videos",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         videos = []
         for line in result.stdout.splitlines():
-            parts = line.split("\t", 2)
+            parts = line.split("\t", 3)
             if len(parts) < 2:
                 continue
             vid_id      = parts[0].strip()
             title       = parts[1].strip()
-            upload_date = parts[2].strip() if len(parts) > 2 else ""
+            description = parts[2].strip() if len(parts) > 2 else ""
+            upload_date = parts[3].strip() if len(parts) > 3 else ""
             if upload_date and upload_date < cutoff:
                 continue
             videos.append({
-                "video_id":  vid_id,
-                "title":     title,
-                "url":       f"https://www.youtube.com/watch?v={vid_id}",
-                "published": upload_date,
+                "video_id":    vid_id,
+                "title":       title,
+                "description": description[:800],
+                "url":         f"https://www.youtube.com/watch?v={vid_id}",
+                "published":   upload_date,
             })
         return videos
     except Exception as e:
@@ -96,42 +98,70 @@ _ANALYSIS_PROMPT = """你是一位台股分析師助理。請觀看這支影片�
 如果影片與台股無關，sentiment 設為 neutral，key_stocks/key_sectors 填空陣列，one_line 填「非台股相關內容」。"""
 
 
-def _analyze_video(video_url: str, title: str) -> dict:
-    """直接把 YouTube URL 丟給 Gemini，讓它看完影片再分析。"""
+def _gemini_client():
+    from google import genai
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY 未設定")
+    return genai.Client(api_key=api_key)
+
+
+def _parse_gemini_json(raw: str) -> dict:
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        return json.loads(match.group())
+    return {"error": "parse_failed", "raw": raw[:200], "one_line": "AI 分析格式錯誤"}
+
+
+def _analyze_video(video_url: str, title: str, description: str = "") -> dict:
+    """直接把 YouTube URL 丟給 Gemini；影片太長時 fallback 改用描述分析。"""
+    from google.genai import types
+
+    prompt = _ANALYSIS_PROMPT.format(title=title)
+
+    # ── 嘗試直接看影片 ────────────────────────────────────────────────────────
     try:
-        from google import genai
-        from google.genai import types
-
-        api_key = os.environ.get("GEMINI_API_KEY", "")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY 未設定")
-        client = genai.Client(api_key=api_key)
-        prompt = _ANALYSIS_PROMPT.format(title=title)
-
-        resp = client.models.generate_content(
+        resp = _gemini_client().models.generate_content(
             model="gemini-2.5-flash",
             contents=types.Content(
                 role="user",
                 parts=[
-                    types.Part(
-                        file_data=types.FileData(
-                            file_uri=video_url,
-                            mime_type="video/youtube",
-                        )
-                    ),
+                    types.Part(file_data=types.FileData(
+                        file_uri=video_url, mime_type="video/youtube"
+                    )),
                     types.Part(text=prompt),
                 ],
             ),
         )
-
-        raw = resp.text or ""
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            return json.loads(match.group())
-        return {"error": "parse_failed", "raw": raw[:200], "one_line": "AI 分析格式錯誤"}
+        return _parse_gemini_json(resp.text or "")
 
     except Exception as e:
+        err = str(e)
+        # 影片超過 token 上限 → 改用描述文字
+        if "token" in err.lower() or "INVALID_ARGUMENT" in err:
+            log.info("    影片超長，改用描述分析：%s", video_url)
+            return _analyze_text(title, description)
         log.warning("Gemini 影片分析失敗 %s：%s", video_url, e)
+        return {"error": err, "one_line": "AI 分析失敗"}
+
+
+def _analyze_text(title: str, description: str) -> dict:
+    """無法直接看影片時，用標題 + 描述做純文字分析。"""
+    if not description:
+        return {"error": "no_description", "one_line": "影片過長且無描述，無法分析"}
+
+    text_prompt = (
+        _ANALYSIS_PROMPT.format(title=title)
+        + f"\n\n影片描述（替代字幕）：\n{description[:800]}"
+    )
+    try:
+        resp = _gemini_client().models.generate_content(
+            model="gemini-2.5-flash",
+            contents=text_prompt,
+        )
+        return _parse_gemini_json(resp.text or "")
+    except Exception as e:
+        log.warning("純文字分析也失敗：%s", e)
         return {"error": str(e), "one_line": "AI 分析失敗"}
 
 
@@ -217,7 +247,7 @@ def run(days: int = 1, send_telegram: bool = False) -> list[dict]:
 
         for v in videos:
             log.info("  分析：%s", v["title"][:60])
-            analysis = _analyze_video(v["url"], v["title"])
+            analysis = _analyze_video(v["url"], v["title"], v.get("description", ""))
             v["analysis"] = analysis
             analyzed_videos.append(v)
 
