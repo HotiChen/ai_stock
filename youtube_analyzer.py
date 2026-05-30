@@ -98,12 +98,17 @@ _ANALYSIS_PROMPT = """你是一位台股分析師助理。請觀看這支影片�
 如果影片與台股無關，sentiment 設為 neutral，key_stocks/key_sectors 填空陣列，one_line 填「非台股相關內容」。"""
 
 
+_gemini_singleton = None
+
 def _gemini_client():
-    from google import genai
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY 未設定")
-    return genai.Client(api_key=api_key)
+    global _gemini_singleton
+    if _gemini_singleton is None:
+        from google import genai
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY 未設定")
+        _gemini_singleton = genai.Client(api_key=api_key)
+    return _gemini_singleton
 
 
 def _parse_gemini_json(raw: str) -> dict:
@@ -257,7 +262,7 @@ def run(days: int = 1, send_telegram: bool = False) -> list[dict]:
 
         all_results.append({
             "channel_name": channel["name"],
-            "channel_id":   channel["channel_id"],
+            "channel_url":  channel["url"],
             "date":         date.today().isoformat(),
             "videos":       analyzed_videos,
         })
