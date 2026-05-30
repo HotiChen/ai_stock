@@ -99,13 +99,13 @@ _ANALYSIS_PROMPT = """你是一位台股分析師助理。請觀看這支影片�
 def _analyze_video(video_url: str, title: str) -> dict:
     """直接把 YouTube URL 丟給 Gemini，讓它看完影片再分析。"""
     try:
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        # 複用 ai_client 已初始化的 Gemini singleton
-        from ai_client import _get_gemini_client
+        from google import genai
         from google.genai import types
 
-        client = _get_gemini_client()
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY 未設定")
+        client = genai.Client(api_key=api_key)
         prompt = _ANALYSIS_PROMPT.format(title=title)
 
         resp = client.models.generate_content(
