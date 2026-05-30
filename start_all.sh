@@ -15,6 +15,11 @@ fi
 
 echo "[$(date '+%H:%M:%S')] ── 啟動 QUANT·AI 系統 ──"
 
+# ── 0. YouTube 名嘴分析（08:25 抓昨天影片）──────────────
+echo "[$(date '+%H:%M:%S')] 分析 YouTube 名嘴觀點..."
+python3 youtube_analyzer.py --send >> logs/youtube.log 2>&1 &
+echo "[$(date '+%H:%M:%S')] ✅ youtube_analyzer 執行中"
+
 # ── 1. 主系統排程（main.py）──────────────────────────────
 if pgrep -f "python3 main.py" > /dev/null 2>&1; then
   echo "[$(date '+%H:%M:%S')] main.py 已在執行，略過"
