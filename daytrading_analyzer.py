@@ -152,8 +152,8 @@ def _calc_prices_from_atr(
     公式
     ----
     stop_loss   = entry_price - 1.5 * atr
-    target_price = min(entry_price + 2.5 * atr, resistance)  若 resistance 存在
-                 = entry_price + 2.5 * atr                   若 resistance 不存在
+    target_price = min(entry_price + 2.5 * atr, resistance * 0.995)  若 resistance 存在
+                 = entry_price + 2.5 * atr                           若 resistance 不存在
 
     若 atr 不存在，回傳 (None, None)，呼叫方應保留 LLM 原值作為 fallback。
     """
@@ -163,8 +163,21 @@ def _calc_prices_from_atr(
     stop_loss    = round(entry_price - 1.5 * atr, 2)
     target_price = round(entry_price + 2.5 * atr, 2)
 
+    # 修正一：套用壓力價 cap（resistance 過低時不套用）
     if resistance is not None and resistance > 0:
-        target_price = round(min(target_price, resistance), 2)
+        capped = round(min(target_price, resistance * 0.995), 2)
+        if capped > entry_price:
+            target_price = capped
+
+    # 修正一補充：最終保證 target_price > entry_price
+    if target_price <= entry_price:
+        target_price = round(entry_price + 2.5 * atr, 2)
+
+    # 修正五：若 support 存在且合理，stop_loss 不低於 support 下方 0.5%
+    if support is not None and support > 0:
+        support_floor = round(support * 0.995, 2)
+        if stop_loss < support_floor:
+            stop_loss = support_floor
 
     return target_price, stop_loss
 
@@ -208,7 +221,7 @@ def parse_daytrading_response(
 
         # LLM 不再給 target_price / stop_loss；用 ATR 公式計算
         resistance = _float(data.get("resistance"))
-        support    = _float(data.get("support"))   # 保留供未來擴展
+        support    = _float(data.get("support"))
 
         if action == "long" and not _is_valid_entry(el, eh):
             log.debug(
@@ -229,9 +242,20 @@ def parse_daytrading_response(
         if action == "long" and indicators and eh is not None:
             atr = _float(indicators.get("ATR"))
             entry_ref = eh  # 用進場高點作為 ATR 計算基準（保守）
-            tp, sl = _calc_prices_from_atr(entry_ref, atr, resistance=resistance)
+            tp, sl = _calc_prices_from_atr(entry_ref, atr, resistance=resistance, support=support)
             if tp is None:
                 log.debug("_calc_prices_from_atr: ATR 不存在，target/stop 為 None")
+
+        # 修正二：ATR 不存在時，用固定百分比保底
+        if action == "long":
+            if sl is None and el is not None:
+                sl = round(el * 0.97, 2)
+            if tp is None and eh is not None:
+                tp = round(eh * 1.03, 2)
+
+            # 修正三：確保 stop_loss < entry_low（停損不落在進場區間內）
+            if sl is not None and el is not None and sl >= el:
+                sl = round(el * 0.97, 2)
 
         return DayTradingAnalysis(
             code=code, name=name,
