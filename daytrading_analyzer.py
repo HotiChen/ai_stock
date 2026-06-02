@@ -101,8 +101,8 @@ def build_daytrading_prompt(
 - 若不適合（評分低、籌碼差、大盤崩跌），action 填 "skip"
 - 進場時機：開盤（直接進）、拉回（等回測支撐）、突破（等突破壓力）
 - 進場區間參考現價 ± ATR / 2
-- 目標參考 VWAP + ATR 或近期壓力
-- 停損參考 VWAP 下方或近期支撐
+- price_hint 僅供參考方向（上方壓力 / 下方支撐的概念），系統會用 ATR 公式自動計算實際停損目標
+- 若有明顯技術壓力或支撐請填入 resistance / support，系統會據此修正目標價上限
 
 只回答 JSON，不要其他文字：
 {{
@@ -110,8 +110,9 @@ def build_daytrading_prompt(
   "confidence": 0到10,
   "entry_low": 進場低點或null,
   "entry_high": 進場高點或null,
-  "target_price": 目標價或null,
-  "stop_loss": 停損價或null,
+  "price_hint": "簡短說明價位方向，如「壓力在120，支撐在115」，可為null",
+  "resistance": 近期壓力價或null,
+  "support": 近期支撐價或null,
   "timing": "開盤 或 拉回 或 突破 或 觀望",
   "summary": "一到兩句話的當沖建議"
 }}"""
@@ -130,26 +131,64 @@ def _extract_json(raw: str) -> dict:
     raise ValueError("no JSON found")
 
 
-def _is_valid_long(
+def _is_valid_entry(
     entry_low: Optional[float],
     entry_high: Optional[float],
-    target_price: Optional[float],
-    stop_loss: Optional[float],
 ) -> bool:
-    """Return True iff all long price fields satisfy basic trading logic.
-
-    Rules:
-        1. All four prices must be present and > 0
-        2. entry_low <= entry_high
-        3. stop_loss < entry_low
-        4. target_price > entry_high
-    """
-    if any(v is None or v <= 0 for v in (entry_low, entry_high, target_price, stop_loss)):
+    """Return True iff entry range fields are present and logically consistent."""
+    if any(v is None or v <= 0 for v in (entry_low, entry_high)):
         return False
-    return entry_low <= entry_high and stop_loss < entry_low and target_price > entry_high
+    return entry_low <= entry_high
 
 
-def parse_daytrading_response(code: str, name: str, raw: str) -> DayTradingAnalysis:
+def _calc_prices_from_atr(
+    entry_price: float,
+    atr: Optional[float],
+    resistance: Optional[float] = None,
+    support: Optional[float] = None,
+) -> tuple[Optional[float], Optional[float]]:
+    """用 ATR 公式計算目標價與停損，取代 LLM 給的原始數字。
+
+    公式
+    ----
+    stop_loss   = entry_price - 1.5 * atr
+    target_price = min(entry_price + 2.5 * atr, resistance * 0.995)  若 resistance 存在
+                 = entry_price + 2.5 * atr                           若 resistance 不存在
+
+    若 atr 不存在，回傳 (None, None)，呼叫方應保留 LLM 原值作為 fallback。
+    """
+    if atr is None or atr <= 0:
+        return None, None
+
+    stop_loss    = round(entry_price - 1.5 * atr, 2)
+    target_price = round(entry_price + 2.5 * atr, 2)
+
+    # 修正一：套用壓力價 cap（resistance 過低時不套用）
+    if resistance is not None and resistance > 0:
+        capped = round(min(target_price, resistance * 0.995), 2)
+        if capped > entry_price:
+            target_price = capped
+
+    # 修正一補充：最終保證 target_price > entry_price
+    if target_price <= entry_price:
+        target_price = round(entry_price + 2.5 * atr, 2)
+
+    # 修正五：若 support 存在且合理，stop_loss 不低於 support 下方 0.5%
+    if support is not None and support > 0:
+        support_floor = round(support * 0.995, 2)
+        if stop_loss < support_floor:
+            stop_loss = support_floor
+
+    return target_price, stop_loss
+
+
+def parse_daytrading_response(
+    code: str,
+    name: str,
+    raw: str,
+    indicators: Optional[dict] = None,
+) -> DayTradingAnalysis:
+    """Parse LLM response; target_price / stop_loss are calculated from ATR, not LLM."""
     _skip = DayTradingAnalysis(
         code=code, name=name, action="skip", confidence=0,
         entry_low=None, entry_high=None,
@@ -179,14 +218,15 @@ def parse_daytrading_response(code: str, name: str, raw: str) -> DayTradingAnaly
 
         el = _float(data.get("entry_low"))
         eh = _float(data.get("entry_high"))
-        tp = _float(data.get("target_price"))
-        sl = _float(data.get("stop_loss"))
 
-        if action == "long" and not _is_valid_long(el, eh, tp, sl):
+        # LLM 不再給 target_price / stop_loss；用 ATR 公式計算
+        resistance = _float(data.get("resistance"))
+        support    = _float(data.get("support"))
+
+        if action == "long" and not _is_valid_entry(el, eh):
             log.debug(
-                "parse_daytrading_response: invalid long prices (%s "
-                "el=%s eh=%s tp=%s sl=%s) → skip",
-                code, el, eh, tp, sl,
+                "parse_daytrading_response: invalid entry range (%s el=%s eh=%s) → skip",
+                code, el, eh,
             )
             return DayTradingAnalysis(
                 code=code, name=name,
@@ -194,8 +234,28 @@ def parse_daytrading_response(code: str, name: str, raw: str) -> DayTradingAnaly
                 entry_low=None, entry_high=None,
                 target_price=None, stop_loss=None,
                 timing="觀望",
-                summary="AI 回傳價格區間無效，已保守跳過",
+                summary="AI 回傳進場區間無效，已保守跳過",
             )
+
+        # 用 ATR 計算目標 / 停損
+        tp, sl = None, None
+        if action == "long" and indicators and eh is not None:
+            atr = _float(indicators.get("ATR"))
+            entry_ref = eh  # 用進場高點作為 ATR 計算基準（保守）
+            tp, sl = _calc_prices_from_atr(entry_ref, atr, resistance=resistance, support=support)
+            if tp is None:
+                log.debug("_calc_prices_from_atr: ATR 不存在，target/stop 為 None")
+
+        # 修正二：ATR 不存在時，用固定百分比保底
+        if action == "long":
+            if sl is None and el is not None:
+                sl = round(el * 0.97, 2)
+            if tp is None and eh is not None:
+                tp = round(eh * 1.03, 2)
+
+            # 修正三：確保 stop_loss < entry_low（停損不落在進場區間內）
+            if sl is not None and el is not None and sl >= el:
+                sl = round(el * 0.97, 2)
 
         return DayTradingAnalysis(
             code=code, name=name,
@@ -352,7 +412,7 @@ def run_daytrading_analysis(
     try:
         prompt = build_daytrading_prompt(code, name, indicators, chip, market, dt_score)
         raw    = call_haiku(prompt)
-        return parse_daytrading_response(code, name, raw)
+        return parse_daytrading_response(code, name, raw, indicators=indicators)
     except Exception as e:
         log.warning("run_daytrading_analysis failed for %s: %s", code, e)
         return _skip

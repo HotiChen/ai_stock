@@ -35,3 +35,6 @@ antigravity-version/
 
 # Temp scripts
 check_updates.py
+
+# Claude Code agent worktrees
+.claude/worktrees/

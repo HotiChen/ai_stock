@@ -21,6 +21,8 @@ import shioaji as sj
 from shioaji.constant import QuoteType, QuoteVersion
 
 from logger import get_logger
+from executor import force_stop_loss
+from notifier import notify_price_alert
 from research_db import init_db, save_alert, mark_alert_sent
 
 log = get_logger(__name__)
@@ -163,10 +165,21 @@ class AlertWorker:
         alert_queue: queue.Queue,
         db_path: str,
         telegram_chat_id: Optional[str],
+        auto_execute: bool = False,
+        api=None,
+        watchlist: Optional[list] = None,
     ) -> None:
-        self._q              = alert_queue
-        self._db_path        = db_path
+        self._q                = alert_queue
+        self._db_path          = db_path
         self._telegram_chat_id = telegram_chat_id
+        self._auto_execute     = auto_execute
+        self._api              = api
+        # 修正六：過濾沒有 code 的 pick，避免 None 當 key
+        self._watchlist        = {
+            p["code"]: p
+            for p in (watchlist or [])
+            if p.get("code")
+        }
 
     def run(self) -> None:
         """Process alerts until poison pill (None) is received."""
@@ -176,7 +189,6 @@ class AlertWorker:
                 break
             try:
                 alert_id = save_alert(alert, self._db_path)
-                from notifier import notify_price_alert
                 notify_price_alert(
                     code=alert.get("code", ""),
                     name=alert.get("name", ""),
@@ -186,6 +198,43 @@ class AlertWorker:
                     stop_loss_price=alert.get("stop_loss_price"),
                 )
                 mark_alert_sent(alert_id, self._db_path)
+
+                # 若啟用自動執行且為停損/追蹤停利警報，直接下市價賣單
+                if (
+                    self._auto_execute
+                    and self._api is not None
+                    and alert.get("alert_type") in ("stop_loss", "trailing_stop")
+                ):
+                    code = alert.get("code", "")
+                    pick = self._watchlist.get(code, {})
+                    quantity = pick.get("quantity", 0)
+                    lot_type = pick.get("lot_type", "common")
+                    name     = pick.get("name", code)
+                    if quantity > 0:
+                        try:
+                            success = force_stop_loss(
+                                api=self._api,
+                                code=code,
+                                name=name,
+                                quantity=quantity,
+                                lot_type=lot_type,
+                            )
+                            if success:
+                                log.warning(
+                                    "AlertWorker auto-execute: 停損/追蹤停利賣出 %s qty=%d lot=%s",
+                                    code, quantity, lot_type,
+                                )
+                            else:
+                                log.error(
+                                    "AlertWorker auto-execute: force_stop_loss 失敗 %s", code,
+                                )
+                        except Exception as ex:
+                            log.error("AlertWorker auto-execute exception %s: %s", code, ex)
+                    else:
+                        log.warning(
+                            "AlertWorker auto-execute: %s quantity=0，跳過自動停損", code,
+                        )
+
             except Exception as e:
                 log.error("AlertWorker error: %s", e)
 
@@ -220,6 +269,7 @@ class MonitorAgent:
         api: Optional[sj.Shioaji] = None,
         trailing_start_pct: float = _TRAILING_START_PCT,
         trailing_gap_pct: float = _TRAILING_GAP_PCT,
+        auto_execute: bool = False,
     ) -> None:
         self._api_key              = api_key
         self._secret_key           = secret_key
@@ -228,10 +278,11 @@ class MonitorAgent:
         self._telegram_chat_id     = telegram_chat_id
         self._trailing_start_pct   = trailing_start_pct
         self._trailing_gap_pct     = trailing_gap_pct
+        self._auto_execute         = auto_execute
 
         self.running: bool              = False
         self._api: Optional[sj.Shioaji] = api
-        self._watchlist: list[dict]     = []
+        self._watchlist: dict[str, dict] = {}
         self._alert_queue: queue.Queue  = queue.Queue()
         self._worker: Optional[AlertWorker]        = None
         self._worker_thread: Optional[threading.Thread] = None
@@ -240,14 +291,24 @@ class MonitorAgent:
         init_db(db_path)
 
     def set_watchlist(self, picks: list[dict]) -> None:
-        self._watchlist = picks
+        # 修正六：過濾沒有 code 的 pick，避免 None 當 key
+        self._watchlist = {
+            p["code"]: p
+            for p in (picks or [])
+            if p.get("code")
+        }
 
     def start(self) -> None:
         if self._api is None:
             self._api = ensure_connected(self._api_key, self._secret_key, self._simulation)
         self.running = True
 
-        self._worker = AlertWorker(self._alert_queue, self._db_path, self._telegram_chat_id)
+        self._worker = AlertWorker(
+            self._alert_queue, self._db_path, self._telegram_chat_id,
+            auto_execute=self._auto_execute,
+            api=self._api,
+            watchlist=self._watchlist,
+        )
         self._worker_thread = self._worker.start_thread()
 
         if self._api is not None:
@@ -273,19 +334,17 @@ class MonitorAgent:
         @self._api.on_tick_stk_v1()
         def _on_tick(exchange, tick):
             price = float(tick.close)
-            for pick in watchlist:
-                if pick.get("code") == tick.code:
-                    alerts = check_price_alerts(
-                        tick.code, price, pick,
-                        trailing_start_pct=trailing_start,
-                        trailing_gap_pct=trailing_gap,
-                    )
-                    for a in alerts:
-                        self._alert_queue.put(a)
-                    break
+            pick = watchlist.get(tick.code)
+            if pick is not None:
+                alerts = check_price_alerts(
+                    tick.code, price, pick,
+                    trailing_start_pct=trailing_start,
+                    trailing_gap_pct=trailing_gap,
+                )
+                for a in alerts:
+                    self._alert_queue.put(a)
 
-        for pick in watchlist:
-            code = pick.get("code")
+        for code, pick in watchlist.items():
             if not code:
                 continue
             contract = self._api.Contracts.Stocks.get(code)

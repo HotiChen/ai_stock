@@ -1,0 +1,105 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap');
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+:root {
+  /* surfaces */
+  --bg: #f3efe6;
+  --surface: #fbf8f1;
+  --surface-2: #f7f3ea;
+  --panel: #ffffff;
+  --ink-bg: #14171f;
+
+  /* ink */
+  --ink: #14171f;
+  --ink-2: #2a2e3a;
+  --muted: #6b6a63;
+  --muted-2: #8c8a82;
+  --faint: #b9b5a8;
+
+  /* borders */
+  --hair: #e3ddcd;
+  --hair-2: #d2cab6;
+
+  /* TW market */
+  --up: #c8332b;
+  --up-soft: #fce8e6;
+  --down: #2e7d4f;
+  --down-soft: #e2efe6;
+  --flat: #8c8a82;
+
+  /* brand / ai */
+  --brand: #14171f;
+  --gold: #a87a2c;
+  --gold-soft: #f3e9d2;
+
+  /* dark */
+  --dark-ink: #f3efe6;
+  --dark-hair: #2b2f3a;
+  --dark-muted: #8c8e98;
+
+  /* fonts */
+  --font-ui: 'Helvetica Neue', 'Helvetica', Arial,
+             'PingFang TC', 'Microsoft JhengHei', sans-serif;
+  --font-mono: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, Menlo, monospace;
+
+  /* text sizes */
+  --text-xs:   10px;
+  --text-sm:   11px;
+  --text-base: 12px;
+  --text-md:   13px;
+  --text-lg:   14px;
+  --text-xl:   16px;
+  --text-2xl:  18px;
+  --text-3xl:  22px;
+  --text-4xl:  28px;
+  --text-5xl:  36px;
+  --text-hero: 48px;
+
+  /* spacing */
+  --space-1:   2px;
+  --space-2:   4px;
+  --space-3:   6px;
+  --space-4:   8px;
+  --space-5:  10px;
+  --space-6:  12px;
+  --space-7:  14px;
+  --space-8:  16px;
+  --space-10: 20px;
+  --space-12: 24px;
+  --space-14: 28px;
+  --space-16: 32px;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* utility classes */
+.mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1, "zero" 1;
+}
+
+.up   { color: var(--up); }
+.down { color: var(--down); }
+.flat { color: var(--flat); }
+.muted { color: var(--muted); }
