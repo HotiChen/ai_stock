@@ -333,12 +333,26 @@ def _build_top_n_run_from_picks(picks: list[Pick], plan_date: str) -> TopNRun:
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 
+def _enrich_picks_with_live_prices(picks: list[Pick]) -> None:
+    """就地更新 picks 的 last_price 為 Shioaji 即時收盤價（失敗不影響結果）。"""
+    try:
+        from ..services.shioaji_service import get_live_prices
+        codes = [p.code for p in picks]
+        live = get_live_prices(codes)
+        for p in picks:
+            price = live.get(p.code, 0)
+            if price > 0:
+                p.last_price = price
+    except Exception as e:
+        log.debug("_enrich_picks_with_live_prices skipped: %s", e)
+
+
 @router.get("/today", response_model=TopNRun)
 async def today(
     response: Response,
     current_user: User = Depends(get_current_user),
 ) -> TopNRun:
-    """讀取今日 daily_plan，組成 TopNRun。"""
+    """讀取今日 daily_plan，組成 TopNRun；並以 Shioaji 即時報價更新現價。"""
     try:
         from research_db import load_daily_plan
 
@@ -346,11 +360,14 @@ async def today(
         rows = load_daily_plan(plan_date, _DB_PATH)
         if rows:
             picks = _picks_from_db_rows(rows, f"plan-{plan_date.isoformat()}-real", plan_date.isoformat())
+            _enrich_picks_with_live_prices(picks)
             return _build_top_n_run_from_picks(picks, plan_date.isoformat())
-        # DB 有資料庫但今天沒有計畫 — 仍回 mock
+        # DB 有資料庫但今天沒有計畫 — 仍回 mock（但補即時報價）
         log.info("No daily plan for %s in DB, using mock", plan_date)
         response.headers["X-Data-Source"] = "mock"
-        return _MOCK_TOP_N_RUN
+        mock_picks = list(_MOCK_TOP_N_RUN.picks)
+        _enrich_picks_with_live_prices(mock_picks)
+        return _MOCK_TOP_N_RUN.model_copy(update={"picks": mock_picks})
     except Exception as e:
         log.warning("today() using mock: %s", e)
         response.headers["X-Data-Source"] = "mock"
@@ -498,11 +515,19 @@ async def deep_analysis(
                 if k and v
             ]
 
+            # 取 Shioaji 即時報價
+            live_price = 0.0
+            try:
+                from ..services.shioaji_service import get_live_prices
+                live_price = get_live_prices([code]).get(code, 0.0)
+            except Exception:
+                pass
+
             return DeepAnalysis(
                 code=code,
                 name=analysis.name,
                 sector=str(factors.get("theme", "未知")),
-                last=0,
+                last=live_price or 0,
                 change=0,
                 change_pct=0,
                 open=0,
