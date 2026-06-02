@@ -3,16 +3,12 @@ from __future__ import annotations
 """
 Executor: Shioaji order placement with safety guards.
 
-SIMULATION MODE ONLY until SIMULATION=false in .env.
-Every order goes through:
-  1. Duplicate check  (same code+action today)
-  2. Hard dollar limit check
-  3. Lot type selection (common vs intraday_odd)
-  4. Quantity calculation
-  5. api.place_order()
+兩個獨立開關：
+  SHIOAJI_SIMULATION — Shioaji 連線模式（true=模擬報價, false=真實報價）
+  PAPER_TRADING      — 下單模式（true=模擬下單不送券商, false=真實下單）
 
-IMPORTANT: In production mode every order must be confirmed by the user
-           via user_confirm.py before this module is called.
+預設兩者皆為 true（安全模式）。
+要看真實報價但不真實下單：SHIOAJI_SIMULATION=false, PAPER_TRADING=true
 """
 
 import os
@@ -140,12 +136,15 @@ def place_stock_order(
     price: float,
     hard_limit: float = DEFAULT_HARD_LIMIT,
     prior_orders: list[dict] | None = None,
+    paper_trading: bool | None = None,  # None = 讀 PAPER_TRADING env
 ) -> ExecutionResult:
     """
     Place a stock order through Shioaji with all safety guards applied.
     Returns ExecutionResult with success=True/False.
     """
     prior_orders = prior_orders or []
+    if paper_trading is None:
+        paper_trading = os.getenv("PAPER_TRADING", "true").lower() != "false"
     sj_action = sc.Action.Buy if action == "buy" else sc.Action.Sell
 
     def _skip(reason: str, qty: int = 0, amt: float = 0.0, lt: str = "common") -> ExecutionResult:
@@ -176,6 +175,25 @@ def place_stock_order(
     amount = quantity * price * multiplier
     if not check_hard_limit(amount, hard_limit):
         return _skip(f"超過硬性金額上限 {hard_limit:,.0f}，委託金額 {amount:,.0f}", qty=quantity, amt=amount, lt=lot_type)
+
+    # Paper trading：記錄但不送券商
+    if paper_trading:
+        log.info("[PAPER] %s %s %s %d%s @%.2f 金額%.0f（模擬下單，未送券商）",
+                 code, name, action, quantity,
+                 "張" if lot_type == "common" else "股",
+                 price, amount)
+        try:
+            from notifier import notify_order_success
+            notify_order_success(code, name, action, quantity, price, amount, lot_type, "PAPER-ORDER")
+        except Exception:
+            pass
+        return ExecutionResult(
+            code=code, name=name, action=action,
+            quantity=quantity, price=price, amount=amount,
+            lot_type=lot_type, success=True,
+            order_id=f"PAPER-{date.today().strftime('%Y%m%d')}-{code}",
+            reason="[PAPER TRADING] 模擬下單",
+        )
 
     # Place order
     try:
@@ -245,6 +263,7 @@ def force_stop_loss(
     name: str,
     quantity: int,
     lot_type: str = "common",
+    paper_trading: bool | None = None,
 ) -> bool:
     """Send a market-price sell order for stop-loss / force-close.
 
@@ -261,6 +280,13 @@ def force_stop_loss(
     Write a ``force_close_requested`` record (not a ``sell`` trade) to reflect
     the actual semantic: order submitted, fill unknown.
     """
+    if paper_trading is None:
+        paper_trading = os.getenv("PAPER_TRADING", "true").lower() != "false"
+    if paper_trading:
+        log.info("[PAPER] force_stop_loss: %s %s %d%s 市價賣出（模擬，未送券商）",
+                 code, name, quantity, "張" if lot_type == "common" else "股")
+        return True
+
     sj_lot = (
         sc.StockOrderLot.Common
         if lot_type == "common"

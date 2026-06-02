@@ -159,7 +159,7 @@ async def preview(
         risk_checks = _build_risk_checks_from_guard(code, capital)
 
         # Determine mode
-        simulation = os.getenv("SHIOAJI_SIMULATION", "true").lower() != "false"
+        simulation = os.getenv("PAPER_TRADING", "true").lower() != "false"
         mode = AppMode.SIMULATION if simulation else AppMode.LIVE
 
         # Estimate lot type
@@ -243,7 +243,7 @@ async def submit(
     # Step 3 — Execute order
     try:
         import executor
-        simulation = os.getenv("SHIOAJI_SIMULATION", "true").lower() != "false"
+        simulation = os.getenv("PAPER_TRADING", "true").lower() != "false"
         if simulation:
             # Simulation mode: record and return submitted
             return OrderResult(

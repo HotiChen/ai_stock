@@ -53,6 +53,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 CAPITAL          = float(os.getenv("BUDGET", "100000"))
 HARD_LIMIT       = float(os.getenv("ORDER_HARD_LIMIT", "150000"))
 SIMULATION       = os.getenv("SHIOAJI_SIMULATION", "true").lower() == "true"
+PAPER_TRADING    = os.getenv("PAPER_TRADING", "true").lower() != "false"
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -390,6 +391,7 @@ class MarketOpenJob:
                 price=price,
                 hard_limit=self._hard_limit,
                 prior_orders=prior_orders,
+                paper_trading=PAPER_TRADING,
             )
 
             if result.success:
@@ -579,6 +581,7 @@ class ForceCloseJob:
                 name=name,
                 quantity=quantity,
                 lot_type=lot_type,
+                paper_trading=PAPER_TRADING,
             )
 
             if success:
@@ -675,6 +678,7 @@ def _auto_buy_dt_positions(
                 budget=dt_config.budget_per_stock,
                 price=price,
                 hard_limit=HARD_LIMIT,
+                paper_trading=PAPER_TRADING,
             )
             if result.success:
                 mark_position_entered(pos_map[code], result.price, result.quantity, result.lot_type)
@@ -742,6 +746,7 @@ def _run_dt_sell_alerts(
             name=pos.name,
             quantity=pos.quantity,
             lot_type=pos.lot_type,
+            paper_trading=PAPER_TRADING,
         )
         if success:
             pos.status = "closed"
