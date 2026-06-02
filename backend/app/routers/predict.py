@@ -148,6 +148,19 @@ _MOCK_TOP_N_RUN = TopNRun(
 )
 
 
+def _deep_analysis_with_live_price(code: str) -> DeepAnalysis:
+    """Mock DeepAnalysis 補 Shioaji 即時報價（失敗回 0）。"""
+    da = _mock_deep_analysis(code)
+    try:
+        from ..services.shioaji_service import get_live_prices
+        price = get_live_prices([code]).get(code, 0.0)
+        if price > 0:
+            da = da.model_copy(update={"last": price})
+    except Exception:
+        pass
+    return da
+
+
 def _mock_deep_analysis(code: str) -> DeepAnalysis:
     name_map = {"2330": "台積電", "2454": "聯發科", "2382": "廣達"}
     name = name_map.get(code, code)
@@ -557,11 +570,11 @@ async def deep_analysis(
                 generated_at=analysis.analyzed_at.isoformat(),
             )
         response.headers["X-Data-Source"] = "mock"
-        return _mock_deep_analysis(code)
+        return _deep_analysis_with_live_price(code)
     except Exception as e:
         log.warning("deep_analysis(%s) using mock: %s", code, e)
         response.headers["X-Data-Source"] = "mock"
-        return _mock_deep_analysis(code)
+        return _deep_analysis_with_live_price(code)
 
 
 @router.post("/{code}/rerun", response_model=DeepAnalysis)
