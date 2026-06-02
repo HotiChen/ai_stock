@@ -39,13 +39,13 @@ router = APIRouter(prefix="/api/predict", tags=["predict"])
 # ── 路徑注入（讓 ai_stock 可 import）────────────────────────────────────────
 
 _AI_STOCK_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../../../")
+    os.path.join(os.path.dirname(__file__), "../../../")
 )
 if _AI_STOCK_ROOT not in sys.path:
     sys.path.insert(0, _AI_STOCK_ROOT)
 
 # 預設 DB 路徑
-_DB_PATH = os.path.join(_AI_STOCK_ROOT, "ai_stock", "data", "research.db")
+_DB_PATH = os.path.join(_AI_STOCK_ROOT, "data", "research.db")
 
 
 # ── Mock 資料（fallback）────────────────────────────────────────────────────

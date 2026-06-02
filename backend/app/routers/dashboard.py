@@ -24,13 +24,13 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 # ── 路徑注入 ────────────────────────────────────────────────────────────────
 
 _AI_STOCK_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../../../")
+    os.path.join(os.path.dirname(__file__), "../../../")
 )
 if _AI_STOCK_ROOT not in sys.path:
     sys.path.insert(0, _AI_STOCK_ROOT)
 
-_DB_PATH = os.path.join(_AI_STOCK_ROOT, "ai_stock", "data", "research.db")
-_TRACK_DIR = os.path.join(_AI_STOCK_ROOT, "ai_stock", "data", "daily_tracking")
+_DB_PATH = os.path.join(_AI_STOCK_ROOT, "data", "research.db")
+_TRACK_DIR = os.path.join(_AI_STOCK_ROOT, "data", "daily_tracking")
 
 # ── Mock 資料 ────────────────────────────────────────────────────────────────
 
