@@ -353,6 +353,8 @@ async def today(
     current_user: User = Depends(get_current_user),
 ) -> TopNRun:
     """讀取今日 daily_plan，組成 TopNRun；並以 Shioaji 即時報價更新現價。"""
+    result: TopNRun | None = None
+
     try:
         from research_db import load_daily_plan
 
@@ -361,17 +363,19 @@ async def today(
         if rows:
             picks = _picks_from_db_rows(rows, f"plan-{plan_date.isoformat()}-real", plan_date.isoformat())
             _enrich_picks_with_live_prices(picks)
-            return _build_top_n_run_from_picks(picks, plan_date.isoformat())
-        # DB 有資料庫但今天沒有計畫 — 仍回 mock（但補即時報價）
-        log.info("No daily plan for %s in DB, using mock", plan_date)
+            result = _build_top_n_run_from_picks(picks, plan_date.isoformat())
+        else:
+            log.info("No daily plan for %s in DB, using mock", plan_date)
+    except Exception as e:
+        log.warning("today() DB failed: %s", e)
+
+    if result is None:
         response.headers["X-Data-Source"] = "mock"
         mock_picks = list(_MOCK_TOP_N_RUN.picks)
         _enrich_picks_with_live_prices(mock_picks)
-        return _MOCK_TOP_N_RUN.model_copy(update={"picks": mock_picks})
-    except Exception as e:
-        log.warning("today() using mock: %s", e)
-        response.headers["X-Data-Source"] = "mock"
-        return _MOCK_TOP_N_RUN
+        result = _MOCK_TOP_N_RUN.model_copy(update={"picks": mock_picks})
+
+    return result
 
 
 @router.get("/run/{run_id}", response_model=TopNRun)
