@@ -1052,6 +1052,7 @@ def main() -> None:
     monitor: Optional[MonitorAgent] = None
     approved_picks: list[dict] = []
     _dt_agent = None   # MonitorAgent（tick 訂閱，09:05 下單後啟動）
+    _fired_today: set[str] = set()  # 防止同一 job 在同一天重複執行
 
     while _RUNNING:
         now = datetime.now()
@@ -1060,11 +1061,15 @@ def main() -> None:
             continue
 
         t = now.time()
+        today_prefix = now.strftime("%Y-%m-%d")
 
         from halt import is_halted
         if is_halted():
             time.sleep(30)
             continue
+
+        # 跨日清除已執行紀錄
+        _fired_today = {k for k in _fired_today if k.startswith(today_prefix)}
 
         # ── 13:15 停止 tick 訂閱 ────────────────────────────────────────
         if t >= _DT_MON_END and _dt_agent is not None:
@@ -1073,7 +1078,7 @@ def main() -> None:
             log.info("DT tick monitor stopped at 13:15")
 
         # 08:30 pre-market：波段選股 + 當沖預測報告（同時推播 Telegram）
-        if t.hour == 8 and t.minute == 30:
+        if t.hour == 8 and t.minute == 30 and f"{today_prefix}-0830" not in _fired_today:
             # 波段選股（原有邏輯）
             job = PremarketJob(
                 candidates=None,
@@ -1095,10 +1100,11 @@ def main() -> None:
             except Exception as e:
                 log.warning("DayTrading report push failed: %s", e)
 
+            _fired_today.add(f"{today_prefix}-0830")
             time.sleep(60)
 
         # 09:00 market open
-        elif t.hour == 9 and t.minute == 0:
+        elif t.hour == 9 and t.minute == 0 and f"{today_prefix}-0900" not in _fired_today:
             notify_market_open()
             if api and approved_picks:
                 job = MarketOpenJob(
@@ -1110,14 +1116,29 @@ def main() -> None:
                     prior_orders=None,
                 )
                 monitor = job.run()
+            _fired_today.add(f"{today_prefix}-0900")
             time.sleep(60)
 
         # 09:05 開盤確認：量能/方向 OK → 保留 watching；不符合 → skipped
-        elif t.hour == 9 and t.minute == 5:
+        elif t.hour == 9 and t.minute == 5 and f"{today_prefix}-0905" not in _fired_today:
+            # 先傳 Shioaji 連線狀態
+            try:
+                if TELEGRAM_CHAT_ID:
+                    from telegram_bot import send_text
+                    sj_ok = api is not None
+                    sj_mode = "模擬" if SIMULATION else "真實"
+                    sj_status = f"✅ 已連線（{sj_mode}模式）" if sj_ok else "❌ 未連線（報價可能為 0.0）"
+                    send_text(TELEGRAM_CHAT_ID,
+                        f"🔌 <b>Shioaji 連線狀態</b>\n{sj_status}\n"
+                        f"SHIOAJI_SIMULATION={SIMULATION}\nPAPER_TRADING={PAPER_TRADING}")
+            except Exception as e:
+                log.warning("Shioaji 狀態通知失敗: %s", e)
+
             try:
                 _opening_confirm_dt_positions(api, dt_config)
             except Exception as e:
                 log.warning("DT 開盤確認失敗: %s", e)
+            _fired_today.add(f"{today_prefix}-0905")
             time.sleep(60)
 
         # 09:10 當沖下單進場（第一波）+ 啟動 tick 監控
