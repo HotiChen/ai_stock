@@ -47,6 +47,7 @@ def build_daytrading_prompt(
     chip: Optional[dict],
     market: Optional[dict],
     dt_score: int,
+    extra_context: str = "",
 ) -> str:
     # ── 技術指標 ──
     if indicators:
@@ -92,6 +93,8 @@ def build_daytrading_prompt(
     except Exception:
         persona = "你是一位台股當沖交易專家。"
 
+    extra_section = f"\n\n【Gemini 補充資料】\n{extra_context}" if extra_context else ""
+
     return f"""{persona}
 
 ---
@@ -104,7 +107,7 @@ def build_daytrading_prompt(
 {chip_text}
 
 【大盤方向】
-{market_text}
+{market_text}{extra_section}
 
 ---
 請依鐵律與分析框架判斷今日是否做多，只回傳 JSON，不要其他文字：
@@ -421,6 +424,7 @@ def run_daytrading_analysis(
     chip: Optional[dict],
     market: Optional[dict],
     dt_score: int,
+    extra_context: str = "",
 ) -> DayTradingAnalysis:
     """呼叫 Haiku 做當沖 AI 分析。dt_score < 4 直接回傳 skip，節省 API 成本。"""
     _skip = DayTradingAnalysis(
@@ -434,8 +438,11 @@ def run_daytrading_analysis(
         return _skip
 
     try:
-        prompt = build_daytrading_prompt(code, name, indicators, chip, market, dt_score)
-        raw    = call_haiku(prompt)
+        prompt = build_daytrading_prompt(
+            code, name, indicators, chip, market, dt_score,
+            extra_context=extra_context,
+        )
+        raw = call_haiku(prompt)
         return parse_daytrading_response(code, name, raw, indicators=indicators)
     except Exception as e:
         log.warning("run_daytrading_analysis failed for %s: %s", code, e)

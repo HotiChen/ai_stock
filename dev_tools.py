@@ -654,6 +654,206 @@ def cmd_full(target_date: date | None = None) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 9. loop — iterative refinement
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def cmd_loop(
+    max_iterations: int = 3,
+    quality_threshold: int = 8,
+    top_n: int = 5,
+    send_telegram: bool = False,
+) -> None:
+    """
+    迭代精煉迴圈：
+      1. 掃描候選股，老薑初次分析
+      2. 品質 < threshold → Gemini 補充缺失資料
+      3. 老薑帶著補充資料重新分析
+      4. 重複直到達標或 max_iterations 次
+      5. 輸出最終結果（可選發 Telegram）
+    """
+    _sep(f"迭代精煉迴圈  (max={max_iterations} 輪, 目標品質≥{quality_threshold})")
+
+    from daytrading_report import (
+        _get_stock_universe, _fetch_market, _fetch_chip_data,
+        _get_indicators, _MIN_DT_SCORE,
+    )
+    from stock_query import _assess_day_trading
+    from daytrading_analyzer import run_daytrading_analysis, DayTradingAnalysis
+    from super_trader import save_daily_feedback, make_feedback, _item_to_gemini_prompt
+    from ai_client import call_gemini_with_search
+
+    # ── Step 1: Shioaji + 掃描候選股 ─────────────────────────────────────────
+    print("  ⏳ 連接 Shioaji...")
+    api, err = _connect_shioaji()
+    if err:
+        print(f"  ⚠️  {err} → TWSE fallback")
+
+    print(f"  📊 掃描全市場候選股（取前 {top_n} 名）...")
+    universe = _get_stock_universe(api, top_n=50)
+    market   = _fetch_market()
+    today_str = date.today().strftime("%Y%m%d")
+    chip_all  = _fetch_chip_data(today_str)
+
+    # Score all stocks, take top_n
+    scored = []
+    for pick in universe:
+        code = pick["code"]
+        ind  = _get_indicators(code, api)
+        chip = chip_all.get(code)
+        assessment = _assess_day_trading(ind, chip=chip, market=market)
+        dt_score   = assessment.get("score", 0)
+        if assessment.get("data_ok", True) and dt_score >= _MIN_DT_SCORE:
+            scored.append({**pick, "dt_score": dt_score, "indicators": ind, "chip": chip})
+
+    scored.sort(key=lambda x: x["dt_score"], reverse=True)
+    targets = scored[:top_n]
+    print(f"  → 篩選出 {len(targets)} 支候選股（評分≥{_MIN_DT_SCORE}）")
+    for t in targets:
+        print(f"     {t['code']} {t.get('name',''):<6}  技術評分={t['dt_score']}/10")
+
+    if not targets:
+        print("  ❌ 無符合條件的候選股，結束")
+        return
+
+    # ── Step 2: Iterative analysis ────────────────────────────────────────────
+    extra_context: dict[str, str] = {}   # code → accumulated Gemini text
+    analyses:      dict[str, DayTradingAnalysis] = {}
+
+    for iteration in range(1, max_iterations + 1):
+        _sep(f"迭代 {iteration}/{max_iterations}")
+
+        for t in targets:
+            code = t["code"]
+            name = t.get("name", code)
+            ctx  = extra_context.get(code, "")
+
+            analysis = run_daytrading_analysis(
+                code=code, name=name,
+                indicators=t["indicators"],
+                chip=t["chip"],
+                market=market,
+                dt_score=t["dt_score"],
+                extra_context=ctx,
+            )
+            analyses[code] = analysis
+
+            score = analysis.data_quality_score
+            icon  = "✅" if score >= quality_threshold else ("⚠️" if score >= 6 else "❌")
+            print(
+                f"  {icon} {code} {name:<6}  "
+                f"決策={analysis.action:<4}  "
+                f"信心={analysis.confidence}/10  "
+                f"品質={score}/10"
+            )
+            if analysis.summary:
+                print(f"       老薑: {analysis.summary}")
+            if analysis.missing_data:
+                print(f"       缺: {', '.join(analysis.missing_data[:3])}")
+
+        # Check average quality
+        avg_q = (
+            sum(a.data_quality_score for a in analyses.values()) / len(analyses)
+            if analyses else 0
+        )
+        print(f"\n  平均品質: {avg_q:.1f}/10 (目標: {quality_threshold})")
+
+        if avg_q >= quality_threshold:
+            print("  ✅ 達到品質目標，提前結束迴圈")
+            break
+
+        if iteration == max_iterations:
+            print(f"  ℹ️  已達最大迭代次數 ({max_iterations})")
+            break
+
+        # ── Gemini 補充缺失資料 ────────────────────────────────────────────
+        print(f"\n  🔍 Gemini 補充缺失資料（迭代 {iteration+1} 用）...")
+        for t in targets:
+            code = t["code"]
+            name = t.get("name", code)
+            a    = analyses.get(code)
+            if not a or a.data_quality_score >= quality_threshold:
+                continue
+            if not a.missing_data:
+                continue
+
+            fetched_parts: list[str] = []
+            for item in a.missing_data[:3]:
+                gemini_prompt = (
+                    _item_to_gemini_prompt(item)
+                    + f"\n查詢對象股票：{code} {name}"
+                )
+                print(f"     Gemini 查詢 [{code}]: {item}")
+                try:
+                    result = call_gemini_with_search(gemini_prompt)
+                    if result:
+                        fetched_parts.append(f"[{item}]\n{result[:600]}")
+                        print(f"       → 取得 {len(result)} 字")
+                    else:
+                        print("       → 無結果")
+                except Exception as e:
+                    print(f"       → 失敗: {e}")
+
+            if fetched_parts:
+                extra_context[code] = (
+                    (extra_context.get(code, "") + "\n\n").lstrip()
+                    + "\n\n".join(fetched_parts)
+                )
+
+    # ── Step 3: Save feedback + final report ─────────────────────────────────
+    _sep("最終結果")
+    long_picks = [a for a in analyses.values() if a.action == "long"]
+    skip_picks = [a for a in analyses.values() if a.action == "skip"]
+
+    print(f"  決定進場: {len(long_picks)} 支")
+    for a in long_picks:
+        entry = (f"{a.entry_low:,.1f}–{a.entry_high:,.1f}"
+                 if a.entry_low and a.entry_high else "—")
+        print(
+            f"    ✅ {a.code} {a.name:<6}  "
+            f"信心={a.confidence}/10  進場={entry}  "
+            f"目標={a.target_price or '—'}  停損={a.stop_loss or '—'}"
+        )
+        print(f"       {a.summary}")
+
+    print(f"\n  決定放棄: {len(skip_picks)} 支")
+    for a in skip_picks:
+        print(f"    ❌ {a.code} {a.name:<6}  {a.summary}")
+
+    # Save feedback for tomorrow's Gemini
+    feedbacks = [
+        make_feedback(code=a.code, name=a.name,
+                      score=a.data_quality_score, missing=a.missing_data)
+        for a in analyses.values()
+    ]
+    save_daily_feedback(feedbacks)
+    print(f"\n  💾 老薑回饋已儲存 → 明日 Gemini 晨報自動補充")
+
+    # Telegram
+    if send_telegram and _CHAT_ID and long_picks:
+        try:
+            from telegram_bot import send_text
+            lines = ["⚡ <b>老薑迭代分析結果</b>", ""]
+            for a in long_picks:
+                entry = (f"{a.entry_low:,.1f}–{a.entry_high:,.1f}"
+                         if a.entry_low and a.entry_high else "—")
+                lines.append(
+                    f"✅ <b>{a.code} {a.name}</b>  信心={a.confidence}/10\n"
+                    f"   進場 {entry}  目標 {a.target_price or '—'}  停損 {a.stop_loss or '—'}\n"
+                    f"   <i>{a.summary}</i>"
+                )
+            send_text(_CHAT_ID, "\n".join(lines))
+            print("  ✅ 已發送 Telegram")
+        except Exception as e:
+            print(f"  ⚠️  Telegram 失敗: {e}")
+
+    if api:
+        try:
+            api.logout()
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -690,6 +890,12 @@ def main() -> None:
     p_fu = sub.add_parser("full", help="完整流程：morning → review → telegram")
     p_fu.add_argument("date", nargs="?", help="YYYY-MM-DD (預設今天)")
 
+    p_lp = sub.add_parser("loop", help="迭代精煉：老薑分析 → Gemini 補充 → 重分析（自動收斂）")
+    p_lp.add_argument("--iterations", type=int, default=3, help="最多迭代次數 (預設 3)")
+    p_lp.add_argument("--quality", type=int, default=8, help="品質目標 0-10 (預設 8)")
+    p_lp.add_argument("--top", type=int, default=5, help="分析前幾名候選股 (預設 5)")
+    p_lp.add_argument("--telegram", action="store_true", help="完成後發 Telegram")
+
     args = parser.parse_args()
 
     if args.cmd == "shioaji":
@@ -710,6 +916,13 @@ def main() -> None:
         cmd_db(_parse_date(getattr(args, "date", None)))
     elif args.cmd == "full":
         cmd_full(_parse_date(getattr(args, "date", None)))
+    elif args.cmd == "loop":
+        cmd_loop(
+            max_iterations=args.iterations,
+            quality_threshold=args.quality,
+            top_n=args.top,
+            send_telegram=args.telegram,
+        )
 
 
 if __name__ == "__main__":
