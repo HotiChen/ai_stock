@@ -312,6 +312,21 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
     except Exception as e:
         log.warning("save_predictions failed: %s", e)
 
+    # 8d. 老薑回饋：儲存今日資料缺口，供明日 Gemini 晨報補充
+    try:
+        from super_trader import save_daily_feedback, make_feedback
+        feedbacks = [
+            make_feedback(
+                code=r["code"], name=r["name"],
+                score=ai_map[r["code"]].data_quality_score if r["code"] in ai_map else 5,
+                missing=ai_map[r["code"]].missing_data if r["code"] in ai_map else [],
+            )
+            for r in qualified[:8]
+        ]
+        save_daily_feedback(feedbacks)
+    except Exception as e:
+        log.warning("super_trader.save_daily_feedback failed: %s", e)
+
     # 9. 組合報告
     lines = [
         "⚡ <b>今日當沖預測</b>",
