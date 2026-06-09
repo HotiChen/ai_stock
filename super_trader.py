@@ -164,3 +164,196 @@ def _item_to_gemini_prompt(item: str) -> str:
 def make_feedback(code: str, name: str, score: int, missing: list[str]) -> _AnalysisFeedback:
     return _AnalysisFeedback(code=code, name=name,
                              data_quality_score=score, missing_data=missing)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 收盤後老薑檢討
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_postmarket_review(
+    db_path: str = "data/daytrading_review.db",
+    today: Optional[str] = None,
+) -> str:
+    """
+    收盤後讓老薑檢討今日預測結果，找出「哪筆錯了、缺什麼資料」，
+    生成 Gemini 明日補充請求，存入 data/trader_feedback/。
+
+    回傳 Telegram HTML 摘要（可直接發送）。
+    """
+    import re as _re
+    from daytrading_db import DaytradingDB
+    from ai_client import call_sonnet
+
+    if today is None:
+        today = date.today().isoformat()
+
+    # 讀取今日已複盤的預測結果
+    db   = DaytradingDB(db_path)
+    rows = db.get_predictions(today)
+    reviewed = [r for r in rows if r["outcome"] is not None]
+
+    if not reviewed:
+        log.info("run_postmarket_review: 今日無已複盤記錄，跳過")
+        return ""
+
+    # 已執行過（ai_commentary 都填了）→ 不重複跑
+    if all(r["ai_commentary"] for r in reviewed):
+        log.info("run_postmarket_review: 今日已完成，跳過")
+        return ""
+
+    # ── 組成老薑檢討 prompt ───────────────────────────────────────────────────
+    stats = db.win_rate_summary(days=30)
+    win_rate_today = (
+        sum(1 for r in reviewed if r["was_correct"] == 1) / len(reviewed)
+        if reviewed else 0
+    )
+
+    cases = []
+    for r in reviewed:
+        outcome_zh = {"hit_target": "✅達目標", "hit_stop": "❌觸停損", "neutral": "⬜未觸發"}
+        cases.append(
+            f"  {r['code']} {r['name']} (評分{r['dt_score']}/10)\n"
+            f"  預測: {r['action']} 進場{r['entry_low']}–{r['entry_high']} "
+            f"目標{r['target_price']} 停損{r['stop_loss']}\n"
+            f"  AI當時判斷: {r['ai_summary']}\n"
+            f"  實際: {outcome_zh.get(r['outcome'], r['outcome'])} "
+            f"最高{r['daily_high']} 最低{r['daily_low']} 收{r['daily_close']}"
+        )
+
+    prompt = f"""你是「老薑」，今天 ({today}) 做了 {len(reviewed)} 筆當沖預測，結果如下：
+
+{chr(10).join(cases)}
+
+今日勝率：{win_rate_today:.0%}
+近 30 日勝率：{stats['win_rate']*100:.1f}% ({stats['total']} 筆)
+
+## 你的任務：收盤後誠實檢討
+
+### Part 1 — 逐筆分析
+對每筆預測（尤其是 hit_stop 和 neutral）：
+- what_went_wrong: 老實說這筆為什麼錯了或沒進場（一句話，要有具體原因）
+- missing_data: 如果當時有哪些資料，你的判斷會不同？（具體說）
+- lesson: 這筆學到什麼
+
+### Part 2 — 給 Gemini 的補充請求
+根據今日所有缺失，列出明天晨報 Gemini 應優先補充的資料（按重要性排序）：
+- 每項要具體（不要說「更多資料」，要說「台積電融資使用率%」）
+- 附上 Gemini 可直接執行的查詢指令
+
+### Part 3 — 整體評估
+- 今日勝率合理嗎？哪個環節最需要改善？
+- 一句話給明天的自己
+
+只回傳 JSON：
+{{
+  "reviews": [
+    {{
+      "code": "代號",
+      "outcome": "hit_target|hit_stop|neutral",
+      "what_went_wrong": "具體原因或null",
+      "missing_data": ["缺少項目"],
+      "lesson": "這筆學到什麼"
+    }}
+  ],
+  "gemini_priorities": [
+    {{
+      "item": "具體資料名稱",
+      "importance": "高|中|低",
+      "prompt": "Gemini 可直接執行的查詢指令"
+    }}
+  ],
+  "win_rate_today": {win_rate_today:.2f},
+  "overall_assessment": "整體評估一句話",
+  "note_to_tomorrow_self": "給明天自己的話"
+}}"""
+
+    log.info("run_postmarket_review: 呼叫老薑檢討 %d 筆...", len(reviewed))
+    raw = call_sonnet(prompt, max_tokens=4096)
+    if not raw:
+        log.warning("run_postmarket_review: Claude 回應為空")
+        return ""
+
+    # 解析 JSON
+    result: dict = {}
+    try:
+        m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+        result = json.loads(m.group()) if m else {}
+    except Exception as e:
+        log.warning("run_postmarket_review: JSON 解析失敗: %s", e)
+        result = {"raw": raw}
+
+    result["date"]         = today
+    result["generated_at"] = datetime.now().isoformat()
+
+    # ── 回填 ai_commentary 到 DB ─────────────────────────────────────────────
+    for rev in result.get("reviews", []):
+        code = rev.get("code", "")
+        commentary = f"{rev.get('what_went_wrong','') or ''} | {rev.get('lesson','') or ''}".strip(" |")
+        if commentary and code:
+            try:
+                # Re-use save_review with just commentary update (find matching row)
+                with __import__("sqlite3").connect(db_path) as conn:
+                    conn.execute(
+                        "UPDATE dt_prediction_log SET ai_commentary=? WHERE date=? AND code=?",
+                        (commentary, today, code),
+                    )
+            except Exception as e:
+                log.debug("update ai_commentary failed for %s: %s", code, e)
+
+    # ── 存回饋檔（合併或建立）───────────────────────────────────────────────
+    _FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+    fb_path = _FEEDBACK_DIR / f"{today}.json"
+
+    existing: dict = {}
+    if fb_path.exists():
+        try:
+            existing = json.loads(fb_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # 合併：用 postmarket 的 gemini_priorities 蓋掉或補充 morning 的
+    existing["postmarket_review"]       = result
+    existing["gemini_supplement_prompts"] = [
+        {"item": p["item"], "prompt": p["prompt"]}
+        for p in result.get("gemini_priorities", [])
+    ]
+    existing["date"]         = today
+    existing["generated_at"] = datetime.now().isoformat()
+
+    fb_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    log.info(
+        "run_postmarket_review: 回饋已儲存 [%s] win_rate=%.0f%% gemini_items=%d",
+        today, win_rate_today * 100,
+        len(result.get("gemini_priorities", [])),
+    )
+
+    # ── Telegram 摘要 ────────────────────────────────────────────────────────
+    wins     = sum(1 for r in reviewed if r["was_correct"] == 1)
+    losses   = sum(1 for r in reviewed if r["was_correct"] == 0)
+    note     = result.get("note_to_tomorrow_self", "")
+    assess   = result.get("overall_assessment", "")
+    lines = [
+        f"🧓 <b>老薑收盤檢討 [{today}]</b>",
+        f"今日勝率 {wins}/{len(reviewed)} ({win_rate_today:.0%})　近30日 {stats['win_rate']*100:.1f}%",
+        "",
+    ]
+
+    for rev in result.get("reviews", []):
+        icon = {"hit_target": "✅", "hit_stop": "❌", "neutral": "⬜"}.get(rev.get("outcome",""), "•")
+        lines.append(f"{icon} <b>{rev.get('code')}</b>: {rev.get('what_went_wrong') or '—'}")
+        for m_item in rev.get("missing_data", [])[:2]:
+            lines.append(f"   缺: {m_item}")
+
+    if result.get("gemini_priorities"):
+        lines.append("")
+        lines.append("📝 <b>明日 Gemini 補充</b>")
+        for p in result["gemini_priorities"][:4]:
+            imp = {"高": "🔴", "中": "🟡", "低": "⚪"}.get(p.get("importance",""), "•")
+            lines.append(f"  {imp} {p.get('item')}")
+
+    if assess:
+        lines.append(f"\n<i>{assess}</i>")
+    if note:
+        lines.append(f"<i>給明天的自己：{note}</i>")
+
+    return "\n".join(lines)

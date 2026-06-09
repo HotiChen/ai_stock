@@ -890,6 +890,10 @@ def main() -> None:
     p_fu = sub.add_parser("full", help="完整流程：morning → review → telegram")
     p_fu.add_argument("date", nargs="?", help="YYYY-MM-DD (預設今天)")
 
+    p_pm = sub.add_parser("postmarket", help="老薑收盤檢討：分析預測結果 + 生成 Gemini 改善建議")
+    p_pm.add_argument("date", nargs="?", help="YYYY-MM-DD (預設今天)")
+    p_pm.add_argument("--telegram", action="store_true", help="發送結果到 Telegram")
+
     p_lp = sub.add_parser("loop", help="迭代精煉：老薑分析 → Gemini 補充 → 重分析（自動收斂）")
     p_lp.add_argument("--iterations", type=int, default=3, help="最多迭代次數 (預設 3)")
     p_lp.add_argument("--quality", type=int, default=8, help="品質目標 0-10 (預設 8)")
@@ -916,6 +920,17 @@ def main() -> None:
         cmd_db(_parse_date(getattr(args, "date", None)))
     elif args.cmd == "full":
         cmd_full(_parse_date(getattr(args, "date", None)))
+    elif args.cmd == "postmarket":
+        from super_trader import run_postmarket_review
+        msg = run_postmarket_review(today=getattr(args, "date", None))
+        if msg:
+            print(re.sub(r"<[^>]+>", "", msg))
+            if args.telegram and _CHAT_ID:
+                from telegram_bot import send_text
+                send_text(_CHAT_ID, msg)
+                print("✅ 已發送 Telegram")
+        else:
+            print("無複盤資料（今日預測尚未有結果，或已執行過）")
     elif args.cmd == "loop":
         cmd_loop(
             max_iterations=args.iterations,
