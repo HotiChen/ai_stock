@@ -18,7 +18,7 @@ import uuid
 from datetime import date, datetime, timezone, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel
 
 from ..deps import get_current_user
@@ -31,6 +31,12 @@ from ..services import order_confirm
 
 class ConfirmRequest(BaseModel):
     confirmed: bool = False
+
+
+class ConfirmByCodeRequest(BaseModel):
+    code: str
+    confirmed: bool = False
+
 
 router = APIRouter(prefix="/api/order", tags=["order"])
 
@@ -321,45 +327,34 @@ async def submit(
     )
 
 
-@router.post("/{order_id}/confirm", response_model=OrderResult)
-async def confirm(
-    order_id: str,
-    body: ConfirmRequest,
-    current_user: User = Depends(get_current_user),
-) -> OrderResult:
+def _reject_order(order_id: str, tg_msg_id: str | None) -> OrderResult:
+    """Shared rejection path: mark a pending order rejected (executor never called).
+
+    Raises 409 if the order is already in a non-rejectable terminal state.
+    Used by both the JWT /confirm endpoint and the Telegram-bridge endpoint.
     """
-    POST /api/order/{order_id}/confirm { confirmed } → OrderResult
-
-    Web-side approval path (JWT-protected). Replaces the previous mock
-    /confirm-telegram endpoint.
-
-    - confirmed=false → reject (executor never called)
-    - confirmed=true  → atomically claim execution slot, then execute once.
-      Timeout → 410 Gone (expired). Already-terminal → idempotent (409 / prior result).
-    """
-    rec = order_confirm.get_order(order_id)
-    if rec is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此委託")
-
-    tg_msg_id = rec.telegram_message_id
-
-    # Rejection path.
-    if not body.confirmed:
-        rejected = order_confirm.reject_order(order_id)
-        if rejected and rejected.state not in ("rejected", "pending_confirmation"):
-            # Already terminal (confirmed/expired/failed) — cannot reject now.
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"委託已處於 {rejected.state} 狀態，無法拒絕。",
-            )
-        return OrderResult(
-            order_id=order_id,
-            status="rejected",
-            rejection_reason="使用者拒絕下單",
-            telegram_message_id=tg_msg_id,
+    rejected = order_confirm.reject_order(order_id)
+    if rejected and rejected.state not in ("rejected", "pending_confirmation"):
+        # Already terminal (confirmed/expired/failed) — cannot reject now.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"委託已處於 {rejected.state} 狀態，無法拒絕。",
         )
+    return OrderResult(
+        order_id=order_id,
+        status="rejected",
+        rejection_reason="使用者拒絕下單",
+        telegram_message_id=tg_msg_id,
+    )
 
-    # Confirmation path — atomically decide whether we may execute.
+
+def _confirm_and_execute(order_id: str, ticket: OrderTicket, tg_msg_id: str | None) -> OrderResult:
+    """Shared confirmation path: atomically claim the single execution slot, then
+    execute exactly once.
+
+    Timeout → 410 Gone (expired). Already-terminal → idempotent (prior result / 409).
+    Used by both the JWT /confirm endpoint and the Telegram-bridge endpoint.
+    """
     claimed_rec, outcome = order_confirm.claim_for_execution(order_id)
 
     if outcome == "not_found":
@@ -382,7 +377,7 @@ async def confirm(
 
     # outcome == "claimed": we own the single execution slot. Execute exactly once.
     try:
-        result = _execute_ticket(rec.ticket, order_id, tg_msg_id)
+        result = _execute_ticket(ticket, order_id, tg_msg_id)
     except Exception as exc:
         result = OrderResult(
             order_id=order_id,
@@ -393,6 +388,94 @@ async def confirm(
 
     order_confirm.store_result(order_id, result.model_dump())
     return result
+
+
+@router.post("/{order_id}/confirm", response_model=OrderResult)
+async def confirm(
+    order_id: str,
+    body: ConfirmRequest,
+    current_user: User = Depends(get_current_user),
+) -> OrderResult:
+    """
+    POST /api/order/{order_id}/confirm { confirmed } → OrderResult
+
+    Web-side approval path (JWT-protected). Replaces the previous mock
+    /confirm-telegram endpoint.
+
+    - confirmed=false → reject (executor never called)
+    - confirmed=true  → atomically claim execution slot, then execute once.
+      Timeout → 410 Gone (expired). Already-terminal → idempotent (409 / prior result).
+    """
+    rec = order_confirm.get_order(order_id)
+    if rec is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此委託")
+
+    tg_msg_id = rec.telegram_message_id
+
+    if not body.confirmed:
+        return _reject_order(order_id, tg_msg_id)
+
+    return _confirm_and_execute(order_id, rec.ticket, tg_msg_id)
+
+
+def _require_internal_token(x_internal_token: str | None) -> None:
+    """Auth guard for the Telegram-bridge endpoint (NOT JWT).
+
+    - env BACKEND_INTERNAL_TOKEN unset/empty → always 403 (fail closed): the
+      bridge is disabled until an operator provisions a shared secret.
+    - header missing or not matching → 401.
+    """
+    expected = os.getenv("BACKEND_INTERNAL_TOKEN", "")
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="內部下單橋接未啟用（BACKEND_INTERNAL_TOKEN 未設定）。",
+        )
+    if not x_internal_token or x_internal_token != expected:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="X-Internal-Token 無效。",
+        )
+
+
+@router.post("/internal/confirm-by-code", response_model=OrderResult)
+async def confirm_by_code(
+    body: ConfirmByCodeRequest,
+    x_internal_token: str | None = Header(default=None),
+) -> OrderResult:
+    """
+    POST /api/order/internal/confirm-by-code { code, confirmed } → OrderResult
+
+    Internal channel (NOT JWT) for the separately-running telegram_bot.py process
+    to push an approve/reject decision (made by pressing the inline button in
+    Telegram) into this process's in-memory order state machine. The bot's
+    callback only carries a stock code, so we resolve it to the single most-recent
+    pending order for that code.
+
+    Auth: X-Internal-Token must equal env BACKEND_INTERNAL_TOKEN (fail closed if
+    unset → 403; wrong/missing → 401).
+
+    - no pending order for code → 404 (bot treats this as "not an order, ignore")
+    - confirmed=false → reject (executor never called)
+    - confirmed=true  → same execution path as /confirm (claim then execute once).
+      Timeout → 410. Already-terminal → idempotent — reuses the shared helpers so
+      the executor still runs at most once per order.
+    """
+    _require_internal_token(x_internal_token)
+
+    rec = order_confirm.find_pending_by_code(body.code)
+    if rec is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"找不到 {body.code} 的待確認委託。",
+        )
+
+    tg_msg_id = rec.telegram_message_id
+
+    if not body.confirmed:
+        return _reject_order(rec.id, tg_msg_id)
+
+    return _confirm_and_execute(rec.id, rec.ticket, tg_msg_id)
 
 
 @router.get("/{order_id}/status", response_model=OrderResult)

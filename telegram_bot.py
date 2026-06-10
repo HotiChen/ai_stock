@@ -49,6 +49,41 @@ USER_ID     = os.getenv("TELEGRAM_USER_ID", "")
 DB_PATH     = os.getenv("DB_PATH", "data/research.db")
 _POLL_TIMEOUT = 30  # long polling seconds
 
+# ── Backend 下單確認橋接（Tim 批准的最小修改）────────────────────────────────
+# FastAPI backend 的下單確認狀態機跑在另一個 process，approve/reject callback
+# 透過內部端點回寫；BACKEND_INTERNAL_TOKEN 未設定時橋接停用（fail closed）。
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+BACKEND_INTERNAL_TOKEN = os.getenv("BACKEND_INTERNAL_TOKEN", "")
+
+
+def _notify_backend_order(code: str, confirmed: bool) -> Optional[dict]:
+    """把 Telegram 的批准/拒絕決定推給 backend 下單確認狀態機。
+
+    回傳 backend 的 OrderResult dict；以下情況回傳 None 且絕不 raise
+    （不能因 backend 異常而中斷既有的選股批准流程）：
+    - BACKEND_INTERNAL_TOKEN 未設定（橋接未啟用，不發請求）
+    - backend 回 404（該 code 沒有待確認委託 → 這是 08:30 選股批准，非下單確認）
+    - 連線錯誤 / 逾時 / 其他非 2xx
+    """
+    if not BACKEND_INTERNAL_TOKEN:
+        return None
+    try:
+        resp = requests.post(
+            f"{BACKEND_URL}/api/order/internal/confirm-by-code",
+            json={"code": code, "confirmed": confirmed},
+            headers={"X-Internal-Token": BACKEND_INTERNAL_TOKEN},
+            timeout=5,
+        )
+        if resp.status_code == 404:
+            return None
+        if 200 <= resp.status_code < 300:
+            return resp.json()
+        log.warning("backend confirm-by-code 回應 %s：%s", resp.status_code, resp.text[:200])
+        return None
+    except requests.exceptions.RequestException as exc:
+        log.warning("backend confirm-by-code 連線失敗：%s", exc)
+        return None
+
 # ── Shioaji singleton（避免在 callback 裡重複 login）─────────────────────────
 _sj_api = None
 
@@ -968,11 +1003,19 @@ def handle_callback(callback_query: dict) -> None:
         send_text(chat_id, "❌ 全部拒絕，今日計劃已清除，不執行任何下單。")
     elif data.startswith("approve:"):
         code = data.split(":", 1)[1]
-        send_text(chat_id, f"✅ {code} 已批准，開盤時將執行此筆委託。")
+        order_result = _notify_backend_order(code, True)
+        msg = f"✅ {code} 已批准，開盤時將執行此筆委託。"
+        if order_result:
+            msg += f"\n📦 待確認委託已送出（狀態：{order_result.get('status', '?')}）"
+        send_text(chat_id, msg)
     elif data.startswith("reject:"):
         code = data.split(":", 1)[1]
         reject_pick_from_plan(date.today(), code, DB_PATH)
-        send_text(chat_id, f"❌ {code} 已從今日計劃中移除。")
+        order_result = _notify_backend_order(code, False)
+        msg = f"❌ {code} 已從今日計劃中移除。"
+        if order_result:
+            msg += "\n📦 待確認委託已拒絕。"
+        send_text(chat_id, msg)
 
     # ── 快速下單確認（⚡ 快速下單 按鈕送出的）──
     elif data == "order_confirm":

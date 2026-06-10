@@ -105,6 +105,23 @@ class _OrderStore:
         with self._lock:
             return self._orders.get(order_id)
 
+    def find_pending_by_code(self, code: str) -> Optional[PendingOrder]:
+        """Return the single most-recent *pending_confirmation* order for `code`.
+
+        Used by the Telegram bridge: the inline approve/reject buttons only carry
+        a stock code, so we resolve it back to the order awaiting confirmation.
+        Only orders still in `pending_confirmation` are eligible (already-terminal
+        orders are ignored). Most-recent wins on the (rare) chance of duplicates.
+        """
+        with self._lock:
+            candidates = [
+                rec for rec in self._orders.values()
+                if rec.ticket.code == code and rec.state == "pending_confirmation"
+            ]
+            if not candidates:
+                return None
+            return max(candidates, key=lambda r: r.created_at)
+
     # ── transitions ─────────────────────────────────────────────────────────
     def reject(self, order_id: str) -> Optional[PendingOrder]:
         with self._lock:
@@ -172,6 +189,10 @@ def create_failed_order(ticket: OrderTicket, reason: str) -> PendingOrder:
 
 def get_order(order_id: str) -> Optional[PendingOrder]:
     return _store.get_order(order_id)
+
+
+def find_pending_by_code(code: str) -> Optional[PendingOrder]:
+    return _store.find_pending_by_code(code)
 
 
 def reject_order(order_id: str) -> Optional[PendingOrder]:
