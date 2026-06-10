@@ -679,6 +679,31 @@ def send_morning_push(briefing, plan_set, starting_capital: float = 0.0) -> None
     })
 
 
+def _build_prediction_log(pick, log_date, entry_price: float):
+    """由 pick 物件建構 StockPredictionLog，帶入來源可追溯欄位。
+
+    來源欄位以 getattr(..., None) 取得：pick 無這些屬性時填 None，
+    確保舊 pick 物件（無 traceability）也能正常入庫。
+    """
+    from learning_db import StockPredictionLog
+    return StockPredictionLog(
+        date=log_date,
+        code=pick.code,
+        name=pick.name,
+        action=pick.action,
+        confidence=pick.confidence,
+        expected_return_pct=pick.expected_return_pct,
+        entry_price=entry_price,
+        closing_price=None,
+        actual_return_pct=None,
+        was_correct=None,
+        reason=getattr(pick, "reason", None),
+        factors_json=getattr(pick, "factors_json", None),
+        news_refs=getattr(pick, "news_refs", None),
+        youtube_refs=getattr(pick, "youtube_refs", None),
+    )
+
+
 def handle_select_plan(callback_query_or_chat_id, plan_type_arg: str = "") -> None:
     """處理使用者點選策略的 callback：記錄到 daily_tracker + 執行 picks。
 
@@ -805,18 +830,9 @@ def handle_select_plan(callback_query_or_chat_id, plan_type_arg: str = "") -> No
                 margin_data = fetch_margin_trading(today_str)
 
                 for p in plan.picks:
-                    # 預測記錄
-                    ldb.insert_prediction(StockPredictionLog(
-                        date=today,
-                        code=p.code,
-                        name=p.name,
-                        action=p.action,
-                        confidence=p.confidence,
-                        expected_return_pct=p.expected_return_pct,
-                        entry_price=price_map_local.get(p.code, 0.0),
-                        closing_price=None,
-                        actual_return_pct=None,
-                        was_correct=None,
+                    # 預測記錄（含來源可追溯欄位）
+                    ldb.insert_prediction(_build_prediction_log(
+                        p, today, price_map_local.get(p.code, 0.0)
                     ))
                     # 籌碼快照
                     inst = inst_data.get(p.code, {})

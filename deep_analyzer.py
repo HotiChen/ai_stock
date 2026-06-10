@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import config
@@ -33,6 +33,8 @@ class DeepAnalysis:
     hold_days:       int   = 1
     target_price:    Optional[float] = None
     stop_loss_price: Optional[float] = None
+    # AI 實際引用的新聞（依 news_refs_used 還原為完整 dict），預設空 list
+    news_refs:       list = field(default_factory=list)
 
 
 # ── Historical price trend ────────────────────────────────────────────────────
@@ -64,17 +66,44 @@ def get_price_trend_summary(api, code: str, days: int = 20) -> str:
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
+def _normalize_news(news) -> list[dict]:
+    """將 news 正規化為帶編號的 dict list（最多 5 則）。
+
+    支援兩種輸入：
+      - 新格式：dict（title/url/published/source）
+      - legacy：純字串（視為 title-only）
+    回傳每則含 id（N1..N5）、title、published。
+    """
+    normalized: list[dict] = []
+    for i, item in enumerate((news or [])[:5], start=1):
+        if isinstance(item, dict):
+            d = dict(item)
+        else:
+            d = {"title": str(item), "url": "", "published": "", "source": ""}
+        d["id"] = f"N{i}"
+        normalized.append(d)
+    return normalized
+
+
 def build_deep_prompt(
     code: str,
     name: str,
     price_trend: str,
-    news: list[str],
+    news: list,
     fundamentals_text: str,
     market_summary: str,
     theme_info: str,
     technical_text: str = "",
 ) -> str:
-    news_text = "\n".join(f"- {n}" for n in news[:5]) if news else "（無近期新聞）"
+    numbered = _normalize_news(news)
+    if numbered:
+        lines = []
+        for n in numbered:
+            pub = n.get("published") or "時間未知"
+            lines.append(f"[{n['id']}]（{pub}）{n.get('title', '')}")
+        news_text = "\n".join(lines)
+    else:
+        news_text = "（無近期新聞）"
 
     return f"""你是一位專業台股分析師，請從以下維度深度分析 {code} {name}，給出買賣建議。
 
@@ -104,6 +133,13 @@ def build_deep_prompt(
 - 不要追 BBU 上軌外的過熱股
 - 帶量突破（量比 ≥ 1.5x）是強勢信號
 
+=== 新聞 / 影片來源使用規則（務必遵守）===
+1. 新聞與影片的情緒僅作為 catalyst（催化劑）確認與風險檢核之用；單獨一則訊息不得使 confidence 提升超過 +1。
+2. 當新聞 / 影片訊號與技術面 / 籌碼面訊號矛盾時，以技術面 / 籌碼面為準。
+3. 發布時間超過 24 小時的訊息視為已被市場 price-in，僅作背景參考，不得作為主要進場理由。
+
+請在輸出中以 "news_refs_used" 列出你「實際引用」的新聞編號（如 ["N1", "N3"]）；若未引用任何新聞，回傳空陣列 []。
+
 只回答 JSON，不要其他文字：
 {{
   "signal": "buy/hold/sell",
@@ -119,7 +155,8 @@ def build_deep_prompt(
   }},
   "hold_days": 建議持有天數整數,
   "target_price": 目標價或null,
-  "stop_loss_price": 停損價或null
+  "stop_loss_price": 停損價或null,
+  "news_refs_used": ["N1", "N3"]
 }}"""
 
 
@@ -136,7 +173,27 @@ def _extract_json(raw: str) -> dict:
     raise ValueError("no JSON")
 
 
-def parse_deep_response(code: str, name: str, raw: str) -> DeepAnalysis:
+def _resolve_news_refs(data: dict, news) -> list[dict]:
+    """把 AI 回傳的 news_refs_used（如 ["N1"]）還原為完整來源 dict。
+
+    依 build_deep_prompt 的編號規則（_normalize_news），news 可為 dict 或
+    legacy str。AI 未提供 news_refs_used 時回傳空 list（容忍欄位缺漏）。
+    """
+    used = data.get("news_refs_used")
+    if not isinstance(used, list) or not used:
+        return []
+    by_id = {n["id"]: n for n in _normalize_news(news)}
+    resolved: list[dict] = []
+    for ref in used:
+        item = by_id.get(ref)
+        if item is not None:
+            resolved.append(item)
+    return resolved
+
+
+def parse_deep_response(
+    code: str, name: str, raw: str, news=None
+) -> DeepAnalysis:
     _default_factors = AnalysisFactor("", "", "", "", "", "")
     try:
         data = _extract_json(raw)
@@ -160,6 +217,7 @@ def parse_deep_response(code: str, name: str, raw: str) -> DeepAnalysis:
             hold_days=max(1, int(data.get("hold_days", 1))),
             target_price=data.get("target_price"),
             stop_loss_price=data.get("stop_loss_price"),
+            news_refs=_resolve_news_refs(data, news),
         )
     except Exception:
         return DeepAnalysis(code=code, name=name, signal="hold", confidence=0,
@@ -203,7 +261,7 @@ def run_deep_analysis(
                                technical_text=tech_text)
     try:
         raw    = call_haiku(prompt)
-        result = parse_deep_response(code, name, raw)
+        result = parse_deep_response(code, name, raw, news=news)
     except Exception:
         result = DeepAnalysis(code=code, name=name, signal="hold", confidence=0,
                               summary="AI 分析失敗，預設持有",
