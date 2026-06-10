@@ -28,6 +28,7 @@ class LoginResponse(BaseModel):
     user: User | None = None
     access_token: str | None = None
     refresh_token: str | None = None
+    token_type: str = "bearer"
     expires_in: int | None = None
     two_factor_required: bool = False
     challenge_id: str | None = None

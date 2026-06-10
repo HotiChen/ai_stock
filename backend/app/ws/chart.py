@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from ..deps import authenticate_ws_token
 from ..schemas.daytrade import AIMark, ChartView
 from ..schemas.predict import Tick
 
@@ -124,6 +125,11 @@ def _fetch_real_ticks(code: str) -> list[Tick] | None:
 
 @router.websocket("/ws/daytrade/{code}/chart")
 async def ws_chart(websocket: WebSocket, code: str) -> None:
+    # Auth via ?token= query param (WS cannot send Authorization header).
+    user = authenticate_ws_token(websocket.query_params.get("token"))
+    if user is None:
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     ticks = list(_BASE_TICKS)
     tick_idx = len(ticks)

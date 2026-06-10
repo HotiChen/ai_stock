@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from ..deps import authenticate_ws_token
 from ..schemas.market import FxQuote, IndexQuote, MarketSnapshot
 
 router = APIRouter(tags=["ws-market"])
@@ -41,6 +42,11 @@ def _build_snapshot() -> dict:
 
 @router.websocket("/ws/market")
 async def ws_market(websocket: WebSocket) -> None:
+    # Auth via ?token= query param (WS cannot send Authorization header).
+    user = authenticate_ws_token(websocket.query_params.get("token"))
+    if user is None:
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     try:
         while True:

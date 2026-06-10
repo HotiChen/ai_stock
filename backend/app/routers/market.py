@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from ..deps import get_current_user
+from ..schemas.auth import User
 from ..schemas.market import MarketSnapshot, IndexQuote, FxQuote
 
 router = APIRouter(prefix="/api/market", tags=["market"])
@@ -41,5 +43,5 @@ def _mock_snapshot() -> MarketSnapshot:
 
 
 @router.get("/snapshot", response_model=MarketSnapshot)
-async def snapshot() -> MarketSnapshot:
+async def snapshot(current_user: User = Depends(get_current_user)) -> MarketSnapshot:
     return _mock_snapshot()
