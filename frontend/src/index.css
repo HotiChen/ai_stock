@@ -36,6 +36,11 @@
   --gold: #a87a2c;
   --gold-soft: #f3e9d2;
 
+  /* aliases for legacy page styles */
+  --fg: var(--ink);
+  --border: var(--hair);
+  --accent: var(--gold);
+
   /* dark */
   --dark-ink: #f3efe6;
   --dark-hair: #2b2f3a;

@@ -17,7 +17,7 @@ export function useWebSocket<T>(url: string, onMessage?: (data: T) => void) {
     if (!mountedRef.current) return;
 
     try {
-      const wsBase = `ws://${window.location.hostname}:1234`;
+      const wsBase = import.meta.env.VITE_WS_BASE_URL ?? `ws://${window.location.hostname}:1234`;
       const ws = new WebSocket(`${wsBase}${url}`);
       wsRef.current = ws;
 
