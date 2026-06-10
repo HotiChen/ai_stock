@@ -1,6 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useKeyboardNav } from '../hooks/useKeyboardNav';
+import { useAppStore } from '../store/appStore';
+import { getSecondsToMarketClose } from '../lib/time';
 import type { MarketSnapshot } from '../types';
 
 interface AppChromeProps {
@@ -28,8 +31,7 @@ const NAV_ITEMS: NavItemConfig[] = [
   { id: 'report',     label: '週報',      path: '/report',    kbd: 'R' },
 ];
 
-// App mode — in a real app this would come from settings/context
-const APP_MODE: 'simulation' | 'live' = 'simulation';
+// APP_MODE is now sourced from the Zustand appStore (see useAppStore inside the component)
 
 function formatTimeHMS(date: Date): string {
   const h = String(date.getHours()).padStart(2, '0');
@@ -46,12 +48,6 @@ function formatCountdownHMS(seconds: number): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-function getSecondsToClose(now: Date): number {
-  const close = new Date(now);
-  close.setHours(13, 30, 0, 0); // 13:30 收盤
-  const diff = Math.floor((close.getTime() - now.getTime()) / 1000);
-  return diff;
-}
 
 function getMarketSession(now: Date): 'pre' | 'open' | 'post' | 'closed' {
   const h = now.getHours();
@@ -125,41 +121,26 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
   const location = useLocation();
   const [now, setNow] = useState(new Date());
 
+  // App mode from Zustand store
+  const APP_MODE = useAppStore((s) => s.mode);
+
   // WebSocket market data
   const { data: marketData, connected: marketConnected } =
     useWebSocket<MarketSnapshot>('/ws/market');
 
   // Clock — ticks every second
-  useEffect(() => {
+  React.useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Keyboard shortcuts
-  const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    if (e.target instanceof HTMLInputElement) return;
-    if (e.target instanceof HTMLTextAreaElement) return;
-    if (e.target instanceof HTMLSelectElement) return;
-    if (e.metaKey || e.ctrlKey) return;
+  // Global keyboard navigation — derived from NAV_ITEMS so there's no duplicate mapping
+  useKeyboardNav(NAV_ITEMS);
 
-    const map: Record<string, string> = {
-      d: '/', p: '/predict', t: '/daytrade',
-      h: '/portfolio', m: '/scanner', b: '/simulate',
-      j: '/journal', r: '/report',
-    };
-    const dest = map[e.key.toLowerCase()];
-    if (dest) navigate(dest);
-  }, [navigate]);
-
-  useEffect(() => {
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleKeyDown]);
-
-  // Use server countdown if available, else compute locally
+  // Use server countdown if available, else compute locally (13:30 market close, signed)
   const secondsToClose = marketData
     ? marketData.countdown_to_close_seconds
-    : getSecondsToClose(now);
+    : getSecondsToMarketClose(now);
 
   const isUrgent = secondsToClose > 0 && secondsToClose < 300; // < 5 min
 

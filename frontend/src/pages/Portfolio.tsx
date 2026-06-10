@@ -6,16 +6,8 @@ import Kpi from '../components/Kpi';
 import Card from '../components/Card';
 import Pill from '../components/Pill';
 import { api } from '../api';
+import { getSecondsToForceClose } from '../lib/time';
 import type { PortfolioSummary, Position, SectorAllocation } from '../types';
-
-// ─── Mock data ────────────────────────────────────────────────────────────────
-
-function makeSecondsToClose(): number {
-  const now = new Date();
-  const close = new Date(now);
-  close.setHours(13, 25, 0, 0);
-  return Math.max(0, Math.floor((close.getTime() - now.getTime()) / 1000));
-}
 
 const MOCK_POSITIONS: Position[] = [
   {
@@ -101,7 +93,7 @@ const MOCK_PORTFOLIO: PortfolioSummary = {
   net_pnl_pct: 0.0618,
   position_count: 4,
   closed_today: 2,
-  countdown_seconds: makeSecondsToClose(),
+  countdown_seconds: getSecondsToForceClose(),
   positions: MOCK_POSITIONS,
   sector_breakdown: MOCK_SECTORS,
   recent_pnl_days: MOCK_RECENT_PNL,
@@ -448,7 +440,7 @@ function SectorBarStrip({ sectors }: { sectors: SectorAllocation[] }) {
 export default function Portfolio() {
   const navigate = useNavigate();
   const [data, setData] = useState<PortfolioSummary>(MOCK_PORTFOLIO);
-  const [countdown, setCountdown] = useState(makeSecondsToClose());
+  const [countdown, setCountdown] = useState(getSecondsToForceClose());
 
   useEffect(() => {
     api.getPortfolio()
