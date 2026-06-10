@@ -22,6 +22,23 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+# repo 根目錄（預設為本檔案所在目錄，測試可 monkeypatch）
+_REPO_ROOT = Path(__file__).resolve().parent
+
+
+def load_playbook_text() -> str:
+    """讀取 research_playbook.md 全文。
+
+    - 檔案不存在、讀取失敗或內容為空 → 回傳空字串（fail safe，不拋例外）
+    - 供 Gemini 分析 prompt 前置注入使用
+    """
+    try:
+        path = _REPO_ROOT / "research_playbook.md"
+        text = path.read_text(encoding="utf-8")
+        return text  # 空字串時直接回傳（交由呼叫端判斷是否注入）
+    except Exception:
+        return ""
+
 # ── 監控頻道清單（可新增）────────────────────────────────────────────────────
 # url 可以是 channel/videos、playlist?list=...、或 @handle
 CHANNELS = [
@@ -118,11 +135,20 @@ def _parse_gemini_json(raw: str) -> dict:
     return {"error": "parse_failed", "raw": raw[:200], "one_line": "AI 分析格式錯誤"}
 
 
+def _build_prompt(title: str) -> str:
+    """組合最終 prompt：若 playbook 存在，前置手冊區塊；否則行為與現狀相同。"""
+    base = _ANALYSIS_PROMPT.format(title=title)
+    playbook = load_playbook_text()
+    if not playbook:
+        return base
+    return f"## 研究作業手冊\n{playbook}\n---\n{base}"
+
+
 def _analyze_video(video_url: str, title: str, description: str = "") -> dict:
     """直接把 YouTube URL 丟給 Gemini；影片太長時 fallback 改用描述分析。"""
     from google.genai import types
 
-    prompt = _ANALYSIS_PROMPT.format(title=title)
+    prompt = _build_prompt(title)
 
     # ── 嘗試直接看影片 ────────────────────────────────────────────────────────
     try:
@@ -156,7 +182,7 @@ def _analyze_text(title: str, description: str) -> dict:
         return {"error": "no_description", "one_line": "影片過長且無描述，無法分析"}
 
     text_prompt = (
-        _ANALYSIS_PROMPT.format(title=title)
+        _build_prompt(title)
         + f"\n\n影片描述（替代字幕）：\n{description[:800]}"
     )
     try:
