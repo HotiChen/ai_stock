@@ -1,7 +1,14 @@
 """order.py — Wave 2-D upgrade.
 
 Wraps ai_stock modules (executor, risk_guard, user_confirm, research_db, trades)
-with try/except fallback to mock data.  Every endpoint always returns 200.
+with try/except fallback to mock data.
+
+SECURITY (CLAUDE.md §二 "每筆下單必經 Telegram 二次確認"): the order lifecycle is a
+two-step state machine. /submit only validates + sends the Telegram confirmation and
+registers a *pending* order; it NEVER touches the broker. Execution happens only on an
+explicit approval via /{order_id}/confirm. If Telegram is unconfigured or its send
+fails, the order is refused (503/502) instead of silently executing. State machine and
+single-execution guard live in services/order_confirm.py.
 """
 from __future__ import annotations
 
@@ -11,13 +18,19 @@ import uuid
 from datetime import date, datetime, timezone, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 
 from ..deps import get_current_user
 from ..schemas.auth import User
 from ..schemas.base import AppMode, LotType, Side
 from ..schemas.order import OrderResult, OrderTicket, OrderSource, Trade
 from ..schemas.predict import RiskCheck
+from ..services import order_confirm
+
+
+class ConfirmRequest(BaseModel):
+    confirmed: bool = False
 
 router = APIRouter(prefix="/api/order", tags=["order"])
 
@@ -197,20 +210,67 @@ async def preview(
         return _mock_ticket(code)
 
 
+def _execute_ticket(ticket: OrderTicket, order_id: str, tg_msg_id: str | None) -> OrderResult:
+    """Run the actual broker execution for an already-confirmed order.
+
+    This is the ONLY place that calls executor.place_stock_order(). It is reached
+    only after the state machine has atomically claimed the single execution slot
+    (services/order_confirm.claim_for_execution → "claimed"), guaranteeing the
+    broker is hit at most once per order and never without confirmation.
+    """
+    import executor
+
+    simulation = os.getenv("PAPER_TRADING", "true").lower() != "false"
+    if simulation:
+        # Simulation mode: we still went through confirmation; record as filled.
+        return OrderResult(
+            order_id=order_id,
+            status="filled",
+            filled_at=_now_taipei_iso(),
+            filled_price=ticket.price,
+            filled_amount=float(ticket.amount),
+            telegram_message_id=tg_msg_id,
+        )
+
+    result = executor.place_stock_order(
+        api=None,  # real api injected via shioaji_service in future
+        code=ticket.code,
+        name=ticket.name,
+        action=ticket.side.value,
+        budget=float(ticket.amount),
+        price=ticket.price,
+    )
+    if result.success:
+        return OrderResult(
+            order_id=result.order_id or order_id,
+            status="filled",
+            filled_at=_now_taipei_iso(),
+            filled_price=result.price,
+            filled_amount=result.amount,
+            telegram_message_id=tg_msg_id,
+        )
+    return OrderResult(
+        order_id=order_id,
+        status="rejected",
+        rejection_reason=result.reason,
+        telegram_message_id=tg_msg_id,
+    )
+
+
 @router.post("/submit", response_model=OrderResult)
 async def submit(
     ticket: OrderTicket,
     current_user: User = Depends(get_current_user),
 ) -> OrderResult:
     """
-    POST /api/order/submit { ticket } → OrderResult
+    POST /api/order/submit { ticket } → OrderResult(status="pending_confirmation")
 
-    1. Validate risk_checks (no fail)
-    2. try: user_confirm.send_confirmation() → Telegram
-    3. try: executor.place_stock_order()
-    except: mock OrderResult(status="submitted")
+    SECURITY: an order is NEVER executed here. We only (1) validate risk checks,
+    (2) require Telegram to be configured, (3) send the Telegram confirmation, and
+    (4) register a pending order. Execution happens only after an explicit approval
+    via POST /api/order/{order_id}/confirm.
     """
-    # Step 1 — reject if any risk check failed
+    # Step 1 — reject if any risk check failed (before any side effects).
     failed = [c for c in ticket.risk_checks if c.status == "fail"]
     if failed:
         return OrderResult(
@@ -219,91 +279,139 @@ async def submit(
             rejection_reason="; ".join(f"{c.key}: {c.detail}" for c in failed),
         )
 
-    order_id = f"ord-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
-    tg_msg_id: str | None = None
+    # Step 2 — Telegram MUST be configured. No chat_id → no second confirmation
+    # channel → refuse the order. (Previously the order executed anyway.)
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not chat_id:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Telegram 二次確認未設定（TELEGRAM_CHAT_ID 未設定），"
+                "為安全起見拒絕下單。"
+            ),
+        )
 
-    # Step 2 — Telegram confirmation (best-effort)
+    # Step 3 — send the Telegram confirmation. If this fails we mark the order
+    # failed and surface 502 — we do NOT silently swallow the error and proceed.
+    pick_dict = {
+        "code": ticket.code,
+        "name": ticket.name,
+        "confidence": ticket.source.confidence or 0,
+        "budget": ticket.amount,
+        "sector": "",
+    }
     try:
         import user_confirm
-        chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-        if chat_id:
-            pick_dict = {
-                "code": ticket.code,
-                "name": ticket.name,
-                "confidence": ticket.source.confidence or 0,
-                "budget": ticket.amount,
-                "sector": "",
-            }
-            msg_id = user_confirm.send_confirmation([pick_dict], chat_id)
-            if msg_id:
-                tg_msg_id = str(msg_id)
-    except Exception:
-        pass  # Telegram optional, proceed
-
-    # Step 3 — Execute order
-    try:
-        import executor
-        simulation = os.getenv("PAPER_TRADING", "true").lower() != "false"
-        if simulation:
-            # Simulation mode: record and return submitted
-            return OrderResult(
-                order_id=order_id,
-                status="submitted",
-                filled_at=_now_taipei_iso(),
-                filled_price=ticket.price,
-                filled_amount=float(ticket.amount),
-                telegram_message_id=tg_msg_id,
-            )
-
-        result = executor.place_stock_order(
-            api=None,  # real api injected via shioaji_service in future
-            code=ticket.code,
-            name=ticket.name,
-            action=ticket.side.value,
-            budget=float(ticket.amount),
-            price=ticket.price,
+        msg_id = user_confirm.send_confirmation([pick_dict], chat_id)
+    except Exception as exc:
+        rec = order_confirm.create_failed_order(ticket, f"Telegram 發送失敗：{exc}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Telegram 確認訊息發送失敗，下單未送出（order {rec.id}）。",
         )
-        if result.success:
-            return OrderResult(
-                order_id=result.order_id or order_id,
-                status="filled",
-                filled_at=_now_taipei_iso(),
-                filled_price=result.price,
-                filled_amount=result.amount,
-                telegram_message_id=tg_msg_id,
+
+    tg_msg_id = str(msg_id) if msg_id else None
+
+    # Step 4 — register a pending order awaiting confirmation.
+    rec = order_confirm.create_order(ticket, tg_msg_id)
+    return OrderResult(
+        order_id=rec.id,
+        status="pending_confirmation",
+        telegram_message_id=tg_msg_id,
+    )
+
+
+@router.post("/{order_id}/confirm", response_model=OrderResult)
+async def confirm(
+    order_id: str,
+    body: ConfirmRequest,
+    current_user: User = Depends(get_current_user),
+) -> OrderResult:
+    """
+    POST /api/order/{order_id}/confirm { confirmed } → OrderResult
+
+    Web-side approval path (JWT-protected). Replaces the previous mock
+    /confirm-telegram endpoint.
+
+    - confirmed=false → reject (executor never called)
+    - confirmed=true  → atomically claim execution slot, then execute once.
+      Timeout → 410 Gone (expired). Already-terminal → idempotent (409 / prior result).
+    """
+    rec = order_confirm.get_order(order_id)
+    if rec is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此委託")
+
+    tg_msg_id = rec.telegram_message_id
+
+    # Rejection path.
+    if not body.confirmed:
+        rejected = order_confirm.reject_order(order_id)
+        if rejected and rejected.state not in ("rejected", "pending_confirmation"):
+            # Already terminal (confirmed/expired/failed) — cannot reject now.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"委託已處於 {rejected.state} 狀態，無法拒絕。",
             )
-        else:
-            return OrderResult(
-                order_id=order_id,
-                status="rejected",
-                rejection_reason=result.reason,
-                telegram_message_id=tg_msg_id,
-            )
-    except Exception:
         return OrderResult(
             order_id=order_id,
-            status="submitted",
-            filled_at=_now_taipei_iso(),
-            filled_price=ticket.price,
-            filled_amount=float(ticket.amount),
+            status="rejected",
+            rejection_reason="使用者拒絕下單",
             telegram_message_id=tg_msg_id,
         )
 
+    # Confirmation path — atomically decide whether we may execute.
+    claimed_rec, outcome = order_confirm.claim_for_execution(order_id)
 
-@router.post("/confirm-telegram", response_model=OrderResult)
-async def confirm_telegram(
+    if outcome == "not_found":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此委託")
+
+    if outcome == "expired":
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="確認逾時，委託已失效（expired），請重新下單。",
+        )
+
+    if outcome == "already":
+        # Idempotent: return the prior stored result if available, else a 409.
+        if claimed_rec and claimed_rec.result is not None:
+            return OrderResult(**claimed_rec.result)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"委託已處於 {claimed_rec.state if claimed_rec else 'terminal'} 狀態。",
+        )
+
+    # outcome == "claimed": we own the single execution slot. Execute exactly once.
+    try:
+        result = _execute_ticket(rec.ticket, order_id, tg_msg_id)
+    except Exception as exc:
+        result = OrderResult(
+            order_id=order_id,
+            status="rejected",
+            rejection_reason=f"執行失敗：{exc}",
+            telegram_message_id=tg_msg_id,
+        )
+
+    order_confirm.store_result(order_id, result.model_dump())
+    return result
+
+
+@router.get("/{order_id}/status", response_model=OrderResult)
+async def order_status(
     order_id: str,
-    confirmed: bool = True,
     current_user: User = Depends(get_current_user),
 ) -> OrderResult:
-    """POST /api/order/confirm-telegram → OrderResult"""
-    status = "filled" if confirmed else "cancelled"
+    """GET /api/order/{order_id}/status → current state (for frontend polling)."""
+    rec = order_confirm.get_order(order_id)
+    if rec is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到此委託")
+
+    if rec.result is not None:
+        return OrderResult(**rec.result)
+
     return OrderResult(
-        order_id=order_id,
-        status=status,
-        filled_at=_now_taipei_iso() if confirmed else None,
-        filled_price=1135.0 if confirmed else None,
-        filled_amount=113_500.0 if confirmed else None,
+        order_id=rec.id,
+        status=rec.state,
+        telegram_message_id=rec.telegram_message_id,
     )
 
 

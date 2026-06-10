@@ -33,7 +33,19 @@ class OrderTicket(BaseModel):
 
 class OrderResult(BaseModel):
     order_id: str
-    status: Literal["submitted", "filled", "rejected", "cancelled"]
+    # NOTE: the confirmation state machine (services/order_confirm.py) added the
+    # states below. The frontend mirror type in frontend/src/types/index.ts must
+    # be extended to match (left to the frontend agent — do not edit frontend here).
+    status: Literal[
+        "submitted",
+        "filled",
+        "rejected",
+        "cancelled",
+        "pending_confirmation",
+        "confirmed",
+        "expired",
+        "failed",
+    ]
     filled_at: str | None = None
     filled_price: float | None = None
     filled_amount: float | None = None
