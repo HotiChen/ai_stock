@@ -1,0 +1,54 @@
+name: Daily Engineering Review
+
+# 每日工程檢討迴圈（平日 14:00 台北時間 = 06:00 UTC）
+# Claude 讀取昨日變更與 backlog，產出可派工的改進提案 issue，由 Tim 審核後派工。
+# 注意：交易結果數據（learning_db）在本機不在 repo，策略層的檢討由本機 13:50
+# PlaybookUpdateJob 負責；此 workflow 只負責工程健康度。
+# 需在 repo Settings → Secrets and variables → Actions 設定 ANTHROPIC_API_KEY。
+
+on:
+  schedule:
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+jobs:
+  daily-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            你是 QUANT·AI 台股量化交易系統的每日工程檢討員。請用繁體中文完成：
+
+            1. 讀 CLAUDE.md（專案規範）、TODO.md（backlog）、docs/research_loop_design.md
+            2. 看過去 24 小時的變更：git log --since="24 hours ago" --stat
+            3. 檢查既有 open issues：gh issue list --label daily-review --limit 10
+               （避免提出重複提案）
+            4. 評估工程健康度：未完成的 TODO 項目、測試覆蓋缺口、
+               程式碼中的 FIXME/TODO 註解、明顯的安全或一致性問題
+
+            產出規則：
+            - 若有值得做的發現：用 gh issue create 開「一個」issue，
+              標題「每日工程檢討 YYYY-MM-DD」、label "daily-review"，內容包含：
+              (a) 昨日變更摘要（3 行內）
+              (b) 發現的問題（按嚴重度排序，附 file:line）
+              (c) 具體可派工提案：每項含目標檔案、做法、建議執行模型
+                  （Opus=核心/安全、Sonnet=一般、Haiku=機械性）、TDD 與否
+            - 若無值得做的發現：不要開 issue，直接結束（避免噪音）
+            - 絕不修改任何程式碼，只提案
+          claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 15
+            --allowedTools Bash(gh issue:*),Bash(git log:*),Bash(git diff:*),Read,Grep,Glob
