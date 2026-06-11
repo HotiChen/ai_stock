@@ -20,7 +20,7 @@
 
 4. **每個任務完成後，檢查實作是否與本文件一致**。若有偏差，主動回報。
 
-5. **不得修改 `ai_stock/` 目錄下任何既有 Python 模組**。Backend 只能做薄包裝。
+5. **不得修改 repo 根目錄下任何既有 Python 模組**（main.py、executor.py、telegram_bot.py 等）。Backend 只能做薄包裝。
 
 ---
 
@@ -44,7 +44,7 @@
 - **數字全用 IBM Plex Mono**，開啟 `font-feature-settings: "tnum" 1, "zero" 1`
 - **13:25 強制平倉倒數**在任何持倉相關畫面常駐
 - **每筆下單必經 Telegram 二次確認**（`user_confirm.py`）
-- **不改動 `ai_stock/*` 既有邏輯**，只做薄包裝
+- **不改動 repo 根目錄既有 Python 模組邏輯**，只做薄包裝
 - **資訊密度優先**，機構級 Bloomberg 風格
 
 ### 絕對禁止
@@ -61,7 +61,7 @@
 
 | 層級 | 技術 | 備註 |
 |---|---|---|
-| 既有後端 | Python（`ai_stock/`） | **原封不動** |
+| 既有後端 | Python（repo 根目錄 `*.py`） | **原封不動** |
 | 新後端 | FastAPI + uvicorn | 薄包裝層，port 8000 |
 | 即時推送 | WebSocket（FastAPI 原生） | 駕駛艙、K 線、市場資料 |
 | 前端 | React + TypeScript + Vite | port 5173（dev） |
@@ -77,7 +77,9 @@
 ## 四、目錄結構
 
 ```
-ai_stock/                          ← 既有 Python（禁止修改）
+*.py（repo 根目錄）                ← 既有 Python 模組（main.py 等，禁止修改）
+tests/                             ← 既有測試套件
+spec/                              ← 設計規格（唯讀參考）
 backend/
 ├── app/
 │   ├── main.py                    ← FastAPI entry + CORS + router 掛載
@@ -162,7 +164,6 @@ frontend/
 │   ├── hooks/                     ← useWebSocket, useMarket, useDaytrade...
 │   ├── store/                     ← Zustand stores
 │   └── api/                       ← fetch wrappers
-spec/                              ← 設計規格（唯讀參考）
 ```
 
 ---

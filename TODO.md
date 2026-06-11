@@ -20,3 +20,10 @@
 - [ ] **雙首長制 (Ensemble) 實驗**：實作 Gemini 負責財報/新聞分析，Claude 負責最後決策的整合邏輯。
 - [ ] **歷史回測系統整合**：將 `simulate.py` 的結果與真實帳務進行更直觀的對比看板。
 - [ ] **Telegram 互動式停損設定**：優化 `停損 CODE PRICE` 的解析與資料庫同步邏輯。
+
+## 2026-06-10 研究迴圈（見 docs/research_loop_design.md）
+- [x] 件1 來源可追溯：stock_prediction_log 加 reason/factors_json/news_refs/youtube_refs
+- [x] 件2 敘事訊號邊界化：deep_analyzer prompt 三條規則
+- [x] Playbook 迴圈：research_playbook.md + playbook_updater.py + 13:50 排程
+- [ ] 件3 對照組命中率報表（等件1 資料累積兩週後做）
+- [ ] adaptive_scorer per-signal 權重自調（等件3 跑滿一個月再評估）

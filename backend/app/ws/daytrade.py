@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from ..deps import authenticate_ws_token
 from ..schemas.base import AlertKind, AlertLevel, LotType, Side, ThreadState
 from ..schemas.daytrade import (
     Alert,
@@ -216,6 +217,12 @@ async def get_live_snapshot() -> dict:
 
 @router.websocket("/ws/daytrade")
 async def ws_daytrade(websocket: WebSocket) -> None:
+    # Auth: browsers cannot set headers on WS, so the JWT access token is passed
+    # as a ?token= query parameter. Reject invalid/missing tokens with 4401.
+    user = authenticate_ws_token(websocket.query_params.get("token"))
+    if user is None:
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     try:
         # Send initial snapshot immediately

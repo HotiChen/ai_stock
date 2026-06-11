@@ -1,6 +1,8 @@
 // 05.3 回測 / 模擬倉
 import { useState, useEffect } from 'react';
 import AppChrome from '../components/AppChrome';
+import EquityCurve from '../components/EquityCurve';
+import MonthlyHeatmap from '../components/MonthlyHeatmap';
 import { api } from '../api';
 import type { BacktestResult, BacktestParams } from '../types';
 
@@ -76,75 +78,6 @@ const MOCK_RESULT: BacktestResult = {
 };
 
 const STRATEGIES = ['AI TopN v2.1', 'AI TopN v2.0', 'Momentum Only', 'Mean Reversion'];
-
-// ── Shared SVG charts ─────────────────────────────────────────────────────────
-
-function BacktestEquitySVG({ data }: { data: { date: string; me: number; index: number }[] }) {
-  if (!data.length) return null;
-  const W = 600, H = 200;
-  const pad = { t: 12, r: 12, b: 24, l: 60 };
-  const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
-  const allVals = data.flatMap(d => [d.me, d.index]);
-  const minV = Math.min(...allVals), maxV = Math.max(...allVals);
-  const range = maxV - minV || 1;
-  const toX = (i: number) => pad.l + (i / (data.length - 1)) * iw;
-  const toY = (v: number) => pad.t + ih - ((v - minV) / range) * ih;
-  const mePath = data.map((d, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(d.me).toFixed(1)}`).join(' ');
-  const indexPath = data.map((d, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(d.index).toFixed(1)}`).join(' ');
-  const fillPath = `${mePath} L${toX(data.length - 1)},${H - pad.b} L${pad.l},${H - pad.b} Z`;
-  const yTicks = [minV, minV + range * 0.5, maxV];
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: H }}>
-      <defs>
-        <linearGradient id="equity-grad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="var(--up)" stopOpacity="0.15" />
-          <stop offset="100%" stopColor="var(--up)" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      {yTicks.map(v => (
-        <g key={v}>
-          <line x1={pad.l} y1={toY(v)} x2={W - pad.r} y2={toY(v)} stroke="var(--border)" strokeWidth={0.5} />
-          <text x={pad.l - 4} y={toY(v) + 4} textAnchor="end" fontSize={9} fill="var(--muted)" fontFamily="var(--font-mono)">
-            {(v / 10000).toFixed(0)}萬
-          </text>
-        </g>
-      ))}
-      <path d={fillPath} fill="url(#equity-grad)" />
-      <path d={indexPath} stroke="var(--muted)" strokeWidth={1} fill="none" strokeDasharray="4,3" />
-      <path d={mePath} stroke="var(--up)" strokeWidth={2} fill="none" />
-      {[0, Math.floor(data.length / 2), data.length - 1].map(i => (
-        <text key={i} x={toX(i)} y={H - pad.b + 14} textAnchor="middle" fontSize={9} fill="var(--muted)" fontFamily="var(--font-mono)">
-          {data[i]?.date.slice(5)}
-        </text>
-      ))}
-      <text x={pad.l + 8} y={pad.t + 14} fontSize={9} fill="var(--up)" fontFamily="var(--font-mono)">策略</text>
-      <text x={pad.l + 40} y={pad.t + 14} fontSize={9} fill="var(--muted)" fontFamily="var(--font-mono)">- - 大盤</text>
-    </svg>
-  );
-}
-
-function MonthlyHeatmap({ returns }: { returns: number[] }) {
-  const months = ['1月', '2月', '3月', '4月', '5月', '6月'];
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 2 }}>
-      {returns.map((r, i) => {
-        const isPos = r >= 0;
-        const intensity = Math.min(Math.abs(r) / 0.1, 1);
-        const bg = isPos
-          ? `rgba(200, 51, 43, ${0.15 + intensity * 0.6})`
-          : `rgba(46, 125, 79, ${0.15 + intensity * 0.6})`;
-        return (
-          <div key={i} style={{ background: bg, borderRadius: 2, padding: '10px 6px', textAlign: 'center' }}>
-            <div style={{ fontSize: 9, color: 'var(--muted)', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>{months[i]}</div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: isPos ? 'var(--up)' : 'var(--down)' }}>
-              {isPos ? '+' : ''}{(r * 100).toFixed(1)}%
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 
 // ── Paper trade equity curve ──────────────────────────────────────────────────
 
@@ -508,7 +441,7 @@ function BacktestTab() {
         <div style={{ flex: '1.6', background: 'var(--bg)', padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div>
             <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono)', marginBottom: 8 }}>EQUITY CURVE · 策略 vs 大盤</div>
-            <BacktestEquitySVG data={result.equity_curve} />
+            <EquityCurve data={result.equity_curve} />
           </div>
           <div>
             <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono)', marginBottom: 8 }}>MONTHLY RETURNS · 月度報酬</div>

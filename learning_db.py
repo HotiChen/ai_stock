@@ -45,6 +45,11 @@ class StockPredictionLog:
     closing_price: Optional[float]      # 收盤價（盤後填入）
     actual_return_pct: Optional[float]  # 實際報酬率（盤後計算）
     was_correct: Optional[bool]         # 預測方向是否正確
+    # ── 來源可追溯（source-traceability，全部 nullable，既有 caller 不受影響）──
+    reason: Optional[str] = None          # pick 的完整理由全文
+    factors_json: Optional[str] = None    # JSON: {technical, chip, news, theme}
+    news_refs: Optional[str] = None       # JSON array：AI 實際引用的新聞
+    youtube_refs: Optional[str] = None    # JSON array：AI 引用的 YouTube 來源
 
 
 @dataclass
@@ -63,6 +68,7 @@ class LearningDB:
         self.path = path
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+        self._migrate()
 
     # ── internal ────────────────────────────────────────────────────────────
 
@@ -111,6 +117,33 @@ class LearningDB:
                     PRIMARY KEY (date, code)
                 );
             """)
+
+    # 來源可追溯欄位（nullable）→ ALTER TABLE 補上，冪等
+    _TRACEABILITY_COLUMNS = (
+        ("reason", "TEXT"),
+        ("factors_json", "TEXT"),
+        ("news_refs", "TEXT"),
+        ("youtube_refs", "TEXT"),
+    )
+
+    def _migrate(self) -> None:
+        """以 PRAGMA table_info 檢查為守衛，補上缺少的可追溯欄位。
+
+        對全新 DB（_init_schema 已建表，但不含這些欄位）與既有舊 DB 皆適用，
+        重複呼叫安全（idempotent）。
+        """
+        with self._conn() as conn:
+            existing = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(stock_prediction_log)"
+                ).fetchall()
+            }
+            for col, col_type in self._TRACEABILITY_COLUMNS:
+                if col not in existing:
+                    conn.execute(
+                        f"ALTER TABLE stock_prediction_log ADD COLUMN {col} {col_type}"
+                    )
 
     @staticmethod
     def _date_str(d: date) -> str:
@@ -185,14 +218,16 @@ class LearningDB:
             conn.execute("""
                 INSERT OR IGNORE INTO stock_prediction_log
                     (date, code, name, action, confidence, expected_return_pct,
-                     entry_price, closing_price, actual_return_pct, was_correct)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     entry_price, closing_price, actual_return_pct, was_correct,
+                     reason, factors_json, news_refs, youtube_refs)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 self._date_str(pred.date), pred.code, pred.name,
                 pred.action, pred.confidence, pred.expected_return_pct,
                 pred.entry_price, pred.closing_price,
                 pred.actual_return_pct,
                 None if pred.was_correct is None else int(pred.was_correct),
+                pred.reason, pred.factors_json, pred.news_refs, pred.youtube_refs,
             ))
 
     def update_closing_price(
@@ -248,6 +283,11 @@ class LearningDB:
 
     def _row_to_pred(self, row) -> StockPredictionLog:
         wc = row["was_correct"]
+        keys = row.keys()
+
+        def _opt(col):
+            return row[col] if col in keys else None
+
         return StockPredictionLog(
             date=self._parse_date(row["date"]),
             code=row["code"],
@@ -259,6 +299,10 @@ class LearningDB:
             closing_price=row["closing_price"],
             actual_return_pct=row["actual_return_pct"],
             was_correct=None if wc is None else bool(wc),
+            reason=_opt("reason"),
+            factors_json=_opt("factors_json"),
+            news_refs=_opt("news_refs"),
+            youtube_refs=_opt("youtube_refs"),
         )
 
     # ── Analytics ────────────────────────────────────────────────────────────

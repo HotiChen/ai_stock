@@ -507,6 +507,23 @@ class PostMarketJob:
         return total_pnl
 
 
+# ── PlaybookUpdateJob ─────────────────────────────────────────────────────────
+
+class PlaybookUpdateJob:
+    """
+    13:50 job（PostMarketJob 13:35 之後）：
+      呼叫 playbook_updater.run_daily_update() 更新 research_playbook.md 自適應區。
+    任何失敗只記 log，不影響排程器繼續運行。
+    """
+
+    def run(self) -> None:
+        try:
+            import playbook_updater
+            playbook_updater.run_daily_update()
+        except Exception as e:
+            log.warning("PlaybookUpdateJob: playbook updater 失敗（已忽略）：%s", e)
+
+
 # ── ForceCloseJob helpers ─────────────────────────────────────────────────────
 
 def _get_snapshot_price(api, code: str, fallback: float) -> float:
@@ -1027,6 +1044,12 @@ def main() -> None:
 
     log.info("main.py started — simulation=%s", SIMULATION)
 
+    try:
+        import preflight
+        preflight.run_preflight()
+    except Exception as e:
+        log.warning("preflight: 啟動前檢查失敗（已忽略）：%s", e)
+
     from notifier import notify_system_start, notify_system_stop, notify_market_open, notify_market_close
     notify_system_start(SIMULATION)
 
@@ -1245,6 +1268,12 @@ def main() -> None:
             except Exception as e:
                 log.warning("postmarket_review failed: %s", e)
 
+            time.sleep(60)
+
+        # 13:50 playbook update（PostMarketJob 之後）
+        elif t.hour == 13 and t.minute == 50 and f"{today_prefix}-1350" not in _fired_today:
+            PlaybookUpdateJob().run()
+            _fired_today.add(f"{today_prefix}-1350")
             time.sleep(60)
 
         else:

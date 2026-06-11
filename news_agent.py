@@ -39,16 +39,36 @@ def call_ollama(model: str, prompt: str, timeout: int | None = None) -> str:
 
 
 def fetch_headlines(max_per_feed: int = 5) -> list[str]:
-    """Fetch latest headlines from Taiwan stock RSS feeds."""
-    headlines = []
-    for _name, url in RSS_FEEDS:
+    """Fetch latest headlines from Taiwan stock RSS feeds (titles only).
+
+    保留純標題回傳以維持既有 caller（analyze_sentiment 等）的向後相容。
+    """
+    return [item["title"] for item in fetch_headlines_structured(max_per_feed)]
+
+
+def fetch_headlines_structured(max_per_feed: int = 5) -> list[dict]:
+    """Fetch latest headlines as structured dicts.
+
+    每則為 {"title", "url", "published", "source"}（依 design §2.2）。
+    缺 link/published 時退化為空字串，不 raise。
+    """
+    items: list[dict] = []
+    for name, url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
             for entry in feed.entries[:max_per_feed]:
-                headlines.append(entry.title)
+                title = getattr(entry, "title", "") or ""
+                link = getattr(entry, "link", "") or ""
+                published = getattr(entry, "published", "") or ""
+                items.append({
+                    "title": title,
+                    "url": link,
+                    "published": published,
+                    "source": name,
+                })
         except Exception:
             pass
-    return headlines
+    return items
 
 
 def analyze_sentiment(headlines: list[str]) -> dict:
@@ -79,9 +99,15 @@ def analyze_sentiment(headlines: list[str]) -> dict:
 
 
 def get_news_context() -> dict:
-    """Full pipeline: fetch → analyze → return context dict."""
-    headlines = fetch_headlines()
-    sentiment = analyze_sentiment(headlines)
+    """Full pipeline: fetch → analyze → return context dict.
+
+    headlines 為結構化 dict list（title/url/published/source）；
+    為向後相容保留 headlines_text（純標題 list[str]）。
+    """
+    items = fetch_headlines_structured()
+    titles = [item["title"] for item in items]
+    sentiment = analyze_sentiment(titles)
     sentiment["fetched_at"] = datetime.now().isoformat()
-    sentiment["headlines"] = headlines[:5]
+    sentiment["headlines"] = items[:5]
+    sentiment["headlines_text"] = titles[:5]
     return sentiment

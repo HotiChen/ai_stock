@@ -359,7 +359,15 @@ export interface OrderTicket {
 
 export interface OrderResult {
   order_id: string;
-  status: 'submitted' | 'filled' | 'rejected' | 'cancelled';
+  status:
+    | 'submitted'
+    | 'filled'
+    | 'rejected'
+    | 'cancelled'
+    | 'pending_confirmation'
+    | 'confirmed'
+    | 'expired'
+    | 'failed';
   filled_at?: string;
   filled_price?: number;
   filled_amount?: number;
