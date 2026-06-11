@@ -126,9 +126,19 @@ def ensure_connected(
         api = sj.Shioaji(simulation=simulation)
         api.login(api_key=api_key, secret_key=secret_key, fetch_contract=True)
         log.info("Shioaji connected (simulation=%s)", simulation)
+        try:
+            import connection_watchdog
+            connection_watchdog.report_success()
+        except Exception:
+            pass
         return api
     except Exception as e:
         log.error("Shioaji connection failed: %s", e)
+        try:
+            import connection_watchdog
+            connection_watchdog.report_failure(str(e))
+        except Exception:
+            pass
         return None
 
 
@@ -142,13 +152,24 @@ def get_snapshot(api: sj.Shioaji, code: str) -> Optional[dict]:
         if not snaps:
             return None
         s = snaps[0]
-        return {
+        result = {
             "close":        s.close,
             "volume":       s.total_volume,
             "change_price": s.change_price,
         }
+        try:
+            import connection_watchdog
+            connection_watchdog.report_success()
+        except Exception:
+            pass
+        return result
     except Exception as e:
         log.warning("get_snapshot(%s) error: %s", code, e)
+        try:
+            import connection_watchdog
+            connection_watchdog.report_failure(str(e))
+        except Exception:
+            pass
         return None
 
 

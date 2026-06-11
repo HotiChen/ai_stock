@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS daily_trades (
     pnl         REAL,
     lot_type    TEXT DEFAULT 'common',
     sector      TEXT DEFAULT '未知',
-    note        TEXT
+    note        TEXT,
+    executed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -183,7 +184,7 @@ def _conn(path: str) -> sqlite3.Connection:
 
 
 def _upgrade_daily_trades(con: sqlite3.Connection) -> None:
-    """Idempotent migration: add lot_type / sector columns to daily_trades if absent.
+    """Idempotent migration: add lot_type / sector / executed_at columns to daily_trades if absent.
 
     Needed for databases created before this schema version.
     SQLite does not support ADD COLUMN IF NOT EXISTS, so we check PRAGMA first.
@@ -193,6 +194,8 @@ def _upgrade_daily_trades(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE daily_trades ADD COLUMN lot_type TEXT DEFAULT 'common'")
     if "sector" not in existing:
         con.execute("ALTER TABLE daily_trades ADD COLUMN sector TEXT DEFAULT '未知'")
+    if "executed_at" not in existing:
+        con.execute("ALTER TABLE daily_trades ADD COLUMN executed_at TEXT")
 
 
 def init_db(path: str) -> None:
@@ -399,20 +402,25 @@ def save_daily_trade(trade: dict, path: str) -> None:
 
     Required keys: trade_date, code, action.
     Optional keys: name, quantity, price, amount, pnl (nullable),
-                   lot_type (default 'common'), sector (default '未知'), note.
+                   lot_type (default 'common'), sector (default '未知'), note,
+                   executed_at (default: datetime.now() ISO 8601 to seconds).
 
     ``lot_type`` and ``sector`` are stored as proper columns so that
     load_current_positions() can build a risk_guard-compatible position record
     without parsing free-text strings.
+    ``executed_at`` records the wall-clock time of execution for audit purposes.
     """
     td = trade.get("trade_date")
     td_str = td.isoformat() if isinstance(td, date) else str(td)
+    executed_at = trade.get("executed_at")
+    if executed_at is None:
+        executed_at = datetime.now().isoformat(timespec="seconds")
     with _conn(path) as con:
         con.execute(
             "INSERT INTO daily_trades "
             "(trade_date, code, name, action, quantity, price, amount, pnl, "
-            " lot_type, sector, note) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " lot_type, sector, note, executed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 td_str,
                 trade.get("code"),
@@ -425,6 +433,7 @@ def save_daily_trade(trade: dict, path: str) -> None:
                 trade.get("lot_type", "common"),
                 trade.get("sector", "未知"),
                 trade.get("note"),
+                executed_at,
             ),
         )
 
@@ -433,21 +442,21 @@ def load_daily_trades(trade_date: date, path: str) -> list[dict]:
     """Return all trades for the given date.
 
     Each dict contains: code, name, action, quantity, price, amount, pnl,
-                        lot_type, sector, note.
+                        lot_type, sector, note, executed_at.
     """
     with _conn(path) as con:
         rows = con.execute(
             "SELECT code, name, action, quantity, price, amount, pnl, "
-            "       lot_type, sector, note "
+            "       lot_type, sector, note, executed_at "
             "FROM daily_trades WHERE trade_date=? ORDER BY id",
             (trade_date.isoformat(),),
         ).fetchall()
     return [
         {
-            "code":     r[0], "name":     r[1], "action":   r[2],
-            "quantity": r[3], "price":    r[4], "amount":   r[5],
-            "pnl":      r[6], "lot_type": r[7], "sector":   r[8],
-            "note":     r[9],
+            "code":        r[0], "name":     r[1], "action":      r[2],
+            "quantity":    r[3], "price":    r[4], "amount":      r[5],
+            "pnl":         r[6], "lot_type": r[7], "sector":      r[8],
+            "note":        r[9], "executed_at": r[10],
         }
         for r in rows
     ]
