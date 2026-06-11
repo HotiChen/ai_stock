@@ -1044,6 +1044,12 @@ def main() -> None:
 
     log.info("main.py started — simulation=%s", SIMULATION)
 
+    try:
+        import preflight
+        preflight.run_preflight()
+    except Exception as e:
+        log.warning("preflight: 啟動前檢查失敗（已忽略）：%s", e)
+
     from notifier import notify_system_start, notify_system_stop, notify_market_open, notify_market_close
     notify_system_start(SIMULATION)
 
