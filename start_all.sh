@@ -21,7 +21,9 @@ python3 youtube_analyzer.py --send >> logs/youtube.log 2>&1 &
 echo "[$(date '+%H:%M:%S')] ✅ youtube_analyzer 執行中"
 
 # ── 1. 主系統排程（main.py）──────────────────────────────
-if pgrep -f "python3 main.py" > /dev/null 2>&1; then
+# 注意：macOS 上 python3 的程序名會解析成 ".../Python.app/.../Python main.py"，
+# 必須用 "[Pp]ython... main.py" 匹配，寫死 "python3 main.py" 會永遠匹配不到。
+if pgrep -f "[Pp]ython[0-9.]* main\.py" > /dev/null 2>&1; then
   echo "[$(date '+%H:%M:%S')] main.py 已在執行，略過"
 else
   nohup python3 main.py >> logs/main.log 2>&1 &
@@ -29,7 +31,7 @@ else
 fi
 
 # ── 2. Telegram Bot ──────────────────────────────────────
-if pgrep -f "python3 telegram_bot.py" > /dev/null 2>&1; then
+if pgrep -f "[Pp]ython[0-9.]* telegram_bot" > /dev/null 2>&1; then
   echo "[$(date '+%H:%M:%S')] telegram_bot.py 已在執行，略過"
 else
   nohup python3 telegram_bot.py >> logs/telegram.log 2>&1 &
