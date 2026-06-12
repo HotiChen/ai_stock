@@ -99,12 +99,24 @@ def analyze_sentiment(headlines: list[str]) -> dict:
 
 
 def get_news_context() -> dict:
-    """Full pipeline: fetch → analyze → return context dict.
+    """Full pipeline: fetch → [local LLM pre-filter] → analyze → return context dict.
 
     headlines 為結構化 dict list（title/url/published/source）；
     為向後相容保留 headlines_text（純標題 list[str]）。
+
+    local LLM 前置過濾：僅在 LOCAL_LLM_BASE_URL 設定時啟用；任何失敗皆 fail-open
+    （保留全部 headlines），不影響既有行為。
     """
     items = fetch_headlines_structured()
+
+    # --- local LLM opt-in pre-filter（廉價前置過濾，fail-open）---
+    try:
+        import local_llm_client  # lazy import：未安裝時不影響載入
+        if local_llm_client.is_enabled():
+            items = local_llm_client.filter_stock_relevant_headlines(items)
+    except Exception:  # noqa: BLE001
+        pass  # fail-open：任何意外直接略過，保留原始 items
+
     titles = [item["title"] for item in items]
     sentiment = analyze_sentiment(titles)
     sentiment["fetched_at"] = datetime.now().isoformat()
