@@ -1252,11 +1252,21 @@ def main() -> None:
             try:
                 from daytrading_review import run_daytrading_review
                 review_msg = run_daytrading_review()
-                if review_msg:
+                if review_msg and TELEGRAM_CHAT_ID:
                     from telegram_bot import send_text
                     send_text(TELEGRAM_CHAT_ID, review_msg)
             except Exception as e:
                 log.warning("daytrading_review failed: %s", e)
+
+            # 老薑收盤檢討：分析錯誤原因 + 生成 Gemini 明日補充請求
+            try:
+                from super_trader import run_postmarket_review
+                postmarket_msg = run_postmarket_review()
+                if postmarket_msg and TELEGRAM_CHAT_ID:
+                    from telegram_bot import send_text
+                    send_text(TELEGRAM_CHAT_ID, postmarket_msg)
+            except Exception as e:
+                log.warning("postmarket_review failed: %s", e)
 
             time.sleep(60)
 

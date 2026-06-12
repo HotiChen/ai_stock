@@ -215,7 +215,7 @@ def build_briefing_prompt(market_data: MarketData) -> str:
 
     news_text = "\n".join(f"  - {n}" for n in market_data.news_items) or "  （無新聞資料）"
 
-    return f"""你是一位資深台股市場分析師，每天早上 8 點整合全球市場數據，給出今日台股操作建議。
+    prompt = f"""你是一位資深台股市場分析師，每天早上 8 點整合全球市場數據，給出今日台股操作建議。
 
 === 今日市場數據（{market_data.date}）===
 
@@ -250,6 +250,17 @@ def build_briefing_prompt(market_data: MarketData) -> str:
   "key_opportunities": ["機會1", "機會2"],
   "sector_focus": ["今日重點產業1", "今日重點產業2"]
 }}"""
+
+    # 注入老薑昨日補充請求（讓 Gemini 今天主動蒐集缺失資料）
+    try:
+        from super_trader import get_yesterday_hints
+        hints = get_yesterday_hints()
+        if hints:
+            prompt += f"\n\n{hints}\n（請在上方 JSON 的 ai_analysis 中確認你已查閱以上補充資料）"
+    except Exception:
+        pass
+
+    return prompt
 
 
 # ── Parser ────────────────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from ai_client import call_haiku
@@ -24,16 +24,18 @@ _MIN_DT_SCORE = 4  # 低於此分數直接 skip，不呼叫 AI
 
 @dataclass
 class DayTradingAnalysis:
-    code:         str
-    name:         str
-    action:       str            # "long" | "skip"
-    confidence:   int            # 0–10
-    entry_low:    Optional[float]
-    entry_high:   Optional[float]
-    target_price: Optional[float]
-    stop_loss:    Optional[float]
-    timing:       str            # "開盤" | "拉回" | "突破" | "觀望"
-    summary:      str
+    code:               str
+    name:               str
+    action:             str            # "long" | "skip"
+    confidence:         int            # 0–10
+    entry_low:          Optional[float]
+    entry_high:         Optional[float]
+    target_price:       Optional[float]
+    stop_loss:          Optional[float]
+    timing:             str            # "開盤" | "拉回" | "突破" | "觀望"
+    summary:            str
+    data_quality_score: int = 5        # 老薑評分：0-10
+    missing_data:       list[str] = field(default_factory=list)
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
@@ -45,6 +47,7 @@ def build_daytrading_prompt(
     chip: Optional[dict],
     market: Optional[dict],
     dt_score: int,
+    extra_context: str = "",
 ) -> str:
     # ── 技術指標 ──
     if indicators:
@@ -84,9 +87,18 @@ def build_daytrading_prompt(
     else:
         market_text = "大盤資料無法取得"
 
-    return f"""你是一位台股當沖交易專家，請針對以下資料給出今日當沖操作建議。
+    try:
+        from super_trader import get_persona
+        persona = get_persona()
+    except Exception:
+        persona = "你是一位台股當沖交易專家。"
 
-股票：{code} {name}　當沖評分：{dt_score}/10
+    extra_section = f"\n\n【Gemini 補充資料】\n{extra_context}" if extra_context else ""
+
+    return f"""{persona}
+
+---
+股票：{code} {name}　技術評分：{dt_score}/10
 
 【技術指標】
 {tech_text}
@@ -95,26 +107,22 @@ def build_daytrading_prompt(
 {chip_text}
 
 【大盤方向】
-{market_text}
+{market_text}{extra_section}
 
-請依據以上資料，判斷今日是否適合當沖做多，並給出具體進場建議。
-- 若不適合（評分低、籌碼差、大盤崩跌），action 填 "skip"
-- 進場時機：開盤（直接進）、拉回（等回測支撐）、突破（等突破壓力）
-- 進場區間參考現價 ± ATR / 2
-- price_hint 僅供參考方向（上方壓力 / 下方支撐的概念），系統會用 ATR 公式自動計算實際停損目標
-- 若有明顯技術壓力或支撐請填入 resistance / support，系統會據此修正目標價上限
-
-只回答 JSON，不要其他文字：
+---
+請依鐵律與分析框架判斷今日是否做多，只回傳 JSON，不要其他文字：
 {{
   "action": "long 或 skip",
   "confidence": 0到10,
   "entry_low": 進場低點或null,
   "entry_high": 進場高點或null,
-  "price_hint": "簡短說明價位方向，如「壓力在120，支撐在115」，可為null",
+  "price_hint": "簡短說明壓力支撐或null",
   "resistance": 近期壓力價或null,
   "support": 近期支撐價或null,
   "timing": "開盤 或 拉回 或 突破 或 觀望",
-  "summary": "一到兩句話的當沖建議"
+  "summary": "一句話，像老操盤手說話，要有數字",
+  "data_quality_score": 0到10的整數,
+  "missing_data": ["缺少的資料項目（具體說明）"]
 }}"""
 
 
@@ -257,6 +265,23 @@ def parse_daytrading_response(
             if sl is not None and el is not None and sl >= el:
                 sl = round(el * 0.97, 2)
 
+        dqs     = int(data.get("data_quality_score") or 5)
+        missing = [str(x) for x in (data.get("missing_data") or [])]
+
+        # 老薑鐵律：資料品質 < 6 → 強制 skip
+        if dqs < 6 and action == "long":
+            log.info("parse_daytrading_response: %s data_quality=%d < 6 → skip", code, dqs)
+            return DayTradingAnalysis(
+                code=code, name=name,
+                action="skip", confidence=0,
+                entry_low=None, entry_high=None,
+                target_price=None, stop_loss=None,
+                timing="觀望",
+                summary=f"資料品質不足（{dqs}/10），老薑建議跳過",
+                data_quality_score=dqs,
+                missing_data=missing,
+            )
+
         return DayTradingAnalysis(
             code=code, name=name,
             action=action, confidence=confidence,
@@ -264,6 +289,8 @@ def parse_daytrading_response(
             target_price=tp, stop_loss=sl,
             timing=timing,
             summary=data.get("summary", ""),
+            data_quality_score=dqs,
+            missing_data=missing,
         )
     except Exception as e:
         log.debug("parse_daytrading_response failed: %s", e)
@@ -397,6 +424,7 @@ def run_daytrading_analysis(
     chip: Optional[dict],
     market: Optional[dict],
     dt_score: int,
+    extra_context: str = "",
 ) -> DayTradingAnalysis:
     """呼叫 Haiku 做當沖 AI 分析。dt_score < 4 直接回傳 skip，節省 API 成本。"""
     _skip = DayTradingAnalysis(
@@ -410,8 +438,11 @@ def run_daytrading_analysis(
         return _skip
 
     try:
-        prompt = build_daytrading_prompt(code, name, indicators, chip, market, dt_score)
-        raw    = call_haiku(prompt)
+        prompt = build_daytrading_prompt(
+            code, name, indicators, chip, market, dt_score,
+            extra_context=extra_context,
+        )
+        raw = call_haiku(prompt)
         return parse_daytrading_response(code, name, raw, indicators=indicators)
     except Exception as e:
         log.warning("run_daytrading_analysis failed for %s: %s", code, e)
