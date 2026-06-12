@@ -38,7 +38,10 @@ def _market(pct=0.5):
 
 def _valid_json(action="long", confidence=7,
                 entry_low=99.0, entry_high=101.0,
-                target_price=105.0, stop_loss=97.0):
+                target_price=105.0, stop_loss=97.0,
+                data_quality_score=7):
+    # data_quality_score 預設 7（≥6）：老薑鐵律會把品質 <6 的分析強制 skip，
+    # 此 fixture 模擬「資料品質充足」的正常回應。
     return json.dumps({
         "action": action,
         "confidence": confidence,
@@ -48,6 +51,8 @@ def _valid_json(action="long", confidence=7,
         "stop_loss": stop_loss,
         "timing": "拉回",
         "summary": "量比充足，站上 VWAP，適合逢拉回買進。",
+        "data_quality_score": data_quality_score,
+        "missing_data": [],
     })
 
 
