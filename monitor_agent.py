@@ -14,16 +14,20 @@ Flow:
 
 import queue
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 import shioaji as sj
 from shioaji.constant import QuoteType, QuoteVersion
 
+from atomic_json import atomic_read_json, atomic_write_json
 from logger import get_logger
 from executor import force_stop_loss
 from notifier import notify_price_alert
-from research_db import init_db, save_alert, mark_alert_sent
+from research_db import init_db, save_alert, mark_alert_sent, save_daily_trade
+
+# 波段移動停損最高點 sidecar（重啟後還原 peak，避免誤觸發移動停損）
+_DEFAULT_PEAKS_PATH = "data/wave_peaks.json"
 
 log = get_logger(__name__)
 
@@ -245,6 +249,38 @@ class AlertWorker:
                                     "AlertWorker auto-execute: 停損/追蹤停利賣出 %s qty=%d lot=%s",
                                     code, quantity, lot_type,
                                 )
+                                # GAP 1：把自動出場寫入 daily_trades，
+                                # 讓 PostMarketJob 能計算其損益、歸因出場原因。
+                                # 包在 try/except，DB 失敗絕不可中斷 alert thread。
+                                try:
+                                    exit_price = alert.get("current_price")
+                                    entry_price = pick.get("entry_price")
+                                    if (
+                                        entry_price is not None
+                                        and exit_price is not None
+                                        and quantity
+                                    ):
+                                        pnl = (exit_price - entry_price) * quantity
+                                    else:
+                                        pnl = None
+                                    save_daily_trade({
+                                        "trade_date":  date.today(),
+                                        "code":        code,
+                                        "name":        name,
+                                        "action":      "sell",
+                                        "quantity":    quantity,
+                                        "price":       exit_price,
+                                        "pnl":         pnl,
+                                        "lot_type":    lot_type,
+                                        "sector":      pick.get("sector", "未知"),
+                                        "note":        "auto_exit",
+                                        "exit_reason": alert.get("alert_type"),
+                                    }, self._db_path)
+                                except Exception as rec_err:
+                                    log.error(
+                                        "AlertWorker auto-execute: 記錄出場失敗 %s: %s",
+                                        code, rec_err,
+                                    )
                             else:
                                 log.error(
                                     "AlertWorker auto-execute: force_stop_loss 失敗 %s", code,
@@ -291,6 +327,7 @@ class MonitorAgent:
         trailing_start_pct: float = _TRAILING_START_PCT,
         trailing_gap_pct: float = _TRAILING_GAP_PCT,
         auto_execute: bool = False,
+        peaks_path: str = _DEFAULT_PEAKS_PATH,
     ) -> None:
         self._api_key              = api_key
         self._secret_key           = secret_key
@@ -300,6 +337,7 @@ class MonitorAgent:
         self._trailing_start_pct   = trailing_start_pct
         self._trailing_gap_pct     = trailing_gap_pct
         self._auto_execute         = auto_execute
+        self._peaks_path           = peaks_path
 
         self.running: bool              = False
         self._api: Optional[sj.Shioaji] = api
@@ -318,11 +356,72 @@ class MonitorAgent:
             for p in (picks or [])
             if p.get("code")
         }
+        self._seed_peaks_from_sidecar()
+
+    # ── 移動停損最高點持久化（GAP 2）────────────────────────────────────────
+    #
+    # peak_price 只存在 in-memory watchlist dict，main.py 重啟後若不還原，
+    # peak 會歸零回 entry → 移動停損誤觸發。以 sidecar JSON 持久化高水位。
+    # 僅 RECORD/PERSIST peak，不改動任何出場門檻或觸發邏輯。
+
+    def _load_peaks(self) -> dict:
+        """讀取 sidecar，回傳 {code: peak_price}；檔案缺失/損毀回 {}。"""
+        data = atomic_read_json(self._peaks_path)
+        if not isinstance(data, dict):
+            return {}
+        out = {}
+        for k, v in data.items():
+            try:
+                out[k] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _seed_peaks_from_sidecar(self) -> None:
+        """set_watchlist / start 時呼叫：以 max(entry, persisted) seed 每檔 peak。
+
+        只 seed 今日 watchlist 內的 code；sidecar 中的 stale 條目忽略。
+        """
+        persisted = self._load_peaks()
+        for code, pick in self._watchlist.items():
+            entry = pick.get("entry_price")
+            if entry is None:
+                continue
+            seed = entry
+            if code in persisted:
+                seed = max(entry, persisted[code])
+            pick["peak_price"] = seed
+
+    def _record_peak(self, code: str, price: float) -> None:
+        """若 price 創新高則更新 in-memory peak 並持久化 sidecar（原子寫入）。
+
+        peak 只升不降；非今日 watchlist 的 code 不處理。
+        DB/檔案失敗不可中斷監控執行緒。
+        """
+        pick = self._watchlist.get(code)
+        if pick is None:
+            return
+        entry = pick.get("entry_price") or 0.0
+        peak = pick.get("peak_price") or entry
+        if price <= peak:
+            return
+        pick["peak_price"] = price
+        try:
+            peaks = self._load_peaks()
+            # 只保留今日 watchlist 的 code，順帶清除 stale 條目
+            peaks = {c: v for c, v in peaks.items() if c in self._watchlist}
+            peaks[code] = price
+            atomic_write_json(self._peaks_path, peaks)
+        except Exception as e:
+            log.warning("wave_peaks 持久化失敗 %s: %s", code, e)
 
     def start(self) -> None:
         if self._api is None:
             self._api = ensure_connected(self._api_key, self._secret_key, self._simulation)
         self.running = True
+
+        # 重啟還原移動停損高水位（若 set_watchlist 後 sidecar 才出現也能補上）
+        self._seed_peaks_from_sidecar()
 
         self._worker = AlertWorker(
             self._alert_queue, self._db_path, self._telegram_chat_id,
@@ -357,6 +456,9 @@ class MonitorAgent:
             price = float(tick.close)
             pick = watchlist.get(tick.code)
             if pick is not None:
+                # GAP 2：新高時持久化 peak（check_price_alerts 也會更新 in-memory，
+                # 這裡額外把高水位寫入 sidecar 以利重啟還原）
+                self._record_peak(tick.code, price)
                 alerts = check_price_alerts(
                     tick.code, price, pick,
                     trailing_start_pct=trailing_start,

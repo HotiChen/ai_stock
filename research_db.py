@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS daily_trades (
     lot_type    TEXT DEFAULT 'common',
     sector      TEXT DEFAULT '未知',
     note        TEXT,
-    executed_at TEXT
+    executed_at TEXT,
+    exit_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -184,7 +185,7 @@ def _conn(path: str) -> sqlite3.Connection:
 
 
 def _upgrade_daily_trades(con: sqlite3.Connection) -> None:
-    """Idempotent migration: add lot_type / sector / executed_at columns to daily_trades if absent.
+    """Idempotent migration: add lot_type / sector / executed_at / exit_reason columns to daily_trades if absent.
 
     Needed for databases created before this schema version.
     SQLite does not support ADD COLUMN IF NOT EXISTS, so we check PRAGMA first.
@@ -196,6 +197,8 @@ def _upgrade_daily_trades(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE daily_trades ADD COLUMN sector TEXT DEFAULT '未知'")
     if "executed_at" not in existing:
         con.execute("ALTER TABLE daily_trades ADD COLUMN executed_at TEXT")
+    if "exit_reason" not in existing:
+        con.execute("ALTER TABLE daily_trades ADD COLUMN exit_reason TEXT")
 
 
 def init_db(path: str) -> None:
@@ -403,12 +406,15 @@ def save_daily_trade(trade: dict, path: str) -> None:
     Required keys: trade_date, code, action.
     Optional keys: name, quantity, price, amount, pnl (nullable),
                    lot_type (default 'common'), sector (default '未知'), note,
-                   executed_at (default: datetime.now() ISO 8601 to seconds).
+                   executed_at (default: datetime.now() ISO 8601 to seconds),
+                   exit_reason (nullable: e.g. 'stop_loss' / 'trailing_stop').
 
     ``lot_type`` and ``sector`` are stored as proper columns so that
     load_current_positions() can build a risk_guard-compatible position record
     without parsing free-text strings.
     ``executed_at`` records the wall-clock time of execution for audit purposes.
+    ``exit_reason`` records a structured reason for sell exits (auto stop-loss /
+    trailing-stop) so PostMarketJob can attribute auto-exits; None for entries.
     """
     td = trade.get("trade_date")
     td_str = td.isoformat() if isinstance(td, date) else str(td)
@@ -419,8 +425,8 @@ def save_daily_trade(trade: dict, path: str) -> None:
         con.execute(
             "INSERT INTO daily_trades "
             "(trade_date, code, name, action, quantity, price, amount, pnl, "
-            " lot_type, sector, note, executed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " lot_type, sector, note, executed_at, exit_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 td_str,
                 trade.get("code"),
@@ -434,6 +440,7 @@ def save_daily_trade(trade: dict, path: str) -> None:
                 trade.get("sector", "未知"),
                 trade.get("note"),
                 executed_at,
+                trade.get("exit_reason"),
             ),
         )
 
@@ -442,12 +449,12 @@ def load_daily_trades(trade_date: date, path: str) -> list[dict]:
     """Return all trades for the given date.
 
     Each dict contains: code, name, action, quantity, price, amount, pnl,
-                        lot_type, sector, note, executed_at.
+                        lot_type, sector, note, executed_at, exit_reason.
     """
     with _conn(path) as con:
         rows = con.execute(
             "SELECT code, name, action, quantity, price, amount, pnl, "
-            "       lot_type, sector, note, executed_at "
+            "       lot_type, sector, note, executed_at, exit_reason "
             "FROM daily_trades WHERE trade_date=? ORDER BY id",
             (trade_date.isoformat(),),
         ).fetchall()
@@ -456,7 +463,7 @@ def load_daily_trades(trade_date: date, path: str) -> list[dict]:
             "code":        r[0], "name":     r[1], "action":      r[2],
             "quantity":    r[3], "price":    r[4], "amount":      r[5],
             "pnl":         r[6], "lot_type": r[7], "sector":      r[8],
-            "note":        r[9], "executed_at": r[10],
+            "note":        r[9], "executed_at": r[10], "exit_reason": r[11],
         }
         for r in rows
     ]
