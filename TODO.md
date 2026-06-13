@@ -27,3 +27,22 @@
 - [x] Playbook 迴圈：research_playbook.md + playbook_updater.py + 13:50 排程
 - [ ] 件3 對照組命中率報表（等件1 資料累積兩週後做）
 - [ ] adaptive_scorer per-signal 權重自調（等件3 跑滿一個月再評估）
+
+## 2026-06-13 退場機制缺口（程式碼調查發現，見下表）
+- [ ] 🔴 波段自動賣出寫入 daily_trades：AlertWorker auto_execute 觸發 force_stop_loss 後須 save_daily_trade（否則 PostMarketJob 算不出損益）
+- [ ] 🔴 波段 trailing stop peak_price 持久化（目前只在 MonitorAgent 記憶體，main.py 重啟即歸零→誤觸發）
+- [ ] daily_trades 加 exit_reason 結構化欄位（stop_loss/take_profit/trailing_stop/force_close）
+- [ ] 跨日持倉追蹤（positions table；load_current_positions 只讀當日）
+- [ ] 統一波段/當沖兩套退場邏輯可靠度
+
+## 2026-06-13 Humbled Trader 移植（評估後保留項，見對話）
+### 第一波（高優先，依賴少）
+- [ ] 一句話新聞催化劑 catalyst_sentence：每檔附 call_haiku 生成的一句新聞摘要（基礎已具：news_refs 來源追溯）
+- [ ] 試撮資料接入 + 跳空>5%/股價門檻條件 + 帶日期 Top10 JSON 快照 + 08:35 盤前掃描推播
+### 第二波（依賴第一波試撮資料）
+- [ ] 五條件趨勢突破策略 thread（開盤30分後/現價>昨高/昨收>200SMA/現價>試撮高/突破當日新高；注意台股10%漲跌幅對跳空條件影響）
+### 不採用
+- TradingView MCP（依賴 macOS 桌面版，無法無人值守，與 cron 自動化衝突）
+- 09:30 起每30分鐘輪詢（現有 MonitorAgent tick 級即時監控已更優，不倒退）
+### 回測紀律（移植時必守，見 docs/backtest_discipline.md）
+- [ ] 回測≥2年（涵蓋完整多空週期）；單標的樣本<30筆不採用；計入手續費/證交稅/滑價；新訊號 paper trading≥1季再實盤
