@@ -35,6 +35,8 @@ class DeepAnalysis:
     stop_loss_price: Optional[float] = None
     # AI 實際引用的新聞（依 news_refs_used 還原為完整 dict），預設空 list
     news_refs:       list = field(default_factory=list)
+    # 一句話新聞催化劑摘要（≤40字，附 [N#]，無真實 catalyst 時為空字串）
+    catalyst_sentence: str = ""
 
 
 # ── Historical price trend ────────────────────────────────────────────────────
@@ -140,6 +142,11 @@ def build_deep_prompt(
 
 請在輸出中以 "news_refs_used" 列出你「實際引用」的新聞編號（如 ["N1", "N3"]）；若未引用任何新聞，回傳空陣列 []。
 
+另外請在 "catalyst" 欄位提供一句話（≤40字）的新聞催化劑摘要：
+- 用繁體中文說明今日這檔股票最重要的一個新聞 / 事件 catalyst，並引用對應的 [N#] 編號
+- 若無真實的 catalyst（無相關新聞、或新聞已 price-in），請回傳空字串 ""
+- 絕對不得捏造或虛構 catalyst，沒有就填空字串，不要捏造不存在的事件
+
 只回答 JSON，不要其他文字：
 {{
   "signal": "buy/hold/sell",
@@ -156,7 +163,8 @@ def build_deep_prompt(
   "hold_days": 建議持有天數整數,
   "target_price": 目標價或null,
   "stop_loss_price": 停損價或null,
-  "news_refs_used": ["N1", "N3"]
+  "news_refs_used": ["N1", "N3"],
+  "catalyst": "≤40字的催化劑一句話，引用[N#]；無真實catalyst則填 \\"\\""
 }}"""
 
 
@@ -210,6 +218,9 @@ def parse_deep_response(
             tw_policy=f.get("tw_policy", ""),
             us_policy=f.get("us_policy", ""),
         )
+        # catalyst 欄位：容忍缺漏、None、非字串，一律退化為空字串
+        raw_catalyst = data.get("catalyst", "")
+        catalyst_sentence = raw_catalyst if isinstance(raw_catalyst, str) else ""
         return DeepAnalysis(
             code=code, name=name, signal=signal, confidence=confidence,
             summary=data.get("summary", ""),
@@ -218,6 +229,7 @@ def parse_deep_response(
             target_price=data.get("target_price"),
             stop_loss_price=data.get("stop_loss_price"),
             news_refs=_resolve_news_refs(data, news),
+            catalyst_sentence=catalyst_sentence,
         )
     except Exception:
         return DeepAnalysis(code=code, name=name, signal="hold", confidence=0,

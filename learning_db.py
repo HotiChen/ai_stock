@@ -50,6 +50,7 @@ class StockPredictionLog:
     factors_json: Optional[str] = None    # JSON: {technical, chip, news, theme}
     news_refs: Optional[str] = None       # JSON array：AI 實際引用的新聞
     youtube_refs: Optional[str] = None    # JSON array：AI 引用的 YouTube 來源
+    catalyst_sentence: Optional[str] = None  # 一句話新聞催化劑摘要（≤40字）
 
 
 @dataclass
@@ -124,6 +125,7 @@ class LearningDB:
         ("factors_json", "TEXT"),
         ("news_refs", "TEXT"),
         ("youtube_refs", "TEXT"),
+        ("catalyst_sentence", "TEXT"),
     )
 
     def _migrate(self) -> None:
@@ -219,8 +221,9 @@ class LearningDB:
                 INSERT OR IGNORE INTO stock_prediction_log
                     (date, code, name, action, confidence, expected_return_pct,
                      entry_price, closing_price, actual_return_pct, was_correct,
-                     reason, factors_json, news_refs, youtube_refs)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     reason, factors_json, news_refs, youtube_refs,
+                     catalyst_sentence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 self._date_str(pred.date), pred.code, pred.name,
                 pred.action, pred.confidence, pred.expected_return_pct,
@@ -228,6 +231,7 @@ class LearningDB:
                 pred.actual_return_pct,
                 None if pred.was_correct is None else int(pred.was_correct),
                 pred.reason, pred.factors_json, pred.news_refs, pred.youtube_refs,
+                pred.catalyst_sentence,
             ))
 
     def update_closing_price(
@@ -303,6 +307,7 @@ class LearningDB:
             factors_json=_opt("factors_json"),
             news_refs=_opt("news_refs"),
             youtube_refs=_opt("youtube_refs"),
+            catalyst_sentence=_opt("catalyst_sentence"),
         )
 
     # ── Analytics ────────────────────────────────────────────────────────────
