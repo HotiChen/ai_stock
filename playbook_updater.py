@@ -19,6 +19,7 @@ fail-safe 原則：
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 from datetime import date
@@ -407,8 +408,8 @@ def notify_playbook_update(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def run_daily_update(
-    playbook_path: str,
-    db_path: str,
+    playbook_path: Optional[str] = None,
+    db_path: Optional[str] = None,
     day: Optional[date] = None,
 ) -> bool:
     """PlaybookUpdateJob 主流程（fail-safe orchestrator）。
@@ -417,13 +418,20 @@ def run_daily_update(
     永不 raise（供排程器安全呼叫）。
 
     Args:
-        playbook_path: research_playbook.md 的路徑。
-        db_path:       learning.db 的路徑。
+        playbook_path: research_playbook.md 的路徑（預設讀 env PLAYBOOK_PATH，
+                       再退回 "research_playbook.md"）。
+        db_path:       learning.db 的路徑（預設讀 env DB_PATH，再退回
+                       "data/learning.db"）——讓 main.py 的 PlaybookUpdateJob
+                       可無參數呼叫 run_daily_update()。
         day:           更新日期（預設為今天）。
 
     Returns:
         True 表示成功更新並 commit；False 表示任何失敗。
     """
+    if playbook_path is None:
+        playbook_path = os.getenv("PLAYBOOK_PATH", "research_playbook.md")
+    if db_path is None:
+        db_path = os.getenv("DB_PATH", "data/learning.db")
     if day is None:
         day = date.today()
 
