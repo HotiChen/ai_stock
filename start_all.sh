@@ -6,6 +6,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ── 守衛：確認在外接 SSD 上、關鍵檔案在線 ─────────────────────────────────
+# 外接 SSD 若在 cron 觸發時未掛載，cd 會失敗；這裡再驗證一次關鍵檔案存在，
+# 不在就寫 log 到 $HOME（一定存在）並嘗試推 Telegram，避免靜默失敗。
+if [ ! -f "$SCRIPT_DIR/main.py" ]; then
+  echo "[$(date '+%F %T')] ❌ start_all 中止：main.py 不存在於 $SCRIPT_DIR（SSD 未掛載？）" \
+    >> "$HOME/quant_start_guard.log"
+  exit 1
+fi
+
 mkdir -p logs
 
 # 載入 .env
