@@ -321,6 +321,95 @@ class TestAssessDayTradingChipMarket:
         assert 0 <= result["score"] <= 10
 
 
+class TestSaveWatchingPositions:
+    """8b. 儲存盤中監控倉位：所有 AI 分析過的 qualified 標的都要存成 watching，
+    不再只存 AI 判斷 long 的，讓 9:05 開盤再確認能對每一支重新判斷。"""
+
+    def _run(self, ai_results):
+        """ai_results: dict[code] -> DayTradingAnalysis，模擬 run_daytrading_analysis 回傳。
+        回傳 save_daytrading_positions 收到的 positions list（None = 未被呼叫）。"""
+        from daytrading_report import build_daytrading_report
+        from daytrading_monitor import DaytradingPosition
+
+        picks = [_make_pick(c, n) for c, n in
+                 [("2337", "旺宏"), ("2449", "京元電子"), ("2330", "台積電")]]
+        assessment = _make_assessment(score=8, data_ok=True)
+        captured = {}
+
+        def _fake_save(positions, *a, **k):
+            captured["positions"] = positions
+
+        def _fake_ai(code, name, **kw):
+            return ai_results[code]
+
+        with patch("daytrading_report._get_stock_universe", return_value=picks), \
+             patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
+             patch("daytrading_report._fetch_market",
+                   return_value={"index_change_pct": 0.0, "futures_premium_pct": 0.0}), \
+             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._get_indicators", return_value=None), \
+             patch("stock_query._assess_day_trading", return_value=assessment), \
+             patch("daytrading_report.run_daytrading_analysis", side_effect=_fake_ai), \
+             patch("daytrading_monitor.save_daytrading_positions", side_effect=_fake_save):
+            build_daytrading_report(api=None, db_path=":memory:")
+        return captured.get("positions")
+
+    def _ai(self, code, name, action="long"):
+        from daytrading_analyzer import DayTradingAnalysis
+        if action == "long":
+            return DayTradingAnalysis(
+                code=code, name=name, action="long", confidence=8,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                timing="拉回", summary=f"{name} 量比充足",
+            )
+        return DayTradingAnalysis(
+            code=code, name=name, action="skip", confidence=0,
+            entry_low=None, entry_high=None,
+            target_price=None, stop_loss=None,
+            timing="觀望", summary=f"{name} 開盤氣氛不明，觀望",
+        )
+
+    def test_skip_picks_saved_as_watching(self):
+        """AI 判斷 skip 的標的（如今天 2337/2449）仍要存成 watching。"""
+        ai_results = {
+            "2337": self._ai("2337", "旺宏", action="skip"),
+            "2449": self._ai("2449", "京元電子", action="skip"),
+            "2330": self._ai("2330", "台積電", action="skip"),
+        }
+        positions = self._run(ai_results)
+        assert positions is not None, "全 skip 時仍應呼叫 save_daytrading_positions"
+        codes = {p.code for p in positions}
+        assert {"2337", "2449", "2330"}.issubset(codes)
+        assert all(p.status == "watching" for p in positions)
+
+    def test_mixed_long_and_skip_all_saved(self):
+        """long 與 skip 混合時，兩者都要存。"""
+        ai_results = {
+            "2337": self._ai("2337", "旺宏", action="long"),
+            "2449": self._ai("2449", "京元電子", action="skip"),
+            "2330": self._ai("2330", "台積電", action="long"),
+        }
+        positions = self._run(ai_results)
+        codes = {p.code for p in positions}
+        assert codes == {"2337", "2449", "2330"}
+
+    def test_skip_pick_keeps_none_prices(self):
+        """skip 標的 entry/target/stop 維持 None（監控與 9:05 reconfirm 皆 None-safe）。"""
+        ai_results = {
+            "2337": self._ai("2337", "旺宏", action="skip"),
+            "2449": self._ai("2449", "京元電子", action="long"),
+            "2330": self._ai("2330", "台積電", action="long"),
+        }
+        positions = self._run(ai_results)
+        skip_pos = next(p for p in positions if p.code == "2337")
+        assert skip_pos.entry_low is None
+        assert skip_pos.target_price is None
+        assert skip_pos.stop_loss is None
+        # ai_summary 仍保留 skip 理由，供 9:05 reconfirm 參考
+        assert "觀望" in skip_pos.ai_summary
+
+
 class TestTelegramBotDaytradingRouting:
     def _make_update(self, text):
         return {"message": {"text": text, "chat": {"id": 123}, "from": {"id": 456}}}

@@ -271,6 +271,10 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             log.debug("run_daytrading_analysis(%s) failed: %s", r["code"], e)
 
     # 8b. 儲存盤中監控倉位
+    #     存所有 AI 分析過的 qualified 標的（含 AI 判斷 skip 的），全部設為 watching，
+    #     讓 9:05 開盤再確認（run_opening_reconfirm）能對每一支結合開盤實況重新判斷。
+    #     skip 標的 entry/target/stop 為 None，監控（check_position_alerts）與
+    #     9:05 reconfirm（build_opening_reconfirm_prompt）均已 None-safe。
     try:
         from daytrading_monitor import DaytradingPosition, save_daytrading_positions
         dt_positions = [
@@ -282,7 +286,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
                 ai_summary=ai.summary,
             )
             for r in qualified[:3]
-            if (ai := ai_map.get(r["code"])) and ai.action == "long"
+            if (ai := ai_map.get(r["code"])) is not None
         ]
         if dt_positions:
             save_daytrading_positions(dt_positions)
