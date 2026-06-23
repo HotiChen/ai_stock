@@ -51,6 +51,10 @@ class DaytradingConfig:
     require_manual_confirm: bool = True
     """買入前是否需 Telegram 手動確認。False = 自動直接下買單（謹慎啟用）。"""
 
+    paper_trade_only: bool = False
+    """純紙上追蹤模式。True = 9:10 不下任何委託，只以市價紙上進場並追蹤出場
+    邏輯、收盤結算損益（與真實下單路徑完全隔離）。預設關閉。"""
+
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
@@ -73,6 +77,7 @@ def load_daytrading_config(path: str = _DEFAULT_PATH) -> DaytradingConfig:
         "trailing_gap_pct":     ("DT_TRAILING_GAP_PCT",    float),
         "force_close_time":     ("DT_FORCE_CLOSE_TIME",    str),
         "require_manual_confirm": ("DT_MANUAL_CONFIRM",    lambda v: v.lower() == "true"),
+        "paper_trade_only":     ("DT_PAPER_ONLY",          lambda v: v.lower() == "true"),
     }
     for field, (env_key, cast) in env_map.items():
         val = os.getenv(env_key)

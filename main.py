@@ -723,6 +723,62 @@ def _auto_buy_dt_positions(
         save_daytrading_positions(all_positions, path=dt_path)
 
 
+# ── Paper-trading（紙上追蹤，DT_PAPER_ONLY=true 時啟用）────────────────────────
+
+def _paper_enter_dt_positions(
+    api,
+    dt_config: "DaytradingConfig",
+    dt_path: str = "data/daytrading_positions.json",
+) -> None:
+    """9:10 紙上進場：把 watching 持倉以當前市價設為 active，不下任何委託。"""
+    import paper_trader
+    from daytrading_monitor import load_daytrading_positions, save_daytrading_positions
+
+    positions = load_daytrading_positions(path=dt_path)
+    watching  = [p for p in positions if p.status == "watching"]
+    if not watching:
+        log.info("Paper 9:10 進場：無 watching 持倉")
+        return
+
+    entered = paper_trader.paper_enter(watching, api=api, quantity=1)
+    if not entered:
+        log.info("Paper 9:10 進場：全數無法取得報價，跳過")
+        return
+
+    save_daytrading_positions(positions, path=dt_path)
+    log.info("Paper 9:10 進場 %d 檔（紙上）", len(entered))
+    if TELEGRAM_CHAT_ID:
+        try:
+            from telegram_bot import send_text
+            send_text(TELEGRAM_CHAT_ID, paper_trader.build_entry_message(entered))
+        except Exception as e:
+            log.warning("Paper 進場通知失敗: %s", e)
+
+
+def _paper_monitor_tick(
+    api,
+    dt_config: "DaytradingConfig",
+    dt_path: str = "data/daytrading_positions.json",
+) -> None:
+    """每輪呼叫：對 active 紙上持倉跑出場檢查（複用真實出場邏輯）。"""
+    import paper_trader
+    from daytrading_monitor import load_daytrading_positions, save_daytrading_positions
+
+    positions = load_daytrading_positions(path=dt_path)
+    if not any(p.status == "active" for p in positions):
+        return
+
+    changed, closed = paper_trader.paper_monitor_pass(positions, api, dt_config)
+    if changed:
+        save_daytrading_positions(positions, path=dt_path)
+    if closed and TELEGRAM_CHAT_ID:
+        try:
+            from telegram_bot import send_text
+            send_text(TELEGRAM_CHAT_ID, paper_trader.build_exit_message(closed))
+        except Exception as e:
+            log.warning("Paper 出場通知失敗: %s", e)
+
+
 # ── Day-trading sell-signal executor ─────────────────────────────────────────
 
 def _run_dt_sell_alerts(
@@ -1100,6 +1156,13 @@ def main() -> None:
             _dt_agent = None
             log.info("DT tick monitor stopped at 13:15")
 
+        # ── 紙上追蹤監控（每輪檢查；DT_PAPER_ONLY 關閉時零行為變更）──────
+        if dt_config.paper_trade_only:
+            try:
+                _paper_monitor_tick(api, dt_config)
+            except Exception as e:
+                log.warning("Paper monitor tick 失敗: %s", e)
+
         # 08:30 pre-market：波段選股 + 當沖預測報告（同時推播 Telegram）
         if t.hour == 8 and t.minute == 30 and f"{today_prefix}-0830" not in _fired_today:
             # 波段選股（原有邏輯）
@@ -1164,53 +1227,60 @@ def main() -> None:
             _fired_today.add(f"{today_prefix}-0905")
             time.sleep(60)
 
-        # 09:10 當沖下單進場（第一波）+ 啟動 tick 監控
+        # 09:10 當沖進場（第一波）+ 啟動 tick 監控
         elif t.hour == 9 and t.minute == 10:
-            try:
-                from daytrading_monitor import load_daytrading_positions
-                dt_watching = [p for p in load_daytrading_positions() if p.status == "watching"]
-                if dt_watching:
-                    if dt_config.require_manual_confirm:
-                        if TELEGRAM_CHAT_ID:
-                            send_dt_buy_confirmation(dt_watching, TELEGRAM_CHAT_ID, dt_config.budget_per_stock)
+            if dt_config.paper_trade_only:
+                # 紙上模式：不下任何委託，只以市價紙上進場並交由 _paper_monitor_tick 追蹤
+                try:
+                    _paper_enter_dt_positions(api, dt_config)
+                except Exception as e:
+                    log.warning("Paper 9:10 進場失敗: %s", e)
+            else:
+                try:
+                    from daytrading_monitor import load_daytrading_positions
+                    dt_watching = [p for p in load_daytrading_positions() if p.status == "watching"]
+                    if dt_watching:
+                        if dt_config.require_manual_confirm:
+                            if TELEGRAM_CHAT_ID:
+                                send_dt_buy_confirmation(dt_watching, TELEGRAM_CHAT_ID, dt_config.budget_per_stock)
+                        else:
+                            _auto_buy_dt_positions(api, dt_watching, dt_config)
                     else:
-                        _auto_buy_dt_positions(api, dt_watching, dt_config)
-                else:
-                    log.info("DT 9:10 進場：無 watching 持倉（9:05 全數過濾）")
-            except Exception as e:
-                log.warning("DT 9:10 下單失敗: %s", e)
+                        log.info("DT 9:10 進場：無 watching 持倉（9:05 全數過濾）")
+                except Exception as e:
+                    log.warning("DT 9:10 下單失敗: %s", e)
 
-            # 下單後啟動 tick 訂閱監控
-            try:
-                from daytrading_monitor import load_daytrading_positions
-                from monitor_agent import MonitorAgent
-                positions = load_daytrading_positions()
-                watchlist = [
-                    {
-                        "code":            p.code,
-                        "name":            p.name,
-                        "target_price":    p.target_price,
-                        "stop_loss_price": p.stop_loss,
-                        "entry_price":     p.entry_price,
-                        "quantity":        p.quantity,
-                        "lot_type":        p.lot_type,
-                    }
-                    for p in positions if p.status in ("watching", "active")
-                ]
-                if watchlist and api is not None:
-                    _dt_agent = MonitorAgent(
-                        api_key="", secret_key="", simulation=False,
-                        db_path=DB_PATH, telegram_chat_id=TELEGRAM_CHAT_ID,
-                        api=api,
-                        trailing_start_pct=dt_config.trailing_start_pct,
-                        trailing_gap_pct=dt_config.trailing_gap_pct,
-                        auto_execute=True,
-                    )
-                    _dt_agent.set_watchlist(watchlist)
-                    _dt_agent.start()
-                    log.info("DT tick 監控啟動，%d 個持倉（auto_execute=True）", len(watchlist))
-            except Exception as e:
-                log.warning("DT tick 監控啟動失敗: %s", e)
+                # 下單後啟動 tick 訂閱監控
+                try:
+                    from daytrading_monitor import load_daytrading_positions
+                    from monitor_agent import MonitorAgent
+                    positions = load_daytrading_positions()
+                    watchlist = [
+                        {
+                            "code":            p.code,
+                            "name":            p.name,
+                            "target_price":    p.target_price,
+                            "stop_loss_price": p.stop_loss,
+                            "entry_price":     p.entry_price,
+                            "quantity":        p.quantity,
+                            "lot_type":        p.lot_type,
+                        }
+                        for p in positions if p.status in ("watching", "active")
+                    ]
+                    if watchlist and api is not None:
+                        _dt_agent = MonitorAgent(
+                            api_key="", secret_key="", simulation=False,
+                            db_path=DB_PATH, telegram_chat_id=TELEGRAM_CHAT_ID,
+                            api=api,
+                            trailing_start_pct=dt_config.trailing_start_pct,
+                            trailing_gap_pct=dt_config.trailing_gap_pct,
+                            auto_execute=True,
+                        )
+                        _dt_agent.set_watchlist(watchlist)
+                        _dt_agent.start()
+                        log.info("DT tick 監控啟動，%d 個持倉（auto_execute=True）", len(watchlist))
+                except Exception as e:
+                    log.warning("DT tick 監控啟動失敗: %s", e)
             time.sleep(60)
 
         # 10:00 盤中檢查：持倉損益 + 剩餘候選（可選擇二次進場）
@@ -1237,6 +1307,18 @@ def main() -> None:
 
         # 13:35 post-market
         elif t.hour == 13 and t.minute == 35:
+            # 紙上模式：先把仍 active 的持倉強制平倉一次，再結算當日損益
+            if dt_config.paper_trade_only:
+                try:
+                    _paper_monitor_tick(api, dt_config)
+                    from paper_trader import build_paper_summary
+                    summary = build_paper_summary()
+                    if summary and TELEGRAM_CHAT_ID:
+                        from telegram_bot import send_text
+                        send_text(TELEGRAM_CHAT_ID, summary)
+                except Exception as e:
+                    log.warning("Paper 收盤結算失敗: %s", e)
+
             job = PostMarketJob(
                 monitor=monitor,
                 db_path=DB_PATH,
