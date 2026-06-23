@@ -18,13 +18,14 @@ watching 的持倉「紙上進場」（status → active），之後用**與真�
 
 持倉狀態仍沿用 daytrading_positions.json，因此既有的 10:00 / 13:00 盤中損益
 訊息會自動把紙上持倉一起報出來，無需另外處理。
+
+每筆完成的紙上進出場寫入獨立資料庫 data/paper_trades.db（paper_trade_db.py），
+支援跨日彙總查詢（近 N 日勝率、累計損益），不寫 research.db / daytrading_review.db。
 """
 from __future__ import annotations
 
-import json
 import logging
 from datetime import date, datetime
-from pathlib import Path
 
 # 複用真實當沖的出場邏輯與報價來源（不重寫，確保測的就是正式邏輯）
 from daytrading_monitor import (
@@ -32,19 +33,14 @@ from daytrading_monitor import (
     update_peak_price,
     check_position_alerts,
 )
+from paper_trade_db import PaperTrade, PaperTradeDB, _DEFAULT_PATH as _DEFAULT_DB
 
 log = logging.getLogger(__name__)
 
-_LEDGER_DIR     = "data"
 _SHARES_PER_LOT = 1000
 
 
 # ── Ledger helpers ────────────────────────────────────────────────────────────
-
-def _ledger_path(day: date | None = None, ddir: str = _LEDGER_DIR) -> str:
-    day = day or date.today()
-    return f"{ddir}/paper_trades_{day.strftime('%Y%m%d')}.json"
-
 
 def _pnl(entry_price: float, exit_price: float, quantity: int, lot_type: str) -> float:
     """紙上損益（元）。common = 整張（×1000 股）；其餘視為零股（×1 股）。"""
@@ -52,17 +48,10 @@ def _pnl(entry_price: float, exit_price: float, quantity: int, lot_type: str) ->
     return (exit_price - entry_price) * quantity * multiplier
 
 
-def load_paper_trades(day: date | None = None, ddir: str = _LEDGER_DIR) -> list[dict]:
-    """讀取當日紙上交易帳本；檔案不存在或損毀回 []。"""
-    path = Path(_ledger_path(day, ddir))
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception as e:
-        log.error("load_paper_trades failed: %s", e)
-        return []
+def load_paper_trades(day: date | None = None, db_path: str = _DEFAULT_DB) -> list[dict]:
+    """讀取某日（預設今日）所有紙上交易。"""
+    day = day or date.today()
+    return PaperTradeDB(db_path).get_trades(day.isoformat())
 
 
 def record_paper_exit(
@@ -70,10 +59,11 @@ def record_paper_exit(
     exit_price: float,
     reason: str,
     day: date | None = None,
-    ddir: str = _LEDGER_DIR,
+    db_path: str = _DEFAULT_DB,
 ) -> dict:
-    """把一筆紙上出場 append 進帳本，回傳該 trade dict。"""
+    """把一筆紙上出場寫入資料庫，回傳該 trade dict。"""
     day = day or date.today()
+    pnl = _pnl(pos.entry_price, exit_price, pos.quantity, pos.lot_type)
     trade = {
         "date":        day.isoformat(),
         "code":        pos.code,
@@ -82,15 +72,16 @@ def record_paper_exit(
         "exit_price":  exit_price,
         "quantity":    pos.quantity,
         "lot_type":    pos.lot_type,
-        "pnl":         _pnl(pos.entry_price, exit_price, pos.quantity, pos.lot_type),
+        "pnl":         pnl,
         "reason":      reason,
         "exit_time":   datetime.now().isoformat(timespec="seconds"),
     }
-    path = Path(_ledger_path(day, ddir))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ledger = load_paper_trades(day, ddir)
-    ledger.append(trade)
-    path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+    PaperTradeDB(db_path).save_trade(PaperTrade(
+        date=trade["date"], code=pos.code, name=pos.name,
+        entry_price=pos.entry_price, exit_price=exit_price,
+        quantity=pos.quantity, lot_type=pos.lot_type,
+        pnl=pnl, reason=reason, exit_time=trade["exit_time"],
+    ))
     return trade
 
 
@@ -121,7 +112,7 @@ def paper_enter(positions, api=None, quantity: int = 1, lot_type: str = "common"
 
 
 def paper_monitor_pass(positions, api, config, day: date | None = None,
-                       ddir: str = _LEDGER_DIR) -> tuple[bool, list[dict]]:
+                       db_path: str = _DEFAULT_DB) -> tuple[bool, list[dict]]:
     """對 active 紙上持倉跑一次出場檢查（複用 check_position_alerts 的真實邏輯）。
 
     觸發出場 → record_paper_exit + status='closed'。
@@ -140,7 +131,7 @@ def paper_monitor_pass(positions, api, config, day: date | None = None,
         alerts = check_position_alerts(pos, price, config=config)
         sell = next((a for a in alerts if a.sell_required), None)
         if sell is not None:
-            trade = record_paper_exit(pos, price, sell.alert_type, day=day, ddir=ddir)
+            trade = record_paper_exit(pos, price, sell.alert_type, day=day, db_path=db_path)
             pos.status = "closed"
             changed = True
             closed.append(trade)
@@ -187,9 +178,11 @@ def build_exit_message(closed: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_paper_summary(day: date | None = None, ddir: str = _LEDGER_DIR) -> str:
-    """收盤後紙上模擬損益彙總；當日無紙上交易回 ""。"""
-    trades = load_paper_trades(day, ddir)
+def build_paper_summary(day: date | None = None, db_path: str = _DEFAULT_DB,
+                        stats_days: int = 30) -> str:
+    """收盤後紙上模擬損益彙總（含近 N 日累計）；當日無紙上交易回 ""。"""
+    day = day or date.today()
+    trades = load_paper_trades(day, db_path)
     if not trades:
         return ""
     total = sum(t.get("pnl", 0.0) for t in trades)
@@ -213,6 +206,20 @@ def build_paper_summary(day: date | None = None, ddir: str = _LEDGER_DIR) -> str
             f"{t['entry_price']:,.1f} → {t['exit_price']:,.1f}　"
             f"{t['pnl']:+,.0f} 元（{reason}）"
         )
+
+    # 跨日累計（近 N 日）── 讓你看得到整體表現而不只今天
+    try:
+        agg = PaperTradeDB(db_path).win_rate_summary(days=stats_days)
+        if agg["total"] > 0:
+            agg_wr = agg["win_rate"] * 100 if agg["win_rate"] is not None else 0.0
+            lines.append("")
+            lines.append(
+                f"📊 近 {stats_days} 日累計：{agg['wins']}/{agg['total']} 勝"
+                f"（{agg_wr:.0f}%）　損益 {agg['total_pnl']:+,.0f} 元"
+            )
+    except Exception as e:
+        log.debug("paper win_rate_summary failed: %s", e)
+
     lines.append("")
     lines.append("<i>純模擬，未實際下單。</i>")
     return "\n".join(lines)

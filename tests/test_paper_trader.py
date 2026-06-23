@@ -93,7 +93,7 @@ class TestLedger:
                    entry_price=100.0, quantity=1)
         trade = paper_trader.record_paper_exit(
             pos, exit_price=105.0, reason="take_profit_ceiling",
-            day=date(2026, 6, 23), ddir=str(tmp_path))
+            day=date(2026, 6, 23), db_path=str(tmp_path / "paper.db"))
         # (105 - 100) * 1 張 * 1000 股 = 5000
         assert trade["pnl"] == 5000.0
         assert trade["reason"] == "take_profit_ceiling"
@@ -105,7 +105,7 @@ class TestLedger:
                    entry_price=100.0, quantity=1)
         trade = paper_trader.record_paper_exit(
             pos, exit_price=97.0, reason="stop_loss",
-            day=date(2026, 6, 23), ddir=str(tmp_path))
+            day=date(2026, 6, 23), db_path=str(tmp_path / "paper.db"))
         assert trade["pnl"] == -3000.0
 
     def test_ledger_roundtrip_and_append(self, tmp_path):
@@ -113,15 +113,15 @@ class TestLedger:
         day = date(2026, 6, 23)
         p1 = _pos("2337", "旺宏", status="active", entry_price=100.0, quantity=1)
         p2 = _pos("2449", "京元電子", status="active", entry_price=50.0, quantity=1)
-        paper_trader.record_paper_exit(p1, 105.0, "take_profit_ceiling", day=day, ddir=str(tmp_path))
-        paper_trader.record_paper_exit(p2, 48.0, "stop_loss", day=day, ddir=str(tmp_path))
-        loaded = paper_trader.load_paper_trades(day, ddir=str(tmp_path))
+        paper_trader.record_paper_exit(p1, 105.0, "take_profit_ceiling", day=day, db_path=str(tmp_path / "paper.db"))
+        paper_trader.record_paper_exit(p2, 48.0, "stop_loss", day=day, db_path=str(tmp_path / "paper.db"))
+        loaded = paper_trader.load_paper_trades(day, db_path=str(tmp_path / "paper.db"))
         assert len(loaded) == 2
         assert {t["code"] for t in loaded} == {"2337", "2449"}
 
     def test_load_missing_returns_empty(self, tmp_path):
         import paper_trader
-        assert paper_trader.load_paper_trades(date(2026, 6, 23), ddir=str(tmp_path)) == []
+        assert paper_trader.load_paper_trades(date(2026, 6, 23), db_path=str(tmp_path / "paper.db")) == []
 
 
 # ── paper_monitor_pass（複用真實出場邏輯）─────────────────────────────────────
@@ -135,13 +135,13 @@ class TestPaperMonitorPass:
         with patch("paper_trader.fetch_current_price", return_value=96.0):
             changed, closed = paper_trader.paper_monitor_pass(
                 [pos], api=None, config=_config(stop_loss_pct=3.0),
-                day=date(2026, 6, 23), ddir=str(tmp_path))
+                day=date(2026, 6, 23), db_path=str(tmp_path / "paper.db"))
         assert changed is True
         assert len(closed) == 1
         assert closed[0]["reason"] == "stop_loss"
         assert pos.status == "closed"
         # 寫入帳本
-        assert len(paper_trader.load_paper_trades(date(2026, 6, 23), ddir=str(tmp_path))) == 1
+        assert len(paper_trader.load_paper_trades(date(2026, 6, 23), db_path=str(tmp_path / "paper.db"))) == 1
 
     def test_no_trigger_stays_active(self, tmp_path):
         import paper_trader
@@ -151,7 +151,7 @@ class TestPaperMonitorPass:
         with patch("paper_trader.fetch_current_price", return_value=101.0):
             changed, closed = paper_trader.paper_monitor_pass(
                 [pos], api=None, config=_config(force_close_time="23:59"),
-                day=date(2026, 6, 23), ddir=str(tmp_path))
+                day=date(2026, 6, 23), db_path=str(tmp_path / "paper.db"))
         assert closed == []
         assert pos.status == "active"
 
@@ -163,7 +163,7 @@ class TestPaperMonitorPass:
         with patch("paper_trader.fetch_current_price", return_value=100.5):
             changed, closed = paper_trader.paper_monitor_pass(
                 [pos], api=None, config=_config(force_close_time="00:00"),
-                day=date(2026, 6, 23), ddir=str(tmp_path))
+                day=date(2026, 6, 23), db_path=str(tmp_path / "paper.db"))
         assert len(closed) == 1
         assert closed[0]["reason"] == "force_close"
         assert pos.status == "closed"
@@ -176,7 +176,7 @@ class TestPaperMonitorPass:
         with patch("paper_trader.fetch_current_price", return_value=110.0):
             changed, closed = paper_trader.paper_monitor_pass(
                 [pos], api=None, config=_config(take_profit_pct=9.0),
-                day=date(2026, 6, 23), ddir=str(tmp_path))
+                day=date(2026, 6, 23), db_path=str(tmp_path / "paper.db"))
         assert closed[0]["reason"] == "take_profit_ceiling"
         assert closed[0]["pnl"] == 10000.0  # (110-100)*1*1000
 
@@ -186,7 +186,7 @@ class TestPaperMonitorPass:
                    entry_price=100.0, quantity=1)
         with patch("paper_trader.fetch_current_price", return_value=50.0) as mock_price:
             changed, closed = paper_trader.paper_monitor_pass(
-                [pos], api=None, config=_config(), day=date(2026, 6, 23), ddir=str(tmp_path))
+                [pos], api=None, config=_config(), day=date(2026, 6, 23), db_path=str(tmp_path / "paper.db"))
         assert closed == []
         mock_price.assert_not_called()
 
@@ -196,16 +196,16 @@ class TestPaperMonitorPass:
 class TestSummary:
     def test_empty_summary_returns_blank(self, tmp_path):
         import paper_trader
-        assert paper_trader.build_paper_summary(date(2026, 6, 23), ddir=str(tmp_path)) == ""
+        assert paper_trader.build_paper_summary(date(2026, 6, 23), db_path=str(tmp_path / "paper.db")) == ""
 
     def test_summary_total_pnl_and_winrate(self, tmp_path):
         import paper_trader
         day = date(2026, 6, 23)
         p1 = _pos("2337", "旺宏", status="active", entry_price=100.0, quantity=1)
         p2 = _pos("2449", "京元電子", status="active", entry_price=50.0, quantity=1)
-        paper_trader.record_paper_exit(p1, 105.0, "take_profit_ceiling", day=day, ddir=str(tmp_path))
-        paper_trader.record_paper_exit(p2, 48.0, "stop_loss", day=day, ddir=str(tmp_path))
-        s = paper_trader.build_paper_summary(day, ddir=str(tmp_path))
+        paper_trader.record_paper_exit(p1, 105.0, "take_profit_ceiling", day=day, db_path=str(tmp_path / "paper.db"))
+        paper_trader.record_paper_exit(p2, 48.0, "stop_loss", day=day, db_path=str(tmp_path / "paper.db"))
+        s = paper_trader.build_paper_summary(day, db_path=str(tmp_path / "paper.db"))
         # 合計 +5000 -2000 = +3000
         assert "3,000" in s or "3000" in s
         assert "2337" in s and "2449" in s
@@ -220,7 +220,7 @@ class TestSummary:
         import paper_trader
         pos = _pos("2337", "旺宏", status="active", entry_price=100.0, quantity=1)
         trade = paper_trader.record_paper_exit(pos, 97.0, "stop_loss",
-                                               day=date(2026, 6, 23), ddir=str(tmp_path))
+                                               day=date(2026, 6, 23), db_path=str(tmp_path / "paper.db"))
         msg = paper_trader.build_exit_message([trade])
         assert "2337" in msg
 
