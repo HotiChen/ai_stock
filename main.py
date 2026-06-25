@@ -1118,7 +1118,8 @@ def main() -> None:
     dt_config = load_daytrading_config()
     log.info(
         "DT config: budget=%.0f stop_loss=%.1f%% take_profit=%.1f%% "
-        "trailing_start=%.1f%% trailing_gap=%.1f%% force_close=%s manual_confirm=%s",
+        "trailing_start=%.1f%% trailing_gap=%.1f%% force_close=%s manual_confirm=%s "
+        "paper_trade_only=%s",
         dt_config.budget_per_stock,
         dt_config.stop_loss_pct,
         dt_config.take_profit_pct,
@@ -1126,6 +1127,7 @@ def main() -> None:
         dt_config.trailing_gap_pct,
         dt_config.force_close_time,
         dt_config.require_manual_confirm,
+        dt_config.paper_trade_only,
     )
 
     monitor: Optional[MonitorAgent] = None
