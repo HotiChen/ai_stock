@@ -55,6 +55,14 @@ class DaytradingConfig:
     """純紙上追蹤模式。True = 9:10 不下任何委託，只以市價紙上進場並追蹤出場
     邏輯、收盤結算損益（與真實下單路徑完全隔離）。預設關閉。"""
 
+    analysis_count: int = 8
+    """8:30 對技術評分前幾名做 AI 深度分析、並存成 watching 持倉的檔數。
+    這個數字 = 9:05 開盤再確認的上限，也 = 紙上 / 真實進場的候選上限。"""
+
+    display_count: int = 20
+    """8:30 當沖預測訊息顯示、以及存進複盤 DB 的檔數（不觸發 AI 分析）。
+    應 >= analysis_count；排名超過 analysis_count 的只顯示不追蹤。"""
+
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
@@ -78,6 +86,8 @@ def load_daytrading_config(path: str = _DEFAULT_PATH) -> DaytradingConfig:
         "force_close_time":     ("DT_FORCE_CLOSE_TIME",    str),
         "require_manual_confirm": ("DT_MANUAL_CONFIRM",    lambda v: v.lower() == "true"),
         "paper_trade_only":     ("DT_PAPER_ONLY",          lambda v: v.lower() == "true"),
+        "analysis_count":       ("DT_ANALYSIS_COUNT",      int),
+        "display_count":        ("DT_DISPLAY_COUNT",       int),
     }
     for field, (env_key, cast) in env_map.items():
         val = os.getenv(env_key)

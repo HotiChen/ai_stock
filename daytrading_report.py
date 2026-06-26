@@ -158,13 +158,28 @@ def _get_stock_universe(api, top_n: int = 50) -> list[dict]:
     return result
 
 
-def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
+def build_daytrading_report(
+    api=None,
+    db_path: str = DB_PATH,
+    analysis_count: int | None = None,
+    display_count: int | None = None,
+) -> str:
     """建立今日當沖預測報告，回傳 Telegram HTML 字串。
 
-    掃描全市場所有股票，用技術指標評分選出最適合當沖的 3~5 支，
-    再對前 3 名執行 AI 當沖深度分析，產生進場區間/目標/停損。
+    掃描全市場所有股票，用技術指標評分排序，對前 ``analysis_count`` 名執行 AI
+    當沖深度分析（產生進場區間/目標/停損、並存成 watching 供 9:05 再確認），
+    訊息則顯示前 ``display_count`` 名。兩個數字未指定時從 DaytradingConfig 載入
+    （預設分析 8 / 顯示 20，可用 DT_ANALYSIS_COUNT / DT_DISPLAY_COUNT 覆蓋）。
     不依賴 research.db，獨立運作。
     """
+    if analysis_count is None or display_count is None:
+        from daytrading_config import load_daytrading_config
+        _cfg = load_daytrading_config()
+        if analysis_count is None:
+            analysis_count = _cfg.analysis_count
+        if display_count is None:
+            display_count = _cfg.display_count
+
     from stock_query import _assess_day_trading
 
     today_str = date.today().strftime("%Y%m%d")
@@ -256,9 +271,9 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
             return header + "<i>⚠️ 技術資料不足，無法產生預測。\n請確認市場資料來源是否正常。</i>"
         return header + "<i>今日各股當沖條件不成熟，建議觀望。</i>"
 
-    # 8. AI 當沖分析（前 3 名，均已通過資料門檻）
+    # 8. AI 當沖分析（前 analysis_count 名，均已通過資料門檻）
     ai_map: dict = {}
-    for r in qualified[:3]:
+    for r in qualified[:analysis_count]:
         try:
             ai_map[r["code"]] = run_daytrading_analysis(
                 code=r["code"], name=r["name"],
@@ -285,7 +300,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
                 dt_score=r["dt_score"],
                 ai_summary=ai.summary,
             )
-            for r in qualified[:3]
+            for r in qualified[:analysis_count]
             if (ai := ai_map.get(r["code"])) is not None
         ]
         if dt_positions:
@@ -297,7 +312,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
     try:
         from daytrading_db import DaytradingDB, DTPrediction
         predictions = []
-        for r in qualified[:8]:
+        for r in qualified[:display_count]:
             ai = ai_map.get(r["code"])
             predictions.append(DTPrediction(
                 date=date.today().isoformat(),
@@ -325,7 +340,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
                 score=ai_map[r["code"]].data_quality_score if r["code"] in ai_map else 5,
                 missing=ai_map[r["code"]].missing_data if r["code"] in ai_map else [],
             )
-            for r in qualified[:8]
+            for r in qualified[:display_count]
         ]
         save_daily_feedback(feedbacks)
     except Exception as e:
@@ -344,7 +359,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
     lines.append(f"<i>全市場掃描，技術評分前 {len(qualified)} 支</i>")
     lines.append("")
 
-    for r in qualified[:8]:
+    for r in qualified[:display_count]:
         ind   = r["indicators"] or {}
         price = ind.get("current_price", "—")
         rsi   = ind.get("RSI", "—")
@@ -376,7 +391,7 @@ def build_daytrading_report(api=None, db_path: str = DB_PATH) -> str:
         for b in r["reasons_bad"][:1]:
             lines.append(f"  ⚠️ {b}")
 
-        # AI 當沖建議（前 3 名才有）
+        # AI 當沖建議（前 analysis_count 名才有）
         ai = ai_map.get(r["code"])
         if ai and ai.action == "long":
             ai_parts = [f"  🤖 {ai.timing}進場"]
