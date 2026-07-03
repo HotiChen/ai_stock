@@ -1118,16 +1118,31 @@ def handle_callback(callback_query: dict) -> None:
 def _handle_dt_buy(chat_id: str, code: str,
                    dt_path: Optional[str] = None,
                    db_path: Optional[str] = None) -> None:
-    """當沖買入：取得即時報價 → 執行買單 → 標記持倉為 active → 寫入 daily_trades。"""
+    """當沖買入：取得即時報價 → 執行買單 → 標記持倉為 active → 寫入 daily_trades。
+
+    當日虧損熔斷觸發後（dt_risk.is_circuit_breaker_active）拒絕新買單。
+    有停損價時改用風險額倉位法（calc_risk_quantity）決定下單金額；缺停損價
+    或算出 0 股時退回固定 budget_per_stock 預算法（行為相容）。
+    """
     import os
     from daytrading_monitor import (
         load_daytrading_positions, mark_entered, fetch_current_price,
     )
     from daytrading_config import load_daytrading_config
-    from executor import place_stock_order
+    from executor import place_stock_order, calc_risk_quantity
+    import dt_risk
 
     _pos_kwargs = {"path": dt_path} if dt_path else {}
     _db_path = db_path or DB_PATH
+
+    if dt_risk.is_circuit_breaker_active():
+        flag = dt_risk.get_circuit_breaker_flag()
+        send_text(
+            chat_id,
+            f"🚫 當日虧損熔斷已觸發，暫停新買單。\n{flag.get('message', '')}",
+        )
+        return
+
     positions = load_daytrading_positions(**_pos_kwargs)
     pos = next((p for p in positions if p.code == code and p.status == "watching"), None)
 
@@ -1148,13 +1163,30 @@ def _handle_dt_buy(chat_id: str, code: str,
         send_text(chat_id, f"❌ 無法取得 {code} 即時報價，買入取消。")
         return
 
+    capital = float(os.getenv("BUDGET", "100000"))
+    hard_limit = float(os.getenv("ORDER_HARD_LIMIT", "150000"))
+    budget = dt_config.budget_per_stock
+    risk_shares, risk_reason = calc_risk_quantity(
+        total_budget=capital,
+        risk_pct=dt_config.risk_per_trade_pct,
+        entry_price=price,
+        stop_loss_price=pos.stop_loss,
+        budget_cap=dt_config.budget_per_stock,
+        hard_limit=hard_limit,
+    )
+    if risk_shares > 0:
+        budget = risk_shares * price
+        log.info("DT buy risk sizing: %s shares=%d budget=%.0f", code, risk_shares, budget)
+    elif risk_reason:
+        log.debug("DT buy risk sizing fallback %s: %s", code, risk_reason)
+
     result = place_stock_order(
         api=api,
         code=code, name=pos.name,
         action="buy",
-        budget=dt_config.budget_per_stock,
+        budget=budget,
         price=price,
-        hard_limit=float(os.getenv("ORDER_HARD_LIMIT", "150000")),
+        hard_limit=hard_limit,
     )
 
     if result.success:
@@ -1187,13 +1219,22 @@ def _handle_dt_buy(chat_id: str, code: str,
                 )
             except Exception:
                 pass
+        risk_line = ""
+        if risk_shares > 0 and pos.stop_loss is not None:
+            risk_amt = capital * dt_config.risk_per_trade_pct / 100.0
+            per_share_risk = price - pos.stop_loss
+            risk_line = (
+                f"\n風險額 {risk_amt:,.0f} 元（總資金 {dt_config.risk_per_trade_pct:.1f}%）"
+                f"／每股風險 {per_share_risk:,.2f} 元"
+            )
         send_text(
             chat_id,
             f"✅ <b>當沖買入成功</b>\n"
             f"{code} {pos.name}\n"
             f"買入價 {result.price:,.2f}　"
             f"數量 {result.quantity}{'張' if result.lot_type == 'common' else '股'}\n"
-            f"金額 {result.amount:,.0f} 元　委託 ID：{result.order_id}",
+            f"金額 {result.amount:,.0f} 元　委託 ID：{result.order_id}"
+            f"{risk_line}",
         )
         log.info("DT buy: %s qty=%d price=%.2f id=%s", code, result.quantity, result.price, result.order_id)
     else:

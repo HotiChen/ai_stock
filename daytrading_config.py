@@ -63,6 +63,15 @@ class DaytradingConfig:
     """8:30 當沖預測訊息顯示、以及存進複盤 DB 的檔數（不觸發 AI 分析）。
     應 >= analysis_count；排名超過 analysis_count 的只顯示不追蹤。"""
 
+    daily_max_loss: float = 3000.0
+    """當日已實現虧損上限（元，正數）。當日當沖已實現損益 <= -daily_max_loss 時
+    觸發熔斷（circuit breaker）：全平倉 active 持倉、當日停止新進場、Telegram 告警。"""
+
+    risk_per_trade_pct: float = 1.0
+    """單筆風險佔總資金百分比（%）。用於風險額倉位法：
+    風險額 = 總資金 × risk_per_trade_pct / 100，股數 = 風險額 ÷ 每股風險
+    （進場價 - 停損價）。"""
+
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
@@ -88,6 +97,8 @@ def load_daytrading_config(path: str = _DEFAULT_PATH) -> DaytradingConfig:
         "paper_trade_only":     ("DT_PAPER_ONLY",          lambda v: v.lower() == "true"),
         "analysis_count":       ("DT_ANALYSIS_COUNT",      int),
         "display_count":        ("DT_DISPLAY_COUNT",       int),
+        "daily_max_loss":       ("DT_DAILY_MAX_LOSS",      float),
+        "risk_per_trade_pct":   ("DT_RISK_PER_TRADE_PCT",  float),
     }
     for field, (env_key, cast) in env_map.items():
         val = os.getenv(env_key)

@@ -30,7 +30,7 @@ load_dotenv()
 
 from daytrading_config import load_daytrading_config, DaytradingConfig
 from deep_analyzer import run_deep_analysis
-from executor import place_stock_order, ExecutionResult, force_stop_loss, _normalize_action
+from executor import place_stock_order, ExecutionResult, force_stop_loss, _normalize_action, calc_risk_quantity
 from logger import get_logger
 from market_scan import batch_fetch_snapshots
 from market_scanner import ScanCriteria, get_all_stock_codes, screen_candidates, fetch_twse_sim_candidates
@@ -704,10 +704,30 @@ def _auto_buy_dt_positions(
     dt_path: str = "data/daytrading_positions.json",
     db_path: str = DB_PATH,
 ) -> None:
-    """DT_MANUAL_CONFIRM=false 時，自動買入所有 watching 當沖持倉。"""
+    """DT_MANUAL_CONFIRM=false 時，自動買入所有 watching 當沖持倉。
+
+    當日虧損熔斷觸發後（dt_risk.is_circuit_breaker_active）拒絕所有新買單。
+    有停損價時改用風險額倉位法（calc_risk_quantity）決定下單金額；缺停損價
+    或算出 0 股時退回固定 budget_per_stock 預算法（行為相容）。
+    """
     from daytrading_monitor import (
         load_daytrading_positions, mark_entered, fetch_current_price,
     )
+    import dt_risk
+
+    if dt_risk.is_circuit_breaker_active():
+        log.warning("DT 熔斷中，跳過本輪自動買入（%d 檔候選）", len(positions))
+        if TELEGRAM_CHAT_ID:
+            try:
+                from telegram_bot import send_text
+                flag = dt_risk.get_circuit_breaker_flag()
+                send_text(
+                    TELEGRAM_CHAT_ID,
+                    f"🚫 當日虧損熔斷已觸發，本日不再自動買入。\n{flag.get('message', '')}",
+                )
+            except Exception:
+                pass
+        return
 
     all_positions = load_daytrading_positions(path=dt_path)
     pos_map = {p.code: p for p in all_positions if p.status == "watching"}
@@ -721,11 +741,29 @@ def _auto_buy_dt_positions(
             if price is None:
                 log.warning("DT auto-buy: 無法取得 %s 報價，跳過", code)
                 continue
+
+            stop_loss_price = pos_map[code].stop_loss
+            budget = dt_config.budget_per_stock
+            risk_shares, risk_reason = calc_risk_quantity(
+                total_budget=CAPITAL,
+                risk_pct=dt_config.risk_per_trade_pct,
+                entry_price=price,
+                stop_loss_price=stop_loss_price,
+                budget_cap=dt_config.budget_per_stock,
+                hard_limit=HARD_LIMIT,
+            )
+            if risk_shares > 0:
+                budget = risk_shares * price
+                log.info("DT auto-buy risk sizing: %s shares=%d budget=%.0f",
+                         code, risk_shares, budget)
+            elif risk_reason:
+                log.debug("DT auto-buy risk sizing fallback %s: %s", code, risk_reason)
+
             result = place_stock_order(
                 api=api,
                 code=code, name=pos_map[code].name,
                 action="buy",
-                budget=dt_config.budget_per_stock,
+                budget=budget,
                 price=price,
                 hard_limit=HARD_LIMIT,
                 paper_trading=PAPER_TRADING,
@@ -739,13 +777,23 @@ def _auto_buy_dt_positions(
                 if TELEGRAM_CHAT_ID:
                     try:
                         from telegram_bot import send_text
+                        risk_line = ""
+                        if risk_shares > 0 and stop_loss_price is not None:
+                            risk_amt = CAPITAL * dt_config.risk_per_trade_pct / 100.0
+                            per_share_risk = price - stop_loss_price
+                            risk_line = (
+                                f"\n風險額 {risk_amt:,.0f} 元"
+                                f"（總資金 {dt_config.risk_per_trade_pct:.1f}%）"
+                                f"／每股風險 {per_share_risk:,.2f} 元"
+                            )
                         send_text(
                             TELEGRAM_CHAT_ID,
                             f"🤖 當沖自動買入：<b>{code} {pos_map[code].name}</b>\n"
                             f"買入價 {result.price:,.2f}　"
                             f"數量 {result.quantity}"
                             f"{'張' if result.lot_type == 'common' else '股'}\n"
-                            f"金額 {result.amount:,.0f} 元",
+                            f"金額 {result.amount:,.0f} 元"
+                            f"{risk_line}",
                         )
                     except Exception:
                         pass
@@ -1180,17 +1228,81 @@ def _refresh_dt_watchlist(dt_agent, dt_path: str = "data/daytrading_positions.js
     return watchlist
 
 
+def _maybe_trigger_circuit_breaker(
+    api,
+    dt_config: "DaytradingConfig",
+    dt_path: str = "data/daytrading_positions.json",
+    db_path: str = DB_PATH,
+) -> None:
+    """當日虧損熔斷檢查：一天只觸發一次（旗標已存在時直接略過）。
+
+    觸發時：
+      1. 對所有 active 當沖持倉構造 force_close 類型警報，複用
+         _run_dt_sell_alerts 既有機制全平倉（成功者由其內部 mark_closed）。
+      2. 寫入當日熔斷旗標（dt_risk.set_circuit_breaker_flag）—— 讓
+         _auto_buy_dt_positions / telegram_bot._handle_dt_buy 之後拒絕新買單。
+      3. 發送 Telegram 告警。
+
+    旗標先寫入再嘗試全平倉，確保即使全平倉過程拋例外，「本日不再觸發 / 停止
+    進場」的效果仍然生效（force_stop_loss 失敗時既有的 5 分鐘輪詢出場路徑仍會
+    持續嘗試出場，見 _run_dt_sell_alerts 的重試機制）。
+    """
+    import dt_risk
+    from daytrading_monitor import load_daytrading_positions, DaytradingAlert
+
+    if dt_risk.is_circuit_breaker_active():
+        return
+
+    result = dt_risk.check_circuit_breaker(dt_config, db_path)
+    if not result.triggered:
+        return
+
+    log.error("DT 熔斷觸發：%s", result.message)
+    dt_risk.set_circuit_breaker_flag(result.realized_pnl, result.message)
+
+    positions = [p for p in load_daytrading_positions(path=dt_path) if p.status == "active"]
+    if positions:
+        force_alerts = [
+            DaytradingAlert(
+                code=p.code, name=p.name, alert_type="force_close",
+                price=p.entry_price or 0.0,
+                message=f"熔斷全平倉：{result.message}",
+                time=datetime.now(), sell_required=True,
+            )
+            for p in positions
+        ]
+        _run_dt_sell_alerts(api, force_alerts, dt_config, dt_path=dt_path)
+
+    if TELEGRAM_CHAT_ID:
+        try:
+            from telegram_bot import send_text
+            send_text(
+                TELEGRAM_CHAT_ID,
+                f"🚨 <b>當日虧損熔斷觸發</b>\n{result.message}\n"
+                f"已對所有當沖持倉送出強制平倉，本日不再新進場。",
+            )
+        except Exception as e:
+            log.warning("熔斷告警發送失敗: %s", e)
+
+
 def _dt_poll_tick(
     api,
     dt_config: "DaytradingConfig",
     dt_agent=None,
     dt_path: str = "data/daytrading_positions.json",
+    db_path: str = DB_PATH,
 ) -> list:
-    """單次輪詢：刷新 tick watchlist（若 agent 存在）+ 跑 5 分鐘輪詢出場掃描。
+    """單次輪詢：熔斷檢查 + 刷新 tick watchlist（若 agent 存在）+ 跑 5 分鐘輪詢出場掃描。
 
     回傳本次已執行的 sell 警報清單（供測試斷言）。
     """
     from daytrading_monitor import run_daytrading_monitor
+
+    # 當日虧損熔斷檢查（一天只觸發一次）；失敗不得阻擋既有輪詢出場路徑。
+    try:
+        _maybe_trigger_circuit_breaker(api, dt_config, dt_path=dt_path, db_path=db_path)
+    except Exception as e:
+        log.warning("DT 熔斷檢查失敗: %s", e)
 
     # Task 3：刷新 tick 監控 watchlist（帶入 Telegram process 成交後的實際持倉）
     if dt_agent is not None:
@@ -1214,6 +1326,7 @@ def _maybe_dt_poll(
     state: dict,
     dt_agent=None,
     dt_path: str = "data/daytrading_positions.json",
+    db_path: str = DB_PATH,
 ):
     """非紙上模式的 5 分鐘節流輪詢包裝。
 
@@ -1237,6 +1350,7 @@ def _maybe_dt_poll(
         api, dt_config,
         dt_agent=(dt_agent if t <= _DT_MON_END else None),
         dt_path=dt_path,
+        db_path=db_path,
     )
 
 

@@ -45,6 +45,7 @@ class TestLoadDaytradingConfig:
             "DT_BUDGET", "DT_STOP_LOSS_PCT", "DT_TAKE_PROFIT_PCT",
             "DT_TRAILING_START_PCT", "DT_TRAILING_GAP_PCT",
             "DT_FORCE_CLOSE_TIME", "DT_MANUAL_CONFIRM",
+            "DT_DAILY_MAX_LOSS", "DT_RISK_PER_TRADE_PCT",
         ]}
         # patch os.getenv to return None → defaults used
         with patch.dict(os.environ, {}, clear=False):
@@ -60,6 +61,8 @@ class TestLoadDaytradingConfig:
         assert cfg.trailing_gap_pct == 2.0
         assert cfg.force_close_time == "13:00"
         assert cfg.require_manual_confirm is True
+        assert cfg.daily_max_loss == 3000.0
+        assert cfg.risk_per_trade_pct == 1.0
 
     def test_env_overrides(self):
         env_overrides = {
