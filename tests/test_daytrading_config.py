@@ -96,3 +96,41 @@ class TestLoadDaytradingConfig:
                 from daytrading_config import load_daytrading_config
                 cfg = load_daytrading_config()
                 assert cfg.require_manual_confirm is False
+
+
+# ── Task 4: unknown / legacy JSON fields must not crash ───────────────────────
+
+class TestLoadConfigUnknownFields:
+    def test_legacy_field_does_not_crash(self, tmp_path, caplog):
+        """JSON 含舊欄位 trailing_stop_pct 時不 crash，其餘欄位正常載入。"""
+        import json, logging
+        from daytrading_config import load_daytrading_config
+
+        path = str(tmp_path / "cfg.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "budget_per_stock": 45000.0,
+                "stop_loss_pct": 2.5,
+                "trailing_stop_pct": 1.23,   # 舊/未知欄位
+                "some_removed_field": "x",
+            }, f)
+
+        with caplog.at_level(logging.WARNING):
+            cfg = load_daytrading_config(path=path)
+
+        # 已知欄位正常套用
+        assert cfg.budget_per_stock == 45000.0
+        assert cfg.stop_loss_pct == 2.5
+        # 未知欄位不會變成屬性、也不會 crash
+        assert not hasattr(cfg, "trailing_stop_pct")
+        # 有 warning 列出未知欄位
+        assert any("trailing_stop_pct" in r.message for r in caplog.records)
+
+    def test_known_fields_only_still_works(self, tmp_path):
+        import json
+        from daytrading_config import load_daytrading_config
+        path = str(tmp_path / "cfg.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"take_profit_pct": 7.5}, f)
+        cfg = load_daytrading_config(path=path)
+        assert cfg.take_profit_pct == 7.5

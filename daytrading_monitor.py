@@ -21,6 +21,8 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Optional
 
+from atomic_json import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 _DEFAULT_PATH = "data/daytrading_positions.json"
@@ -270,7 +272,7 @@ def save_daytrading_positions(
         }
         for p in positions
     ]
-    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(path, data, indent=2)
 
 
 def load_daytrading_positions(path: str = _DEFAULT_PATH) -> list[DaytradingPosition]:

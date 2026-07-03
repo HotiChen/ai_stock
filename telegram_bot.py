@@ -28,7 +28,7 @@ load_dotenv(override=True)
 
 from logger import get_logger
 from research_db import (
-    init_db, load_daily_plan, load_daily_trades,
+    init_db, load_daily_plan, load_daily_trades, save_daily_trade,
     reject_pick_from_plan, reject_all_picks_from_plan,
 )
 from daily_tracker import DailyTrackRecord, PlanResult, save_day_record
@@ -856,11 +856,21 @@ def handle_select_plan(callback_query_or_chat_id, plan_type_arg: str = "") -> No
     stock_section = "\n".join(stock_lines) if stock_lines else "  （無股票明細）"
     total_str = f"{total_cost:,.0f}" if total_cost > 0 else "—"
 
+    # 執行結果（execute_plan 的逐筆訊息；或「找不到今日策略計劃」警告）
+    exec_section = ""
+    if exec_lines:
+        exec_section = (
+            "<b>執行結果：</b>\n"
+            + "\n".join(exec_lines)
+            + "\n\n"
+        )
+
     send_text(
         chat_id,
         f"✅ <b>{emoji} {label}策略已確認執行</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"📅 {date.today()}　{emoji} {label}\n\n"
+        f"{exec_section}"
         f"<b>模擬買入明細：</b>\n"
         f"{stock_section}\n\n"
         f"💰 <b>合計投入：{total_str} 元</b>\n"
@@ -1100,13 +1110,15 @@ def handle_callback(callback_query: dict) -> None:
         _handle_dt_buy_all(chat_id)
     elif data.startswith("dt_skip:"):
         code = data.split(":", 1)[1]
-        send_text(chat_id, f"⏭️ 已跳過 {code}")
+        _handle_dt_skip(chat_id, code)
     elif data == "dt_skip_all":
-        send_text(chat_id, "⏭️ 已跳過所有當沖候選股")
+        _handle_dt_skip_all(chat_id)
 
 
-def _handle_dt_buy(chat_id: str, code: str) -> None:
-    """當沖買入：取得即時報價 → 執行買單 → 標記持倉為 active。"""
+def _handle_dt_buy(chat_id: str, code: str,
+                   dt_path: Optional[str] = None,
+                   db_path: Optional[str] = None) -> None:
+    """當沖買入：取得即時報價 → 執行買單 → 標記持倉為 active → 寫入 daily_trades。"""
     import os
     from daytrading_monitor import (
         load_daytrading_positions, save_daytrading_positions,
@@ -1115,7 +1127,9 @@ def _handle_dt_buy(chat_id: str, code: str) -> None:
     from daytrading_config import load_daytrading_config
     from executor import place_stock_order
 
-    positions = load_daytrading_positions()
+    _pos_kwargs = {"path": dt_path} if dt_path else {}
+    _db_path = db_path or DB_PATH
+    positions = load_daytrading_positions(**_pos_kwargs)
     pos = next((p for p in positions if p.code == code and p.status == "watching"), None)
 
     if pos is None:
@@ -1146,7 +1160,33 @@ def _handle_dt_buy(chat_id: str, code: str) -> None:
 
     if result.success:
         mark_position_entered(pos, result.price, result.quantity, result.lot_type)
-        save_daytrading_positions(positions)
+        save_daytrading_positions(positions, **_pos_kwargs)
+        # 寫入 daily_trades，讓 13:25 ForceCloseJob 看得見此當沖持倉。
+        # 下單已成功，DB 寫入失敗不得中斷流程。
+        try:
+            save_daily_trade({
+                "trade_date": date.today(),
+                "code":       result.code,
+                "name":       result.name,
+                "action":     "buy",
+                "quantity":   result.quantity,
+                "price":      result.price,
+                "amount":     result.amount,
+                "pnl":        None,
+                "lot_type":   result.lot_type,
+                "sector":     "當沖",
+                "note":       "daytrade_buy",
+            }, _db_path)
+        except Exception as db_err:
+            log.error("DT buy save_daily_trade failed for %s: %s", code, db_err)
+            try:
+                send_text(
+                    chat_id,
+                    f"⚠️ {code} 已成交，但持倉記錄寫入失敗：{db_err}\n"
+                    f"請確認 13:25 強平能看到此持倉！",
+                )
+            except Exception:
+                pass
         send_text(
             chat_id,
             f"✅ <b>當沖買入成功</b>\n"
@@ -1159,6 +1199,42 @@ def _handle_dt_buy(chat_id: str, code: str) -> None:
     else:
         send_text(chat_id, f"❌ {code} 買入失敗：{result.reason}")
         log.warning("DT buy failed %s: %s", code, result.reason)
+
+
+def _handle_dt_skip(chat_id: str, code: str, dt_path: Optional[str] = None) -> None:
+    """當沖跳過（單檔）：把 watching 持倉標記為 skipped，寫回 JSON，回覆確認。"""
+    from daytrading_monitor import (
+        load_daytrading_positions, save_daytrading_positions, mark_position_skipped,
+    )
+    kwargs = {"path": dt_path} if dt_path else {}
+    positions = load_daytrading_positions(**kwargs)
+    pos = next((p for p in positions if p.code == code and p.status == "watching"), None)
+    if pos is None:
+        send_text(chat_id, f"⚠️ {code} 無可跳過的當沖候選（已成交、已跳過或不存在）。")
+        return
+    mark_position_skipped(pos)
+    save_daytrading_positions(positions, **kwargs)
+    send_text(chat_id, f"⏭️ 已跳過 {code} {pos.name}，本日不再進場。")
+    log.info("DT skip: %s %s", code, pos.name)
+
+
+def _handle_dt_skip_all(chat_id: str, dt_path: Optional[str] = None) -> None:
+    """當沖跳過（全部）：把所有 watching 持倉標記為 skipped，寫回 JSON。"""
+    from daytrading_monitor import (
+        load_daytrading_positions, save_daytrading_positions, mark_position_skipped,
+    )
+    kwargs = {"path": dt_path} if dt_path else {}
+    positions = load_daytrading_positions(**kwargs)
+    watching = [p for p in positions if p.status == "watching"]
+    if not watching:
+        send_text(chat_id, "⚠️ 無可跳過的當沖候選股（已全部處理或清空）。")
+        return
+    for pos in watching:
+        mark_position_skipped(pos)
+    save_daytrading_positions(positions, **kwargs)
+    codes = "、".join(p.code for p in watching)
+    send_text(chat_id, f"⏭️ 已跳過全部 {len(watching)} 支當沖候選（{codes}），本日不再進場。")
+    log.info("DT skip all: %d positions", len(watching))
 
 
 def _handle_dt_buy_all(chat_id: str) -> None:

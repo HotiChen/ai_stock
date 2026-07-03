@@ -98,7 +98,14 @@ def load_daytrading_config(path: str = _DEFAULT_PATH) -> DaytradingConfig:
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        defaults.update(data)
+        # 只接受 dataclass 已知欄位；未知/舊欄位忽略並記錄 warning，避免 crash。
+        unknown = [k for k in data if k not in defaults]
+        if unknown:
+            import logging
+            logging.getLogger(__name__).warning(
+                "load_daytrading_config 忽略未知欄位: %s", ", ".join(sorted(unknown))
+            )
+        defaults.update({k: v for k, v in data.items() if k in defaults})
     except FileNotFoundError:
         pass
     except Exception as e:

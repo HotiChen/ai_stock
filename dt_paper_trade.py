@@ -269,9 +269,9 @@ def run_daily_paper_trade(
     )
     db.save_trade(trade)
     log.info(
-        "paper trade %s: %s %s  outcome=%s  pnl=%+.0f  capital=%,.0f→%,.0f",
+        "paper trade %s: %s %s  outcome=%s  pnl=%+.0f  capital=%s→%s",
         today, pick["code"], pick["name"], outcome,
-        pnl, capital, capital_after,
+        pnl, f"{capital:,.0f}", f"{capital_after:,.0f}",
     )
     return trade
 
