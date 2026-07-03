@@ -12,7 +12,24 @@ import pytest
 # 避免 ci 環境缺少套件或 cryptography ABI 不相容造成 collection error。
 # ---------------------------------------------------------------------------
 def _stub_google_genai() -> None:
-    google_mod = types.ModuleType("google")
+    # 若環境已裝真的 google.genai，直接使用，不要 stub（避免蓋掉真的 google
+    # namespace package，導致 google.protobuf 等其他子套件失效）。
+    try:
+        import google.genai  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    # 取得（或建立）真正的 google module，讓其他真實安裝的子套件
+    # （例如 protobuf 提供的 google.protobuf，被 yfinance 等套件引用）
+    # 不因為我們注入 google.genai 而壞掉。
+    try:
+        import google as google_mod  # 真的 google namespace package（若已安裝 protobuf 等）
+    except ImportError:
+        google_mod = types.ModuleType("google")
+        google_mod.__path__ = []  # 使其行為類似 namespace package
+        sys.modules.setdefault("google", google_mod)
+
     genai_mod = types.ModuleType("google.genai")
     types_mod = types.ModuleType("google.genai.types")
 
@@ -24,7 +41,6 @@ def _stub_google_genai() -> None:
     genai_mod.types = types_mod
 
     google_mod.genai = genai_mod
-    sys.modules.setdefault("google", google_mod)
     sys.modules.setdefault("google.genai", genai_mod)
     sys.modules.setdefault("google.genai.types", types_mod)
 
