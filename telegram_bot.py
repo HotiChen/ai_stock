@@ -1121,8 +1121,7 @@ def _handle_dt_buy(chat_id: str, code: str,
     """當沖買入：取得即時報價 → 執行買單 → 標記持倉為 active → 寫入 daily_trades。"""
     import os
     from daytrading_monitor import (
-        load_daytrading_positions, save_daytrading_positions,
-        mark_position_entered, fetch_current_price,
+        load_daytrading_positions, mark_entered, fetch_current_price,
     )
     from daytrading_config import load_daytrading_config
     from executor import place_stock_order
@@ -1159,8 +1158,9 @@ def _handle_dt_buy(chat_id: str, code: str,
     )
 
     if result.success:
-        mark_position_entered(pos, result.price, result.quantity, result.lot_type)
-        save_daytrading_positions(positions, **_pos_kwargs)
+        # 原子單筆進場標記（不覆蓋其他持倉；跨 process 安全）
+        mark_entered(code, result.price, result.quantity, result.lot_type,
+                     path=dt_path)
         # 寫入 daily_trades，讓 13:25 ForceCloseJob 看得見此當沖持倉。
         # 下單已成功，DB 寫入失敗不得中斷流程。
         try:
@@ -1204,7 +1204,7 @@ def _handle_dt_buy(chat_id: str, code: str,
 def _handle_dt_skip(chat_id: str, code: str, dt_path: Optional[str] = None) -> None:
     """當沖跳過（單檔）：把 watching 持倉標記為 skipped，寫回 JSON，回覆確認。"""
     from daytrading_monitor import (
-        load_daytrading_positions, save_daytrading_positions, mark_position_skipped,
+        load_daytrading_positions, mark_skipped,
     )
     kwargs = {"path": dt_path} if dt_path else {}
     positions = load_daytrading_positions(**kwargs)
@@ -1212,8 +1212,8 @@ def _handle_dt_skip(chat_id: str, code: str, dt_path: Optional[str] = None) -> N
     if pos is None:
         send_text(chat_id, f"⚠️ {code} 無可跳過的當沖候選（已成交、已跳過或不存在）。")
         return
-    mark_position_skipped(pos)
-    save_daytrading_positions(positions, **kwargs)
+    # 原子單筆放棄標記（不覆蓋其他持倉；跨 process 安全）
+    mark_skipped(code, path=dt_path)
     send_text(chat_id, f"⏭️ 已跳過 {code} {pos.name}，本日不再進場。")
     log.info("DT skip: %s %s", code, pos.name)
 
@@ -1221,7 +1221,7 @@ def _handle_dt_skip(chat_id: str, code: str, dt_path: Optional[str] = None) -> N
 def _handle_dt_skip_all(chat_id: str, dt_path: Optional[str] = None) -> None:
     """當沖跳過（全部）：把所有 watching 持倉標記為 skipped，寫回 JSON。"""
     from daytrading_monitor import (
-        load_daytrading_positions, save_daytrading_positions, mark_position_skipped,
+        load_daytrading_positions, mark_skipped,
     )
     kwargs = {"path": dt_path} if dt_path else {}
     positions = load_daytrading_positions(**kwargs)
@@ -1230,8 +1230,7 @@ def _handle_dt_skip_all(chat_id: str, dt_path: Optional[str] = None) -> None:
         send_text(chat_id, "⚠️ 無可跳過的當沖候選股（已全部處理或清空）。")
         return
     for pos in watching:
-        mark_position_skipped(pos)
-    save_daytrading_positions(positions, **kwargs)
+        mark_skipped(pos.code, path=dt_path)
     codes = "、".join(p.code for p in watching)
     send_text(chat_id, f"⏭️ 已跳過全部 {len(watching)} 支當沖候選（{codes}），本日不再進場。")
     log.info("DT skip all: %d positions", len(watching))

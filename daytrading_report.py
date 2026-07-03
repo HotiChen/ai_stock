@@ -291,7 +291,7 @@ def build_daytrading_report(
     #     skip 標的 entry/target/stop 為 None，監控（check_position_alerts）與
     #     9:05 reconfirm（build_opening_reconfirm_prompt）均已 None-safe。
     try:
-        from daytrading_monitor import DaytradingPosition, save_daytrading_positions
+        from daytrading_monitor import DaytradingPosition, replace_today
         dt_positions = [
             DaytradingPosition(
                 code=r["code"], name=r["name"],
@@ -304,7 +304,7 @@ def build_daytrading_report(
             if (ai := ai_map.get(r["code"])) is not None
         ]
         if dt_positions:
-            save_daytrading_positions(dt_positions)
+            replace_today(dt_positions)
     except Exception as e:
         log.warning("save_daytrading_positions failed: %s", e)
 

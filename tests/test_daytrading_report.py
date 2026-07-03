@@ -350,7 +350,7 @@ class TestSaveWatchingPositions:
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("stock_query._assess_day_trading", return_value=assessment), \
              patch("daytrading_report.run_daytrading_analysis", side_effect=_fake_ai), \
-             patch("daytrading_monitor.save_daytrading_positions", side_effect=_fake_save):
+             patch("daytrading_monitor.replace_today", side_effect=_fake_save):
             build_daytrading_report(api=None, db_path=":memory:")
         return captured.get("positions")
 

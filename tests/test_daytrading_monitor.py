@@ -566,10 +566,12 @@ class TestCheckPositionAlertsActive:
             alerts = check_position_alerts(pos, 101.5, config=cfg)
         assert len(alerts) == 0
 
-    def test_active_sell_not_repeated(self):
+    def test_active_sell_refires_for_retry(self):
+        """Task 3：賣單訊號不再被 alerts_sent 去重——出場未成功前，每輪都要能再次
+        觸發賣單以支援重試（先前語意為「已發過就靜音」，會讓失敗的出場卡住）。"""
         from daytrading_monitor import check_position_alerts, TrailingStopResult
         pos = _active_pos(entry_price=100.0, peak_price=104.0)
-        pos.alerts_sent = ["trailing_stop"]   # already alerted
+        pos.alerts_sent = ["trailing_stop"]   # 先前已觸發過
         cfg = _cfg()
         with patch("daytrading_monitor.check_trailing_stop") as mock_ct:
             mock_ct.return_value = TrailingStopResult(
@@ -577,7 +579,8 @@ class TestCheckPositionAlertsActive:
                 message="追蹤停利", trigger_price=103.5,
             )
             alerts = check_position_alerts(pos, 103.5, config=cfg)
-        assert len(alerts) == 0   # already sent, no repeat
+        assert len(alerts) == 1               # 仍再次觸發（供重試）
+        assert alerts[0].sell_required is True
 
     def test_watching_mode_ignores_config_none(self):
         # config=None → falls through to watching logic (no crash)

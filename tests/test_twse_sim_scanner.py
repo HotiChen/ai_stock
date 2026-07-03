@@ -193,12 +193,14 @@ class TestHandleDtBuy:
             lot_type="common", success=True,
             order_id="ord123", reason="",
         )
+        # 成交後改用原子單筆 mark_entered（不再 load-all-save-all），因此斷言
+        # mark_entered 被以正確參數呼叫，而非舊的 save_daytrading_positions。
         with patch("daytrading_monitor.load_daytrading_positions", return_value=[pos]), \
              patch("telegram_bot._get_sj_api", return_value=mock_api), \
              patch("daytrading_config.load_daytrading_config") as mock_cfg, \
              patch("daytrading_monitor.fetch_current_price", return_value=820.0), \
              patch("executor.place_stock_order", return_value=result), \
-             patch("daytrading_monitor.save_daytrading_positions") as mock_save, \
+             patch("daytrading_monitor.mark_entered") as mock_entered, \
              patch("telegram_bot.send_text") as mock_send:
             from daytrading_config import DaytradingConfig
             mock_cfg.return_value = DaytradingConfig(
@@ -207,6 +209,8 @@ class TestHandleDtBuy:
                 force_close_time="13:00", require_manual_confirm=True,
             )
             _handle_dt_buy("12345", "2330")
-        mock_save.assert_called_once()
+        mock_entered.assert_called_once()
+        assert mock_entered.call_args[0][0] == "2330"       # code
+        assert mock_entered.call_args[0][1] == 820.0        # entry_price
         success_msg = mock_send.call_args_list[-1][0][1]
         assert "成功" in success_msg

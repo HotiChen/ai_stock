@@ -47,6 +47,9 @@ class DaytradingPosition:
     peak_price:   Optional[float] = None   # 持倉期間最高達到的價格
     quantity:     int = 0                  # 持倉數量（張 or 股）
     lot_type:     str = "common"           # "common" | "intraday_odd"
+    # ── 賣單重試追蹤（SQLite store 維護）──────────────────────────────────────
+    sell_attempts:   int = 0               # 賣單失敗累計次數
+    last_sell_error: str = ""              # 最近一次賣單失敗原因
 
 
 @dataclass
@@ -188,7 +191,9 @@ def check_position_alerts(
             peak_price=peak,
             config=config,
         )
-        if result.should_sell and result.reason not in pos.alerts_sent:
+        # 賣單訊號「不」用 alerts_sent 去重：出場未成功前，每輪輪詢都要能再次觸發賣單重試。
+        # 通知重複由呼叫端（_run_dt_sell_alerts）以重試次數標記，不在此靜音。
+        if result.should_sell:
             alerts.append(_alert(result.reason, result.message, sell_required=True))
         return alerts
 
@@ -252,23 +257,35 @@ def save_daytrading_positions(
     positions: list[DaytradingPosition],
     path: str = _DEFAULT_PATH,
 ) -> None:
+    """儲存持倉。
+
+    預設 path（生產環境）→ 委派 dt_position_store（SQLite UPSERT + JSON 鏡像），
+    單一真相來源、跨 process 併發安全。
+    明確傳入非預設 path（既有測試、紙上隔離路徑）→ 維持舊 JSON 行為。
+    """
+    if path == _DEFAULT_PATH:
+        import dt_position_store
+        dt_position_store.save_positions(positions)
+        return
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     data = [
         {
-            "code":         p.code,
-            "name":         p.name,
-            "entry_low":    p.entry_low,
-            "entry_high":   p.entry_high,
-            "target_price": p.target_price,
-            "stop_loss":    p.stop_loss,
-            "dt_score":     p.dt_score,
-            "status":       p.status,
-            "alerts_sent":  p.alerts_sent,
-            "ai_summary":   p.ai_summary,
-            "entry_price":  p.entry_price,
-            "peak_price":   p.peak_price,
-            "quantity":     p.quantity,
-            "lot_type":     p.lot_type,
+            "code":            p.code,
+            "name":            p.name,
+            "entry_low":       p.entry_low,
+            "entry_high":      p.entry_high,
+            "target_price":    p.target_price,
+            "stop_loss":       p.stop_loss,
+            "dt_score":        p.dt_score,
+            "status":          p.status,
+            "alerts_sent":     p.alerts_sent,
+            "ai_summary":      p.ai_summary,
+            "entry_price":     p.entry_price,
+            "peak_price":      p.peak_price,
+            "quantity":        p.quantity,
+            "lot_type":        p.lot_type,
+            "sell_attempts":   getattr(p, "sell_attempts", 0),
+            "last_sell_error": getattr(p, "last_sell_error", ""),
         }
         for p in positions
     ]
@@ -276,6 +293,10 @@ def save_daytrading_positions(
 
 
 def load_daytrading_positions(path: str = _DEFAULT_PATH) -> list[DaytradingPosition]:
+    """載入持倉。預設 path → SQLite store；明確非預設 path → 舊 JSON 讀取。"""
+    if path == _DEFAULT_PATH:
+        import dt_position_store
+        return dt_position_store.load_positions()
     p = Path(path)
     if not p.exists():
         return []
@@ -297,12 +318,93 @@ def load_daytrading_positions(path: str = _DEFAULT_PATH) -> list[DaytradingPosit
                 peak_price=d.get("peak_price"),
                 quantity=d.get("quantity", 0),
                 lot_type=d.get("lot_type", "common"),
+                sell_attempts=d.get("sell_attempts", 0),
+                last_sell_error=d.get("last_sell_error", ""),
             )
             for d in data
         ]
     except Exception as e:
         log.error("load_daytrading_positions failed: %s", e)
         return []
+
+
+def replace_today(
+    positions: list[DaytradingPosition],
+    path: str = _DEFAULT_PATH,
+) -> None:
+    """8:30 新的一天：清舊寫新。預設 path → SQLite store；非預設 → JSON 覆寫。"""
+    if path == _DEFAULT_PATH:
+        import dt_position_store
+        dt_position_store.replace_today(positions)
+        return
+    save_daytrading_positions(positions, path=path)
+
+
+# ── 原子單筆操作 facade ───────────────────────────────────────────────────────
+# 預設 path → 委派 dt_position_store 的單條 SQL 原子操作（避開 read-modify-write
+# race）；明確非預設 path → 舊 load-mutate-save JSON 行為（既有測試/紙上隔離路徑）。
+
+def _atomic_or_legacy(path, store_fn, code, mutate):
+    if path == _DEFAULT_PATH:
+        return store_fn()
+    positions = load_daytrading_positions(path=path)
+    pos = next((p for p in positions if p.code == code), None)
+    if pos is None:
+        return None
+    result = mutate(pos)
+    save_daytrading_positions(positions, path=path)
+    return result
+
+
+def mark_entered(code, entry_price, quantity, lot_type="common", path=_DEFAULT_PATH):
+    path = path or _DEFAULT_PATH
+
+    def _store():
+        import dt_position_store
+        dt_position_store.mark_entered(code, entry_price, quantity, lot_type)
+
+    return _atomic_or_legacy(
+        path, _store, code,
+        lambda pos: mark_position_entered(pos, entry_price, quantity, lot_type),
+    )
+
+
+def mark_skipped(code, path=_DEFAULT_PATH):
+    path = path or _DEFAULT_PATH
+
+    def _store():
+        import dt_position_store
+        dt_position_store.mark_skipped(code)
+
+    return _atomic_or_legacy(path, _store, code, mark_position_skipped)
+
+
+def mark_closed(code, path=_DEFAULT_PATH):
+    path = path or _DEFAULT_PATH
+
+    def _store():
+        import dt_position_store
+        dt_position_store.mark_closed(code)
+
+    def _mutate(pos):
+        pos.status = "closed"
+
+    return _atomic_or_legacy(path, _store, code, _mutate)
+
+
+def record_sell_attempt(code, error, path=_DEFAULT_PATH) -> int:
+    path = path or _DEFAULT_PATH
+    if path == _DEFAULT_PATH:
+        import dt_position_store
+        return dt_position_store.record_sell_attempt(code, error)
+    positions = load_daytrading_positions(path=path)
+    pos = next((p for p in positions if p.code == code), None)
+    if pos is None:
+        return 0
+    pos.sell_attempts = getattr(pos, "sell_attempts", 0) + 1
+    pos.last_sell_error = error or ""
+    save_daytrading_positions(positions, path=path)
+    return pos.sell_attempts
 
 
 def mark_position_entered(
@@ -341,7 +443,7 @@ def run_daytrading_monitor(
         return []
 
     all_alerts: list[DaytradingAlert] = []
-    changed = False
+    changed_positions: list[DaytradingPosition] = []
 
     for pos in positions:
         if pos.status == "closed":
@@ -352,21 +454,30 @@ def run_daytrading_monitor(
             log.debug("無法取得 %s 即時價格，跳過", pos.code)
             continue
 
+        pos_changed = False
+
         # active 持倉：先更新峰值，再檢查追蹤停利
         if pos.status == "active":
             if update_peak_price(pos, price):
-                changed = True
+                pos_changed = True
 
         alerts = check_position_alerts(pos, price, config=config)
 
         for a in alerts:
-            pos.alerts_sent.append(a.alert_type)
-            changed = True
+            # 賣單訊號（sell_required）不寫 alerts_sent：出場未成功前需每輪重試。
+            # 只有非賣單通知（entry/target/stoploss）才去重、記錄已發送。
+            if not a.sell_required:
+                pos.alerts_sent.append(a.alert_type)
+                pos_changed = True
 
         all_alerts.extend(alerts)
+        if pos_changed:
+            changed_positions.append(pos)
 
-    if changed:
-        save_daytrading_positions(positions, path=path)
+    # 只回存真正改過的持倉（UPSERT）：避免用過期快照覆蓋其他 process（Telegram
+    # 成交）對其他股票的變更。
+    if changed_positions:
+        save_daytrading_positions(changed_positions, path=path)
 
     return all_alerts
 
