@@ -15,7 +15,7 @@ class TestDaytradingConfigDataclass:
             stop_loss_pct=3.0,
             take_profit_pct=9.0,
             trailing_start_pct=2.0,
-            trailing_stop_pct=0.5,
+            trailing_gap_pct=0.5,
             force_close_time="13:00",
             require_manual_confirm=True,
         )
@@ -23,7 +23,7 @@ class TestDaytradingConfigDataclass:
         assert cfg.stop_loss_pct == 3.0
         assert cfg.take_profit_pct == 9.0
         assert cfg.trailing_start_pct == 2.0
-        assert cfg.trailing_stop_pct == 0.5
+        assert cfg.trailing_gap_pct == 0.5
         assert cfg.force_close_time == "13:00"
         assert cfg.require_manual_confirm is True
 
@@ -31,7 +31,7 @@ class TestDaytradingConfigDataclass:
         from daytrading_config import DaytradingConfig
         cfg = DaytradingConfig(
             budget_per_stock=50000.0, stop_loss_pct=2.0, take_profit_pct=8.0,
-            trailing_start_pct=1.5, trailing_stop_pct=0.3,
+            trailing_start_pct=1.5, trailing_gap_pct=0.3,
             force_close_time="12:30", require_manual_confirm=False,
         )
         assert cfg.require_manual_confirm is False
@@ -43,7 +43,7 @@ class TestLoadDaytradingConfig:
     def test_defaults_when_no_env(self):
         env = {k: None for k in [
             "DT_BUDGET", "DT_STOP_LOSS_PCT", "DT_TAKE_PROFIT_PCT",
-            "DT_TRAILING_START_PCT", "DT_TRAILING_STOP_PCT",
+            "DT_TRAILING_START_PCT", "DT_TRAILING_GAP_PCT",
             "DT_FORCE_CLOSE_TIME", "DT_MANUAL_CONFIRM",
         ]}
         # patch os.getenv to return None → defaults used
@@ -56,8 +56,8 @@ class TestLoadDaytradingConfig:
         assert cfg.budget_per_stock == 30000.0
         assert cfg.stop_loss_pct == 3.0
         assert cfg.take_profit_pct == 9.0
-        assert cfg.trailing_start_pct == 2.0
-        assert cfg.trailing_stop_pct == 0.5
+        assert cfg.trailing_start_pct == 3.0
+        assert cfg.trailing_gap_pct == 2.0
         assert cfg.force_close_time == "13:00"
         assert cfg.require_manual_confirm is True
 
@@ -67,7 +67,7 @@ class TestLoadDaytradingConfig:
             "DT_STOP_LOSS_PCT": "2.5",
             "DT_TAKE_PROFIT_PCT": "8.0",
             "DT_TRAILING_START_PCT": "1.5",
-            "DT_TRAILING_STOP_PCT": "0.3",
+            "DT_TRAILING_GAP_PCT": "0.3",
             "DT_FORCE_CLOSE_TIME": "12:30",
             "DT_MANUAL_CONFIRM": "false",
         }
@@ -79,7 +79,7 @@ class TestLoadDaytradingConfig:
         assert cfg.stop_loss_pct == 2.5
         assert cfg.take_profit_pct == 8.0
         assert cfg.trailing_start_pct == 1.5
-        assert cfg.trailing_stop_pct == 0.3
+        assert cfg.trailing_gap_pct == 0.3
         assert cfg.force_close_time == "12:30"
         assert cfg.require_manual_confirm is False
 

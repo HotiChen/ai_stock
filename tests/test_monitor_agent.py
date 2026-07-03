@@ -403,7 +403,7 @@ class TestAlertWorker:
         db_path = str(tmp_path / "test.db")
         init_db(db_path)
 
-        with patch("notifier.notify_price_alert") as mock_notify:
+        with patch("monitor_agent.notify_price_alert") as mock_notify:
             q = queue.Queue()
             worker = AlertWorker(q, db_path=db_path, telegram_chat_id="12345")
             q.put(self._make_alert())
@@ -417,7 +417,7 @@ class TestAlertWorker:
         db_path = str(tmp_path / "test.db")
         init_db(db_path)
 
-        with patch("notifier.notify_price_alert") as mock_notify:
+        with patch("monitor_agent.notify_price_alert") as mock_notify:
             q = queue.Queue()
             worker = AlertWorker(q, db_path=db_path, telegram_chat_id=None)
             q.put(self._make_alert())

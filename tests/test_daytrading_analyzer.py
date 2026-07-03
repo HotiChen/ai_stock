@@ -141,11 +141,14 @@ class TestParseDaytradingResponse:
         return parse_daytrading_response(code, name, raw)
 
     def test_valid_json_returns_correct_fields(self):
+        # target_price / stop_loss 不再信任 LLM 的原始值，改用 ATR 公式（或無
+        # indicators 時的固定百分比保底：entry_high*1.03）計算，
+        # 見 daytrading_analyzer._calc_prices_from_atr。
         result = self._parse(_valid_json())
         assert result.action == "long"
         assert result.confidence == 7
         assert result.entry_low == 99.0
-        assert result.target_price == 105.0
+        assert result.target_price == pytest.approx(104.03)
         assert result.timing == "拉回"
 
     def test_json_in_markdown_block_extracted(self):
@@ -207,49 +210,64 @@ class TestLongPriceValidation:
         assert result.target_price is None
         assert result.stop_loss is None
 
-    # 1. 合法區間正常通過
+    # 1. 合法區間正常通過（target/stop 由 fallback 公式算出，非 LLM 原始值）
     def test_valid_long_passes(self):
         result = self._parse(_valid_json())
         assert result.action == "long"
         assert result.entry_low == 99.0
         assert result.entry_high == 101.0
-        assert result.target_price == 105.0
-        assert result.stop_loss == 97.0
+        assert result.target_price == pytest.approx(104.03)  # entry_high * 1.03
+        assert result.stop_loss == pytest.approx(96.03)      # entry_low * 0.97
 
     # 2. entry_low > entry_high → skip
     def test_entry_low_gt_entry_high_degrades(self):
         raw = _valid_json(entry_low=105.0, entry_high=99.0)
         self._degraded(self._parse(raw))
 
-    # 3. stop_loss == entry_low → skip
+    # 3~6. LLM 給的 stop_loss / target_price 不再被信任或驗證——parse_daytrading_response
+    # 完全用 ATR 公式（或固定百分比保底）重算，因此就算 LLM 給的值邏輯上不合理
+    # （等於或劣於 entry 邊界），只要 entry_low/entry_high 區間本身合法，
+    # 仍應正常判定為 long，且 target/stop 以計算值為準、忽略 LLM 原始值。
     def test_stop_loss_equal_entry_low_degrades(self):
         raw = _valid_json(stop_loss=99.0, entry_low=99.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.stop_loss == pytest.approx(96.03)   # entry_low(99) * 0.97，忽略 LLM 的 99.0
+        assert result.target_price == pytest.approx(104.03)
 
-    # 4. stop_loss > entry_low → skip
     def test_stop_loss_gt_entry_low_degrades(self):
         raw = _valid_json(stop_loss=103.0, entry_low=99.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.stop_loss == pytest.approx(96.03)   # 忽略 LLM 給的 103.0（高於 entry_low）
+        assert result.target_price == pytest.approx(104.03)
 
-    # 5. target_price == entry_high → skip
     def test_target_price_equal_entry_high_degrades(self):
         raw = _valid_json(target_price=101.0, entry_high=101.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.target_price == pytest.approx(104.03)  # 忽略 LLM 給的 101.0
+        assert result.stop_loss == pytest.approx(96.03)
 
-    # 6. target_price < entry_high → skip
     def test_target_price_lt_entry_high_degrades(self):
         raw = _valid_json(target_price=98.0, entry_high=101.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.target_price == pytest.approx(104.03)  # 忽略 LLM 給的 98.0（低於 entry_high）
+        assert result.stop_loss == pytest.approx(96.03)
 
     # 7. entry_low = 0 → skip
     def test_zero_entry_low_degrades(self):
         raw = _valid_json(entry_low=0.0)
         self._degraded(self._parse(raw))
 
-    # 8. stop_loss 為負數 → skip
+    # 8. LLM 給負數 stop_loss 也不影響——一樣被公式重算值取代，entry range 合法即 long
     def test_negative_stop_loss_degrades(self):
         raw = _valid_json(stop_loss=-5.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.stop_loss == pytest.approx(96.03)   # 忽略 LLM 給的 -5.0
+        assert result.target_price == pytest.approx(104.03)
 
     # 9. entry_low 為 null → skip
     def test_missing_entry_low_degrades(self):

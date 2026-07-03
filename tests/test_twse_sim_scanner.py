@@ -175,7 +175,7 @@ class TestHandleDtBuy:
             from daytrading_config import DaytradingConfig
             mock_cfg.return_value = DaytradingConfig(
                 budget_per_stock=30000, stop_loss_pct=3, take_profit_pct=9,
-                trailing_start_pct=2, trailing_stop_pct=0.5,
+                trailing_start_pct=2, trailing_gap_pct=0.5,
                 force_close_time="13:00", require_manual_confirm=True,
             )
             _handle_dt_buy("12345", "2330")
@@ -203,7 +203,7 @@ class TestHandleDtBuy:
             from daytrading_config import DaytradingConfig
             mock_cfg.return_value = DaytradingConfig(
                 budget_per_stock=30000, stop_loss_pct=3, take_profit_pct=9,
-                trailing_start_pct=2, trailing_stop_pct=0.5,
+                trailing_start_pct=2, trailing_gap_pct=0.5,
                 force_close_time="13:00", require_manual_confirm=True,
             )
             _handle_dt_buy("12345", "2330")

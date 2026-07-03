@@ -44,7 +44,7 @@ def _cfg(
     stop_loss_pct=3.0,
     take_profit_pct=9.0,
     trailing_start_pct=2.0,
-    trailing_stop_pct=0.5,
+    trailing_gap_pct=0.5,
     force_close_time="13:00",
     budget_per_stock=30000.0,
     require_manual_confirm=True,
@@ -55,7 +55,7 @@ def _cfg(
         stop_loss_pct=stop_loss_pct,
         take_profit_pct=take_profit_pct,
         trailing_start_pct=trailing_start_pct,
-        trailing_stop_pct=trailing_stop_pct,
+        trailing_gap_pct=trailing_gap_pct,
         force_close_time=force_close_time,
         require_manual_confirm=require_manual_confirm,
     )
