@@ -145,6 +145,17 @@ def calc_risk_quantity(
         shares = capped_qty * SHARES_PER_LOT if capped_lot_type == "common" else capped_qty
         return shares, f"風險股數金額超過上限 {amount_cap:,.0f}，已依上限調整為 {shares} 股"
 
+    # 未觸上限路徑同樣做整張正規化：回傳值必須等於 place_stock_order 以
+    # budget = shares × entry_price 實際會成交的股數，否則 Telegram 顯示的
+    # 風險額股數與實際曝險不一致（例：2500 股 → common 2 張 = 2000 股）。
+    budget = shares * entry_price
+    lot_type = calc_lot_type(budget, entry_price)
+    qty = calc_quantity(budget, entry_price, lot_type)
+    normalized = qty * SHARES_PER_LOT if lot_type == "common" else qty
+    if normalized <= 0:
+        return 0, "正規化後不足最小單位，改用固定預算法"
+    if normalized != shares:
+        return normalized, f"已正規化為整張單位（{shares} → {normalized} 股）"
     return shares, ""
 
 

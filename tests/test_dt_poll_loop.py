@@ -124,7 +124,7 @@ class TestMaybeDtPoll:
         assert not mock_tick.called
 
     def test_boundary_times_run(self, tmp_path):
-        """09:15 / 13:30 邊界時間應執行。"""
+        """09:15 / 13:24 邊界時間應執行；13:25（強平時刻）起不再輪詢。"""
         import main
         pos_path = str(tmp_path / "pos.json")
         _seed_active(pos_path)
@@ -132,7 +132,9 @@ class TestMaybeDtPoll:
         with patch("main._dt_poll_tick", return_value=[]) as mock_tick:
             main._maybe_dt_poll(datetime(2026, 7, 3, 9, 15, 0), MagicMock(), cfg,
                                 {"last_poll": None}, dt_path=pos_path)
-            main._maybe_dt_poll(datetime(2026, 7, 3, 13, 30, 0), MagicMock(), cfg,
+            main._maybe_dt_poll(datetime(2026, 7, 3, 13, 24, 0), MagicMock(), cfg,
+                                {"last_poll": None}, dt_path=pos_path)
+            main._maybe_dt_poll(datetime(2026, 7, 3, 13, 25, 0), MagicMock(), cfg,
                                 {"last_poll": None}, dt_path=pos_path)
         assert mock_tick.call_count == 2
 

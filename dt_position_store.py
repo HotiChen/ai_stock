@@ -51,7 +51,8 @@ def _now() -> str:
 
 
 @contextmanager
-def _conn(db_path: str):
+def _conn(db_path: Optional[str]):
+    db_path = db_path or _DB_PATH
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=10)
     try:
@@ -205,7 +206,11 @@ def _parse_json_file(path: str) -> list[DaytradingPosition]:
 
 def _maybe_migrate(conn: sqlite3.Connection, trade_date: str, db_path: str,
                    json_path: str) -> None:
-    """首次讀某日且 DB 該日無資料時，一次性把舊 JSON 匯入為當日持倉。"""
+    """首次讀某日且 DB 該日無資料時，一次性把舊 JSON 匯入為當日持倉。
+
+    JSON 檔的 mtime 日期必須等於 trade_date 才遷移：舊鏡像（例如昨日收盤後
+    留下的檔案）不得被復活成今日持倉。
+    """
     key = (db_path, trade_date)
     if key in _migrated:
         return
@@ -215,6 +220,16 @@ def _maybe_migrate(conn: sqlite3.Connection, trade_date: str, db_path: str,
     ).fetchone()
     if row and row[0] > 0:
         return
+    try:
+        mtime_date = date.fromtimestamp(Path(json_path).stat().st_mtime).isoformat()
+        if mtime_date != trade_date:
+            log.info(
+                "dt_position_store: %s 的 mtime 日期 %s != %s，跳過遷移（過期鏡像）",
+                json_path, mtime_date, trade_date,
+            )
+            return
+    except OSError:
+        return  # 檔案不存在等 → 無可遷移
     legacy = _parse_json_file(json_path)
     if not legacy:
         return
@@ -225,7 +240,8 @@ def _maybe_migrate(conn: sqlite3.Connection, trade_date: str, db_path: str,
              json_path, len(legacy), trade_date)
 
 
-def _write_mirror(conn: sqlite3.Connection, json_path: str, trade_date: str) -> None:
+def _write_mirror(conn: sqlite3.Connection, json_path: Optional[str], trade_date: str) -> None:
+    json_path = json_path or _JSON_MIRROR
     """把當日持倉鏡像輸出成 JSON（供 dashboard/app.py 既有讀取相容）。"""
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
@@ -240,9 +256,11 @@ def _write_mirror(conn: sqlite3.Connection, json_path: str, trade_date: str) -> 
 
 # ── Bulk API（對齊既有介面）───────────────────────────────────────────────────
 
-def load_positions(trade_date: Optional[str] = None, db_path: str = _DB_PATH,
-                   json_path: str = _JSON_MIRROR) -> list[DaytradingPosition]:
+def load_positions(trade_date: Optional[str] = None, db_path: Optional[str] = None,
+                   json_path: Optional[str] = None) -> list[DaytradingPosition]:
     td = trade_date or _today()
+    db_path = db_path or _DB_PATH
+    json_path = json_path or _JSON_MIRROR
     with _conn(db_path) as conn:
         _maybe_migrate(conn, td, db_path, json_path)
         conn.row_factory = sqlite3.Row
@@ -253,8 +271,8 @@ def load_positions(trade_date: Optional[str] = None, db_path: str = _DB_PATH,
 
 
 def save_positions(positions: list[DaytradingPosition],
-                   trade_date: Optional[str] = None, db_path: str = _DB_PATH,
-                   json_path: str = _JSON_MIRROR) -> None:
+                   trade_date: Optional[str] = None, db_path: Optional[str] = None,
+                   json_path: Optional[str] = None) -> None:
     """UPSERT 傳入的持倉（不刪除其他 code）。只寫你真正改過的股票以避開 race。"""
     td = trade_date or _today()
     with _conn(db_path) as conn:
@@ -265,8 +283,8 @@ def save_positions(positions: list[DaytradingPosition],
 
 
 def replace_today(positions: list[DaytradingPosition],
-                  trade_date: Optional[str] = None, db_path: str = _DB_PATH,
-                  json_path: str = _JSON_MIRROR) -> None:
+                  trade_date: Optional[str] = None, db_path: Optional[str] = None,
+                  json_path: Optional[str] = None) -> None:
     """8:30 新的一天：清掉當日舊持倉，寫入新的一批。"""
     td = trade_date or _today()
     with _conn(db_path) as conn:
@@ -281,11 +299,15 @@ def replace_today(positions: list[DaytradingPosition],
 
 def mark_entered(code: str, entry_price: float, quantity: int,
                  lot_type: str = "common", trade_date: Optional[str] = None,
-                 db_path: str = _DB_PATH, json_path: str = _JSON_MIRROR) -> None:
-    """買單成交：status→active，記錄進場價/數量，初始 peak=entry_price。"""
+                 db_path: Optional[str] = None, json_path: Optional[str] = None) -> bool:
+    """買單成交：status→active，記錄進場價/數量，初始 peak=entry_price。
+
+    回傳是否有更新到列（False = 該 (trade_date, code) 不存在，呼叫端必須告警：
+    券商已成交但持倉狀態機沒有這筆，之後的監控/強平都看不到）。
+    """
     td = trade_date or _today()
     with _conn(db_path) as conn:
-        conn.execute(
+        cur = conn.execute(
             """UPDATE dt_positions
                SET status='active', entry_price=?, peak_price=?, quantity=?,
                    lot_type=?, updated_at=?
@@ -294,36 +316,109 @@ def mark_entered(code: str, entry_price: float, quantity: int,
         )
         conn.commit()
         _write_mirror(conn, json_path, td)
+        return cur.rowcount > 0
 
 
 def mark_skipped(code: str, trade_date: Optional[str] = None,
-                 db_path: str = _DB_PATH, json_path: str = _JSON_MIRROR) -> None:
+                 db_path: Optional[str] = None, json_path: Optional[str] = None) -> bool:
     td = trade_date or _today()
     with _conn(db_path) as conn:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE dt_positions SET status='skipped', updated_at=? "
             "WHERE trade_date=? AND code=?",
             (_now(), td, code),
         )
         conn.commit()
         _write_mirror(conn, json_path, td)
+        return cur.rowcount > 0
 
 
 def mark_closed(code: str, trade_date: Optional[str] = None,
-                db_path: str = _DB_PATH, json_path: str = _JSON_MIRROR) -> None:
+                db_path: Optional[str] = None, json_path: Optional[str] = None) -> bool:
     td = trade_date or _today()
     with _conn(db_path) as conn:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE dt_positions SET status='closed', updated_at=? "
             "WHERE trade_date=? AND code=?",
             (_now(), td, code),
         )
         conn.commit()
         _write_mirror(conn, json_path, td)
+        return cur.rowcount > 0
+
+
+def claim_for_close(code: str, trade_date: Optional[str] = None,
+                    db_path: Optional[str] = None, json_path: Optional[str] = None) -> bool:
+    """CAS 搶佔出場權：active → closed，單條 SQL 原子完成。
+
+    回傳 True = 本呼叫者搶到、負責下賣單；False = 該持倉非 active（已被
+    另一條出場路徑處理、或列不存在）→ 呼叫者不得下賣單，避免重複出場。
+    賣單失敗時用 revert_to_active() 回滾，讓下一輪重試。
+    """
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE dt_positions SET status='closed', updated_at=? "
+            "WHERE trade_date=? AND code=? AND status='active'",
+            (_now(), td, code),
+        )
+        conn.commit()
+        if cur.rowcount > 0:
+            _write_mirror(conn, json_path, td)
+            return True
+        return False
+
+
+def revert_to_active(code: str, trade_date: Optional[str] = None,
+                     db_path: Optional[str] = None, json_path: Optional[str] = None) -> bool:
+    """claim 之後賣單失敗：closed → active 回滾（僅回滾 closed 狀態）。"""
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE dt_positions SET status='active', updated_at=? "
+            "WHERE trade_date=? AND code=? AND status='closed'",
+            (_now(), td, code),
+        )
+        conn.commit()
+        if cur.rowcount > 0:
+            _write_mirror(conn, json_path, td)
+            return True
+        return False
+
+
+def get_status(code: str, trade_date: Optional[str] = None,
+               db_path: Optional[str] = None) -> Optional[str]:
+    """回傳該持倉今日狀態；列不存在回 None。"""
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT status FROM dt_positions WHERE trade_date=? AND code=?",
+            (td, code),
+        ).fetchone()
+        return row[0] if row else None
+
+
+def update_entry_range(code: str, entry_low: Optional[float],
+                       entry_high: Optional[float],
+                       trade_date: Optional[str] = None,
+                       db_path: Optional[str] = None,
+                       json_path: Optional[str] = None) -> bool:
+    """9:05 再確認調整進場區間：只更新 entry_low/entry_high，不碰其他欄位
+    （避免以過期快照 bulk 回存覆蓋並發的 status/sell_attempts 原子更新）。"""
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE dt_positions SET entry_low=?, entry_high=?, updated_at=? "
+            "WHERE trade_date=? AND code=?",
+            (entry_low, entry_high, _now(), td, code),
+        )
+        conn.commit()
+        _write_mirror(conn, json_path, td)
+        return cur.rowcount > 0
 
 
 def update_peak(code: str, price: float, trade_date: Optional[str] = None,
-                db_path: str = _DB_PATH, json_path: str = _JSON_MIRROR) -> bool:
+                db_path: Optional[str] = None, json_path: Optional[str] = None) -> bool:
     """峰值只升不降：條件式 UPDATE，回傳是否有更新。"""
     td = trade_date or _today()
     with _conn(db_path) as conn:
@@ -341,7 +436,7 @@ def update_peak(code: str, price: float, trade_date: Optional[str] = None,
 
 
 def append_alert(code: str, alert_type: str, trade_date: Optional[str] = None,
-                 db_path: str = _DB_PATH, json_path: str = _JSON_MIRROR) -> None:
+                 db_path: Optional[str] = None, json_path: Optional[str] = None) -> None:
     """把 alert_type 追加到 alerts_sent JSON 陣列（若尚未存在），單條 SQL 原子完成。"""
     td = trade_date or _today()
     with _conn(db_path) as conn:
@@ -361,7 +456,7 @@ def append_alert(code: str, alert_type: str, trade_date: Optional[str] = None,
 
 
 def record_sell_attempt(code: str, error: str, trade_date: Optional[str] = None,
-                        db_path: str = _DB_PATH, json_path: str = _JSON_MIRROR) -> int:
+                        db_path: Optional[str] = None, json_path: Optional[str] = None) -> int:
     """賣單失敗：sell_attempts+1、記錄 last_sell_error，回傳累計失敗次數。"""
     td = trade_date or _today()
     with _conn(db_path) as conn:
@@ -403,7 +498,7 @@ def _broker_positions(api) -> Optional[dict[str, int]]:
 
 
 def reconcile_with_broker(api, trade_date: Optional[str] = None,
-                          db_path: str = _DB_PATH, json_path: str = _JSON_MIRROR,
+                          db_path: Optional[str] = None, json_path: Optional[str] = None,
                           chat_id: Optional[str] = None) -> Optional[dict]:
     """比對 DB 中 status=active 的當沖持倉與券商實際持倉。
 

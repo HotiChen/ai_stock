@@ -255,18 +255,29 @@ def fetch_current_price(code: str, api=None) -> Optional[float]:
 
 def save_daytrading_positions(
     positions: list[DaytradingPosition],
-    path: str = _DEFAULT_PATH,
+    path: Optional[str] = None,
 ) -> None:
     """儲存持倉。
 
     預設 path（生產環境）→ 委派 dt_position_store（SQLite UPSERT + JSON 鏡像），
     單一真相來源、跨 process 併發安全。
-    明確傳入非預設 path（既有測試、紙上隔離路徑）→ 維持舊 JSON 行為。
+    明確傳入非預設 path（既有測試、紙上隔離路徑）→ 舊 JSON 檔，**merge-by-code**：
+    與 SQLite UPSERT 同語意——只更新/新增傳入的 code，檔案中其他持倉保留。
+    （整檔覆寫語意請用 replace_today。）
     """
+    path = path or _DEFAULT_PATH
     if path == _DEFAULT_PATH:
         import dt_position_store
         dt_position_store.save_positions(positions)
         return
+    existing = {p.code: p for p in load_daytrading_positions(path=path)}
+    for p in positions:
+        existing[p.code] = p
+    _write_legacy_json(list(existing.values()), path)
+
+
+def _write_legacy_json(positions: list[DaytradingPosition], path: str) -> None:
+    """整檔覆寫 legacy JSON（atomic write）。"""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     data = [
         {
@@ -292,8 +303,9 @@ def save_daytrading_positions(
     atomic_write_json(path, data, indent=2)
 
 
-def load_daytrading_positions(path: str = _DEFAULT_PATH) -> list[DaytradingPosition]:
+def load_daytrading_positions(path: Optional[str] = None) -> list[DaytradingPosition]:
     """載入持倉。預設 path → SQLite store；明確非預設 path → 舊 JSON 讀取。"""
+    path = path or _DEFAULT_PATH
     if path == _DEFAULT_PATH:
         import dt_position_store
         return dt_position_store.load_positions()
@@ -330,38 +342,40 @@ def load_daytrading_positions(path: str = _DEFAULT_PATH) -> list[DaytradingPosit
 
 def replace_today(
     positions: list[DaytradingPosition],
-    path: str = _DEFAULT_PATH,
+    path: Optional[str] = None,
 ) -> None:
     """8:30 新的一天：清舊寫新。預設 path → SQLite store；非預設 → JSON 覆寫。"""
+    path = path or _DEFAULT_PATH
     if path == _DEFAULT_PATH:
         import dt_position_store
         dt_position_store.replace_today(positions)
         return
-    save_daytrading_positions(positions, path=path)
+    _write_legacy_json(positions, path)
 
 
 # ── 原子單筆操作 facade ───────────────────────────────────────────────────────
 # 預設 path → 委派 dt_position_store 的單條 SQL 原子操作（避開 read-modify-write
 # race）；明確非預設 path → 舊 load-mutate-save JSON 行為（既有測試/紙上隔離路徑）。
 
-def _atomic_or_legacy(path, store_fn, code, mutate):
+def _atomic_or_legacy(path, store_fn, code, mutate) -> bool:
+    """回傳是否有實際更新到持倉（False = 該 code 不存在，呼叫端應告警）。"""
     if path == _DEFAULT_PATH:
-        return store_fn()
+        return bool(store_fn())
     positions = load_daytrading_positions(path=path)
     pos = next((p for p in positions if p.code == code), None)
     if pos is None:
-        return None
-    result = mutate(pos)
+        return False
+    mutate(pos)
     save_daytrading_positions(positions, path=path)
-    return result
+    return True
 
 
-def mark_entered(code, entry_price, quantity, lot_type="common", path=_DEFAULT_PATH):
+def mark_entered(code, entry_price, quantity, lot_type="common", path=None) -> bool:
     path = path or _DEFAULT_PATH
 
     def _store():
         import dt_position_store
-        dt_position_store.mark_entered(code, entry_price, quantity, lot_type)
+        return dt_position_store.mark_entered(code, entry_price, quantity, lot_type)
 
     return _atomic_or_legacy(
         path, _store, code,
@@ -369,22 +383,22 @@ def mark_entered(code, entry_price, quantity, lot_type="common", path=_DEFAULT_P
     )
 
 
-def mark_skipped(code, path=_DEFAULT_PATH):
+def mark_skipped(code, path=None) -> bool:
     path = path or _DEFAULT_PATH
 
     def _store():
         import dt_position_store
-        dt_position_store.mark_skipped(code)
+        return dt_position_store.mark_skipped(code)
 
     return _atomic_or_legacy(path, _store, code, mark_position_skipped)
 
 
-def mark_closed(code, path=_DEFAULT_PATH):
+def mark_closed(code, path=None) -> bool:
     path = path or _DEFAULT_PATH
 
     def _store():
         import dt_position_store
-        dt_position_store.mark_closed(code)
+        return dt_position_store.mark_closed(code)
 
     def _mutate(pos):
         pos.status = "closed"
@@ -392,7 +406,55 @@ def mark_closed(code, path=_DEFAULT_PATH):
     return _atomic_or_legacy(path, _store, code, _mutate)
 
 
-def record_sell_attempt(code, error, path=_DEFAULT_PATH) -> int:
+def claim_for_close(code, path=None) -> bool:
+    """CAS 搶佔出場權（active→closed）。True = 本呼叫者負責下賣單。
+
+    預設 path → dt_position_store 單條 SQL CAS；legacy path → 讀改寫
+    （單 process 測試/隔離用途，無跨 process 原子性需求）。
+    """
+    path = path or _DEFAULT_PATH
+    if path == _DEFAULT_PATH:
+        import dt_position_store
+        return dt_position_store.claim_for_close(code)
+    positions = load_daytrading_positions(path=path)
+    pos = next((p for p in positions if p.code == code), None)
+    if pos is None or pos.status != "active":
+        return False
+    pos.status = "closed"
+    save_daytrading_positions(positions, path=path)
+    return True
+
+
+def revert_to_active(code, path=None) -> bool:
+    """claim 後賣單失敗的回滾（closed→active），讓下一輪重試。"""
+    path = path or _DEFAULT_PATH
+    if path == _DEFAULT_PATH:
+        import dt_position_store
+        return dt_position_store.revert_to_active(code)
+    positions = load_daytrading_positions(path=path)
+    pos = next((p for p in positions if p.code == code), None)
+    if pos is None or pos.status != "closed":
+        return False
+    pos.status = "active"
+    save_daytrading_positions(positions, path=path)
+    return True
+
+
+def update_entry_range(code, entry_low, entry_high, path=None) -> bool:
+    """9:05 調整進場區間的原子操作（不 bulk 回存整列快照）。"""
+    path = path or _DEFAULT_PATH
+    if path == _DEFAULT_PATH:
+        import dt_position_store
+        return dt_position_store.update_entry_range(code, entry_low, entry_high)
+
+    def _mutate(pos):
+        pos.entry_low = entry_low
+        pos.entry_high = entry_high
+
+    return _atomic_or_legacy(path, lambda: False, code, _mutate)
+
+
+def record_sell_attempt(code, error, path=None) -> int:
     path = path or _DEFAULT_PATH
     if path == _DEFAULT_PATH:
         import dt_position_store
@@ -430,7 +492,7 @@ def mark_position_skipped(pos: DaytradingPosition) -> None:
 
 def run_daytrading_monitor(
     api=None,
-    path: str = _DEFAULT_PATH,
+    path: Optional[str] = None,
     config=None,        # DaytradingConfig；None 時 active 持倉跳過追蹤停利
 ) -> list[DaytradingAlert]:
     """掃描所有當沖持倉即時價格，回傳新觸發的警報清單。
@@ -438,9 +500,17 @@ def run_daytrading_monitor(
     警報中 sell_required=True 的項目代表已觸發出場訊號，
     呼叫方應負責執行賣單並將 pos.status 標為 'closed'。
     """
+    path = path or _DEFAULT_PATH
     positions = load_daytrading_positions(path=path)
     if not positions:
         return []
+
+    # 預設 path → 用 dt_position_store 的欄位級原子操作持久化（update_peak /
+    # append_alert 單條 SQL），不 bulk 回存整列快照：避免本函數執行期間另一
+    # 執行緒/process 的 status / sell_attempts 原子更新被過期快照覆蓋。
+    use_store = (path == _DEFAULT_PATH)
+    if use_store:
+        import dt_position_store
 
     all_alerts: list[DaytradingAlert] = []
     changed_positions: list[DaytradingPosition] = []
@@ -459,7 +529,10 @@ def run_daytrading_monitor(
         # active 持倉：先更新峰值，再檢查追蹤停利
         if pos.status == "active":
             if update_peak_price(pos, price):
-                pos_changed = True
+                if use_store:
+                    dt_position_store.update_peak(pos.code, price)
+                else:
+                    pos_changed = True
 
         alerts = check_position_alerts(pos, price, config=config)
 
@@ -468,14 +541,16 @@ def run_daytrading_monitor(
             # 只有非賣單通知（entry/target/stoploss）才去重、記錄已發送。
             if not a.sell_required:
                 pos.alerts_sent.append(a.alert_type)
-                pos_changed = True
+                if use_store:
+                    dt_position_store.append_alert(pos.code, a.alert_type)
+                else:
+                    pos_changed = True
 
         all_alerts.extend(alerts)
         if pos_changed:
             changed_positions.append(pos)
 
-    # 只回存真正改過的持倉（UPSERT）：避免用過期快照覆蓋其他 process（Telegram
-    # 成交）對其他股票的變更。
+    # legacy path：merge-by-code 回存真正改過的持倉（不影響其他 code）。
     if changed_positions:
         save_daytrading_positions(changed_positions, path=path)
 

@@ -235,7 +235,37 @@ class AlertWorker:
                     quantity = pick.get("quantity", 0)
                     lot_type = pick.get("lot_type", "common")
                     name     = pick.get("name", code)
+
+                    # CAS claim：下賣單前原子搶佔 active→closed，避免與
+                    # 5 分鐘輪詢路徑（main._run_dt_sell_alerts）對同一持倉
+                    # 重複下單。列不存在（不在狀態機中）→ 出場安全優先，
+                    # 照舊下單但 log.error；claim 檢查本身失敗也照舊下單。
+                    proceed_sell = True
+                    claimed = False
                     if quantity > 0:
+                        try:
+                            import dt_position_store as _dps
+                            status = _dps.get_status(code)
+                            if status is None:
+                                log.error(
+                                    "AlertWorker: %s 不在今日持倉狀態機中，"
+                                    "仍執行出場（請人工確認持倉來源）", code,
+                                )
+                            else:
+                                claimed = _dps.claim_for_close(code)
+                                if not claimed:
+                                    proceed_sell = False
+                                    log.info(
+                                        "AlertWorker: %s 已由其他路徑出場"
+                                        "（claim 未取得），跳過賣單", code,
+                                    )
+                        except Exception as claim_err:
+                            log.warning(
+                                "AlertWorker: claim 檢查失敗（照舊執行出場）%s: %s",
+                                code, claim_err,
+                            )
+
+                    if quantity > 0 and proceed_sell:
                         try:
                             success = force_stop_loss(
                                 api=self._api,
@@ -311,9 +341,19 @@ class AlertWorker:
                                 log.error(
                                     "AlertWorker auto-execute: force_stop_loss 失敗 %s", code,
                                 )
+                                # 賣單失敗 → 回滾 claim，讓輪詢路徑下輪重試
+                                if claimed:
+                                    try:
+                                        import dt_position_store as _dps
+                                        _dps.revert_to_active(code)
+                                    except Exception as rv_err:
+                                        log.warning(
+                                            "AlertWorker: revert_to_active(%s) 失敗: %s",
+                                            code, rv_err,
+                                        )
                         except Exception as ex:
                             log.error("AlertWorker auto-execute exception %s: %s", code, ex)
-                    else:
+                    elif quantity <= 0:
                         log.warning(
                             "AlertWorker auto-execute: %s quantity=0，跳過自動停損", code,
                         )

@@ -156,6 +156,12 @@ class TestMigration:
         }]
         with open(paths["json_path"], "w", encoding="utf-8") as f:
             json.dump(legacy, f)
+        # 遷移防護：JSON mtime 日期必須等於 trade_date 才會匯入（避免把過期
+        # 鏡像復活成當日持倉）；把檔案 mtime 對齊 TD。
+        import os as _os
+        from datetime import datetime as _dt
+        _ts = _dt.fromisoformat(TD + "T09:00:00").timestamp()
+        _os.utime(paths["json_path"], (_ts, _ts))
         st._migrated.clear()
 
         loaded = st.load_positions(TD, **paths)

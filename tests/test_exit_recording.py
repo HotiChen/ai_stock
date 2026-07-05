@@ -28,6 +28,16 @@ import pytest
 
 # ── GAP 3：exit_reason schema ────────────────────────────────────────────────
 
+
+@pytest.fixture(autouse=True)
+def _isolate_dt_store(tmp_path, monkeypatch):
+    """隔離 dt_position_store 的預設路徑：AlertWorker 出場前的 CAS claim 會讀
+    持倉狀態機，不得受 repo data/ 下殘留的執行期檔案影響。"""
+    import dt_position_store as dps
+    monkeypatch.setattr(dps, "_DB_PATH", str(tmp_path / "dtpos.db"))
+    monkeypatch.setattr(dps, "_JSON_MIRROR", str(tmp_path / "dtpos.json"))
+    dps._migrated.clear()
+
 class TestExitReasonSchema:
     def test_save_and_load_round_trips_exit_reason(self, tmp_path):
         """save_daily_trade 帶 exit_reason → load_daily_trades 取回同值。"""

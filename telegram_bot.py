@@ -1191,8 +1191,17 @@ def _handle_dt_buy(chat_id: str, code: str,
 
     if result.success:
         # 原子單筆進場標記（不覆蓋其他持倉；跨 process 安全）
-        mark_entered(code, result.price, result.quantity, result.lot_type,
-                     path=dt_path)
+        entered = mark_entered(code, result.price, result.quantity,
+                               result.lot_type, path=dt_path)
+        if not entered:
+            # 券商已成交但持倉狀態機沒有這筆 → 監控/強平都看不到，必須告警
+            log.error("DT buy: %s 不在今日持倉庫，狀態未更新（券商已成交）", code)
+            send_text(
+                chat_id,
+                f"⚠️ <b>持倉狀態未更新</b>\n"
+                f"{code} 券商已成交，但不在今日持倉庫中，"
+                f"系統將無法監控/強平此部位，請人工確認！",
+            )
         # 寫入 daily_trades，讓 13:25 ForceCloseJob 看得見此當沖持倉。
         # 下單已成功，DB 寫入失敗不得中斷流程。
         try:

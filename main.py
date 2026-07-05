@@ -602,6 +602,15 @@ class ForceCloseJob:
             )
 
             if success:
+                # 若為當沖持倉，原子標記 closed：13:25 之後（至輪詢時段結束前）
+                # 的 5 分鐘輪詢不得對已強平的持倉再送第二筆賣單。
+                try:
+                    from daytrading_monitor import claim_for_close
+                    if claim_for_close(code):
+                        log.info("ForceClose: DT 持倉 %s 已標記 closed", code)
+                except Exception as dt_err:
+                    log.warning("ForceClose: DT claim_for_close(%s) 失敗: %s", code, dt_err)
+
                 multiplier       = 1000 if lot_type == "common" else 1
                 estimated_amount = close_price * quantity * multiplier
 
@@ -770,8 +779,22 @@ def _auto_buy_dt_positions(
             )
             if result.success:
                 # 原子單筆進場標記（不覆蓋其他持倉；跨 process 安全）
-                mark_entered(code, result.price, result.quantity, result.lot_type,
-                             path=dt_path)
+                entered = mark_entered(code, result.price, result.quantity,
+                                       result.lot_type, path=dt_path)
+                if not entered:
+                    # 券商已成交但持倉狀態機沒有這筆 → 監控/強平都看不到，必須告警
+                    log.error("DT auto-buy: %s 不在今日持倉庫，狀態未更新（券商已成交）", code)
+                    if TELEGRAM_CHAT_ID:
+                        try:
+                            from telegram_bot import send_text
+                            send_text(
+                                TELEGRAM_CHAT_ID,
+                                f"⚠️ <b>持倉狀態未更新</b>\n"
+                                f"{code} 券商已成交，但不在今日持倉庫中，"
+                                f"系統將無法監控/強平此部位，請人工確認！",
+                            )
+                        except Exception:
+                            pass
                 log.info("DT auto-buy: %s qty=%d price=%.2f", code, result.quantity, result.price)
                 _save_dt_buy_trade(result, db_path=db_path, chat_id=TELEGRAM_CHAT_ID or None)
                 if TELEGRAM_CHAT_ID:
@@ -921,10 +944,15 @@ def _run_dt_sell_alerts(
     所有 DT 賣單均自動執行（不需手動確認），確保及時出場。
     `require_manual_confirm` 只管理買入確認，不影響出場。
     賣單成功後寫入 daily_trades 的 sell 記錄（含 pnl，_record_dt_exit）。
+
+    重複下單防護（CAS claim）：下賣單前先原子搶佔 active→closed
+    （claim_for_close），沒搶到代表另一條出場路徑（tick AlertWorker /
+    13:25 強平）已在處理，本路徑跳過；賣單失敗則回滾 active 供下輪重試。
     """
     from daytrading_monitor import (
         load_daytrading_positions,
-        mark_closed,
+        claim_for_close,
+        revert_to_active,
         record_sell_attempt,
         format_alerts_message,
     )
@@ -943,6 +971,11 @@ def _run_dt_sell_alerts(
             log.warning("DT sell alert for %s but quantity=0, skipping", code)
             continue
 
+        # CAS：搶不到 = 另一路徑已處理，絕不下第二筆賣單
+        if not claim_for_close(code, path=dt_path):
+            log.info("DT 出場：%s 已由其他路徑 claim，跳過（避免重複下單）", code)
+            continue
+
         success = force_stop_loss(
             api=api,
             code=pos.code,
@@ -952,8 +985,7 @@ def _run_dt_sell_alerts(
             paper_trading=PAPER_TRADING,
         )
         if success:
-            # 賣單成功才收斂為 closed（原子單筆，不覆蓋其他持倉）
-            mark_closed(code, path=dt_path)
+            # claim 時已原子轉 closed，這裡不需再標記
             log.info(
                 "DT 出場：%s %s reason=%s price=%.2f",
                 code, pos.name, alert.alert_type, alert.price,
@@ -970,24 +1002,28 @@ def _run_dt_sell_alerts(
                 except Exception as e:
                     log.warning("DT sell notify failed: %s", e)
         else:
-            # 賣單失敗：記錄重試次數，維持 active → 下一輪同規則會再次觸發賣單重試。
+            # 賣單失敗：回滾 claim（closed→active）＋記錄重試次數，
+            # 下一輪同規則會再次觸發賣單重試。
+            revert_to_active(code, path=dt_path)
             attempts = record_sell_attempt(
                 code, f"force_stop_loss returned False ({alert.alert_type})",
                 path=dt_path,
             )
             log.error("DT 出場失敗（第 %d 次）：%s %s", attempts, code, pos.name)
-            if TELEGRAM_CHAT_ID:
+            # 告警節流：第 1–2 次發重試訊息；第 3 次發一次升級告警；
+            # 之後只記 log（避免券商長時間中斷時每 5 分鐘轟炸同一則告警）。
+            if TELEGRAM_CHAT_ID and attempts <= 3:
                 try:
                     from telegram_bot import send_text
-                    if attempts >= 3:
-                        # 連續失敗達門檻 → 升級人工介入告警
+                    if attempts == 3:
+                        # 連續失敗達門檻 → 升級人工介入告警（只發這一次）
                         send_text(
                             TELEGRAM_CHAT_ID,
                             f"🚨 <b>當沖出場連續失敗 {attempts} 次，需人工介入</b>\n"
                             f"{pos.code} {pos.name}　數量 {pos.quantity}"
                             f"{'張' if pos.lot_type == 'common' else '股'}\n"
                             f"原因：{alert.alert_type}\n"
-                            f"請立即手動平倉！",
+                            f"請立即手動平倉！（後續重試只記 log，不再重發此告警）",
                         )
                     else:
                         send_text(
@@ -1017,7 +1053,7 @@ def _opening_confirm_dt_positions(
     """
     import dt_rules
     from daytrading_monitor import (
-        load_daytrading_positions, save_daytrading_positions, mark_skipped,
+        load_daytrading_positions, mark_skipped, update_entry_range,
     )
     from monitor_agent import get_snapshot
     from daytrading_analyzer import run_opening_reconfirm, OpeningReconfirm
@@ -1043,7 +1079,6 @@ def _opening_confirm_dt_positions(
     skipped:   list = []
     reasons:   dict = {}   # code → reason string
     snap_cache: dict = {}
-    range_updated: list = []   # AI 調整過進場區間、需回存的持倉（只存這些）
 
     for pos in watching:
         snap = get_snapshot(api, pos.code) if api is not None else None
@@ -1110,7 +1145,8 @@ def _opening_confirm_dt_positions(
             log.debug("log_ai_decision(reconfirm, %s) failed: %s", pos.code, e)
 
         if result.proceed:
-            # AI 可能調整進場區間
+            # AI 可能調整進場區間 → 原子單欄更新（不 bulk 回存整列快照，
+            # 避免覆蓋並發的 status/sell_attempts 原子變更）
             pos_changed = False
             if result.updated_entry_low is not None:
                 pos.entry_low  = result.updated_entry_low
@@ -1119,7 +1155,8 @@ def _opening_confirm_dt_positions(
                 pos.entry_high = result.updated_entry_high
                 pos_changed = True
             if pos_changed:
-                range_updated.append(pos)
+                update_entry_range(pos.code, pos.entry_low, pos.entry_high,
+                                   path=dt_path)
             confirmed.append(pos)
             log.info("DT 9:05 確認進場 %s %s: %s", pos.code, pos.name, result.reason)
         else:
@@ -1128,10 +1165,6 @@ def _opening_confirm_dt_positions(
             skipped.append(pos)
             reasons[pos.code] = result.reason
             log.info("DT 9:05 放棄 %s %s: %s", pos.code, pos.name, result.reason)
-
-    # 只回存被 AI 調整過進場區間的持倉（UPSERT，不覆蓋其他 process 的變更）
-    if range_updated:
-        save_daytrading_positions(range_updated, path=dt_path)
 
     log.info("DT 9:05 確認：%d 繼續 / %d 放棄", len(confirmed), len(skipped))
 
@@ -1299,7 +1332,7 @@ _DT_MON_END = _dtime(13, 15)   # tick 訂閱到此時段結束後取消
 
 # 5 分鐘輪詢出場路徑（非紙上模式）：交易時段 09:15–13:30 內每 5 分鐘掃一次
 _DT_POLL_START    = _dtime(9, 15)
-_DT_POLL_END      = _dtime(13, 30)
+_DT_POLL_END      = _dtime(13, 24)   # 13:25 ForceCloseJob 前結束，避免與強平重疊
 _DT_POLL_INTERVAL = 300   # 秒（5 分鐘節流）
 
 
