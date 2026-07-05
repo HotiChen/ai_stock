@@ -364,7 +364,7 @@ def seed(days: int = 30, reset: bool = False) -> None:
             cap = result.get("capital_after", 0) or 0
             c   = result.get("code") or "—"
             icon = {"hit_target": "✅", "hit_stop": "❌", "neutral": "⬜"}.get(o, "—")
-            log.info("  %s  %s %s  %+.0f 元  本金 %,.0f", target_date, icon, c, pnl, cap)
+            log.info("  %s  %s %s  %+.0f 元  本金 %s", target_date, icon, c, pnl, f"{cap:,.0f}")
 
     print()
     print(generate_report())
