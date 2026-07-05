@@ -861,16 +861,66 @@ def _paper_monitor_tick(
 
 # ── Day-trading sell-signal executor ─────────────────────────────────────────
 
+def _record_dt_exit(alert, pos, db_path: str = DB_PATH) -> None:
+    """輪詢出場成功後寫入 daily_trades 的 sell 記錄（含 pnl）。
+
+    與 monitor_agent.AlertWorker 的 tick 路徑共用 note="auto_exit" 語意，讓
+    dt_risk.get_today_dt_realized_pnl（熔斷）與 PostMarketJob 看得到所有當沖
+    已實現損益。
+
+    防重複：同一檔同一天 tick 路徑（AlertWorker）與輪詢路徑都可能執行——
+    寫入前檢查今日是否已有該 code 的 auto_exit sell 記錄，已存在則跳過。
+
+    pnl 以「股數」計：common 的 quantity 是「張」（1 張 = 1000 股）須乘 1000，
+    intraday_odd 的 quantity 是「股」。DB 失敗不得中斷出場流程（log.error）。
+    """
+    try:
+        today = date.today()
+        already_recorded = any(
+            t.get("code") == pos.code
+            and t.get("action") == "sell"
+            and t.get("note") == "auto_exit"
+            for t in load_daily_trades(today, db_path)
+        )
+        if already_recorded:
+            log.info("DT 出場記錄：%s 今日已有 auto_exit sell（tick 路徑先寫入），跳過", pos.code)
+            return
+        multiplier = 1000 if pos.lot_type == "common" else 1
+        exit_price = alert.price
+        if pos.entry_price is not None and exit_price is not None:
+            pnl = (exit_price - pos.entry_price) * pos.quantity * multiplier
+        else:
+            pnl = None
+        save_daily_trade({
+            "trade_date":  today,
+            "code":        pos.code,
+            "name":        pos.name,
+            "action":      "sell",
+            "quantity":    pos.quantity,
+            "price":       exit_price,
+            "amount":      (exit_price or 0.0) * pos.quantity * multiplier,
+            "pnl":         pnl,
+            "lot_type":    pos.lot_type,
+            "sector":      "當沖",
+            "note":        "auto_exit",
+            "exit_reason": alert.alert_type,
+        }, db_path)
+    except Exception as e:
+        log.error("DT 出場記錄寫入失敗 %s: %s", pos.code, e)
+
+
 def _run_dt_sell_alerts(
     api,
     sell_alerts: list,
     dt_config: "DaytradingConfig",
     dt_path: str = "data/daytrading_positions.json",
+    db_path: str = DB_PATH,
 ) -> None:
     """觸發追蹤停利 / 停損 / 強制平倉時，自動執行賣單並更新持倉狀態。
 
     所有 DT 賣單均自動執行（不需手動確認），確保及時出場。
     `require_manual_confirm` 只管理買入確認，不影響出場。
+    賣單成功後寫入 daily_trades 的 sell 記錄（含 pnl，_record_dt_exit）。
     """
     from daytrading_monitor import (
         load_daytrading_positions,
@@ -908,6 +958,8 @@ def _run_dt_sell_alerts(
                 "DT 出場：%s %s reason=%s price=%.2f",
                 code, pos.name, alert.alert_type, alert.price,
             )
+            # 出場已實現損益寫入 daily_trades（熔斷 / PostMarketJob 依據）
+            _record_dt_exit(alert, pos, db_path=db_path)
             if TELEGRAM_CHAT_ID:
                 try:
                     from telegram_bot import send_text
@@ -1271,7 +1323,7 @@ def _maybe_trigger_circuit_breaker(
             )
             for p in positions
         ]
-        _run_dt_sell_alerts(api, force_alerts, dt_config, dt_path=dt_path)
+        _run_dt_sell_alerts(api, force_alerts, dt_config, dt_path=dt_path, db_path=db_path)
 
     if TELEGRAM_CHAT_ID:
         try:
@@ -1315,7 +1367,7 @@ def _dt_poll_tick(
     alerts = run_daytrading_monitor(api=api, path=dt_path, config=dt_config)
     sell_alerts = [a for a in alerts if getattr(a, "sell_required", False)]
     if sell_alerts:
-        _run_dt_sell_alerts(api, sell_alerts, dt_config, dt_path=dt_path)
+        _run_dt_sell_alerts(api, sell_alerts, dt_config, dt_path=dt_path, db_path=db_path)
     return sell_alerts
 
 

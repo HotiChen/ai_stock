@@ -252,30 +252,56 @@ class AlertWorker:
                                 # GAP 1：把自動出場寫入 daily_trades，
                                 # 讓 PostMarketJob 能計算其損益、歸因出場原因。
                                 # 包在 try/except，DB 失敗絕不可中斷 alert thread。
+                                #
+                                # 防重複：同一檔同一天輪詢路徑（main._run_dt_sell_alerts）
+                                # 也可能出場並寫入 auto_exit sell；且同一 code 的 tick
+                                # 警報可能連續入列多次。寫入前檢查今日是否已有該 code
+                                # 的 auto_exit sell 記錄，避免已實現損益被重複計算。
                                 try:
-                                    exit_price = alert.get("current_price")
-                                    entry_price = pick.get("entry_price")
-                                    if (
-                                        entry_price is not None
-                                        and exit_price is not None
-                                        and quantity
-                                    ):
-                                        pnl = (exit_price - entry_price) * quantity
+                                    from research_db import load_daily_trades
+                                    already_recorded = any(
+                                        t.get("code") == code
+                                        and t.get("action") == "sell"
+                                        and t.get("note") == "auto_exit"
+                                        for t in load_daily_trades(
+                                            date.today(), self._db_path)
+                                    )
+                                    if already_recorded:
+                                        log.info(
+                                            "AlertWorker: %s 今日已有 auto_exit "
+                                            "出場記錄，跳過重複寫入", code,
+                                        )
                                     else:
-                                        pnl = None
-                                    save_daily_trade({
-                                        "trade_date":  date.today(),
-                                        "code":        code,
-                                        "name":        name,
-                                        "action":      "sell",
-                                        "quantity":    quantity,
-                                        "price":       exit_price,
-                                        "pnl":         pnl,
-                                        "lot_type":    lot_type,
-                                        "sector":      pick.get("sector", "未知"),
-                                        "note":        "auto_exit",
-                                        "exit_reason": alert.get("alert_type"),
-                                    }, self._db_path)
+                                        exit_price = alert.get("current_price")
+                                        entry_price = pick.get("entry_price")
+                                        # common 的 quantity 是「張」（1 張 =
+                                        # 1000 股），intraday_odd 的 quantity 是
+                                        # 「股」——pnl 以股數計，common 須乘 1000。
+                                        multiplier = (
+                                            1000 if lot_type == "common" else 1
+                                        )
+                                        if (
+                                            entry_price is not None
+                                            and exit_price is not None
+                                            and quantity
+                                        ):
+                                            pnl = ((exit_price - entry_price)
+                                                   * quantity * multiplier)
+                                        else:
+                                            pnl = None
+                                        save_daily_trade({
+                                            "trade_date":  date.today(),
+                                            "code":        code,
+                                            "name":        name,
+                                            "action":      "sell",
+                                            "quantity":    quantity,
+                                            "price":       exit_price,
+                                            "pnl":         pnl,
+                                            "lot_type":    lot_type,
+                                            "sector":      pick.get("sector", "未知"),
+                                            "note":        "auto_exit",
+                                            "exit_reason": alert.get("alert_type"),
+                                        }, self._db_path)
                                 except Exception as rec_err:
                                     log.error(
                                         "AlertWorker auto-execute: 記錄出場失敗 %s: %s",
