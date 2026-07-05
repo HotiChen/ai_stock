@@ -28,6 +28,16 @@ import pytest
 
 # ── GAP 3：exit_reason schema ────────────────────────────────────────────────
 
+
+@pytest.fixture(autouse=True)
+def _isolate_dt_store(tmp_path, monkeypatch):
+    """隔離 dt_position_store 的預設路徑：AlertWorker 出場前的 CAS claim 會讀
+    持倉狀態機，不得受 repo data/ 下殘留的執行期檔案影響。"""
+    import dt_position_store as dps
+    monkeypatch.setattr(dps, "_DB_PATH", str(tmp_path / "dtpos.db"))
+    monkeypatch.setattr(dps, "_JSON_MIRROR", str(tmp_path / "dtpos.json"))
+    dps._migrated.clear()
+
 class TestExitReasonSchema:
     def test_save_and_load_round_trips_exit_reason(self, tmp_path):
         """save_daily_trade 帶 exit_reason → load_daily_trades 取回同值。"""
@@ -171,7 +181,11 @@ class TestAlertWorkerRecordsExit:
         assert sells[0]["exit_reason"] == "stop_loss"
 
     def test_pnl_computed_from_entry_price(self, tmp_path):
-        """有 entry_price → pnl = (current - entry) * quantity。"""
+        """有 entry_price → pnl = (current - entry) × quantity × lot multiplier。
+
+        common 的 quantity 是「張」（1 張 = 1000 股）：pnl 必須乘 1000。
+        這裡持倉 1 張 @820 → 842 出場，pnl = 22 × 1 × 1000 = 22000。
+        """
         from monitor_agent import AlertWorker
         from research_db import init_db, load_daily_trades
         db_path = str(tmp_path / "test.db")
@@ -181,7 +195,7 @@ class TestAlertWorkerRecordsExit:
         worker = AlertWorker(
             q, db_path=db_path, telegram_chat_id=None,
             auto_execute=True, api=MagicMock(),
-            watchlist=self._watchlist(entry_price=820.0, quantity=1000),
+            watchlist=self._watchlist(entry_price=820.0, quantity=1),
         )
         q.put(self._alert(current_price=842.0))
         q.put(None)
@@ -192,7 +206,7 @@ class TestAlertWorkerRecordsExit:
 
         rows = load_daily_trades(date.today(), db_path)
         sells = [r for r in rows if r["action"] == "sell"]
-        # (842 - 820) * 1000 = 22000
+        # (842 - 820) * 1(張) * 1000(股/張) = 22000
         assert sells[0]["pnl"] == pytest.approx(22000.0)
 
     def test_pnl_none_when_no_entry_price(self, tmp_path):

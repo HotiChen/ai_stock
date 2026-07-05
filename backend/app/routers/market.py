@@ -25,7 +25,7 @@ def _mock_snapshot() -> MarketSnapshot:
     else:
         session = "closed"
 
-    # Seconds until 13:25 force-close
+    # Seconds until 13:15 force-close
     force_close_tw = 13 * 60 + 25
     countdown = max(0.0, float((force_close_tw - tw_minutes) * 60 - now.second))
 

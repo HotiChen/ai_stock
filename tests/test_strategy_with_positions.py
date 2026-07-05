@@ -44,7 +44,11 @@ def _make_position(
 
 
 def _make_portfolio_with_positions() -> SimulatedPortfolio:
-    p = SimulatedPortfolio(initial_capital=200_000.0)
+    # 200_000 不足以開兩個倉位（2330: 850*1*1000=850,000；2454: 520*2*1000=1,040,000，
+    # 合計 1,890,000），SimulatedPortfolio.open_position 會 raise「資金不足」。
+    # 調高初始資金；下游斷言都是透過 portfolio.get_available_capital() 動態算，
+    # 不依賴這裡的固定金額。
+    p = SimulatedPortfolio(initial_capital=3_000_000.0)
     p.open_position("2330", "台積電", quantity=1, price=850.0,
                     is_fractional=False, shares=0,
                     reason="RSI低檔反彈，外資連買", entry_date=TODAY)

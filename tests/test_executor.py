@@ -164,6 +164,14 @@ class TestExecutionResult:
 # ── place_stock_order ─────────────────────────────────────────────────────────
 
 class TestPlaceStockOrder:
+    @pytest.fixture(autouse=True)
+    def _real_order_path(self, monkeypatch):
+        # place_stock_order()'s paper_trading 參數預設讀 PAPER_TRADING env（缺省
+        # 視為 "true"，模擬下單、不呼叫 api.place_order）。這裡的測試要驗證真實
+        # 下單路徑（呼叫 api.place_order 並回傳其結果），因此明確關閉 paper mode，
+        # 不依賴執行環境是否剛好有 .env 設 PAPER_TRADING=false。
+        monkeypatch.setenv("PAPER_TRADING", "false")
+
     def _mock_api(self, order_id="ORD001"):
         api = MagicMock()
         contract = MagicMock()
@@ -275,6 +283,12 @@ class TestPlaceStockOrder:
 # ── force_stop_loss ───────────────────────────────────────────────────────────
 
 class TestForceStopLoss:
+    @pytest.fixture(autouse=True)
+    def _real_order_path(self, monkeypatch):
+        # 同上：force_stop_loss() 的 paper_trading 也預設讀 PAPER_TRADING env。
+        # 這裡測試的是真實下單路徑，明確關閉 paper mode。
+        monkeypatch.setenv("PAPER_TRADING", "false")
+
     def _mock_api(self):
         api = MagicMock()
         contract = MagicMock()

@@ -7,3 +7,8 @@ python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 pytest>=8.0.0
 httpx>=0.27.0
+
+# backend 薄包裝會 import 根目錄模組（executor→shioaji、telegram_bot/notifier→
+# requests），這些是 backend 執行期與測試的必需依賴，與根 requirements.txt 對齊。
+requests>=2.31.0
+shioaji>=1.3.0

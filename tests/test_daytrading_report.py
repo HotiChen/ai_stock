@@ -350,7 +350,7 @@ class TestSaveWatchingPositions:
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("stock_query._assess_day_trading", return_value=assessment), \
              patch("daytrading_report.run_daytrading_analysis", side_effect=_fake_ai), \
-             patch("daytrading_monitor.save_daytrading_positions", side_effect=_fake_save):
+             patch("daytrading_monitor.replace_today", side_effect=_fake_save):
             build_daytrading_report(api=None, db_path=":memory:")
         return captured.get("positions")
 
@@ -408,6 +408,256 @@ class TestSaveWatchingPositions:
         assert skip_pos.stop_loss is None
         # ai_summary 仍保留 skip 理由，供 9:05 reconfirm 參考
         assert "觀望" in skip_pos.ai_summary
+
+
+class TestAdvisorModeWiring:
+    """llm_mode="advisor"：規則決定 action/entry，LLM 只提供評論，失敗不影響決策。
+    llm_mode="decider"（預設）：行為必須與現狀完全一致（零回歸）。"""
+
+    def _cfg(self, llm_mode="advisor", analysis_count=8, display_count=20):
+        from daytrading_config import DaytradingConfig
+        return DaytradingConfig(
+            llm_mode=llm_mode, analysis_count=analysis_count, display_count=display_count,
+        )
+
+    def _indicators(self, **overrides):
+        base = {
+            "current_price": 100.0, "VWAP": 99.0, "ATR": 3.0,
+            "volume_ratio": 2.0, "bullish_alignment": True,
+            "bearish_alignment": False, "RSI": 55.0,
+            "KD_K": 60.0, "KD_D": 55.0, "BB_position": 0.6,
+        }
+        base.update(overrides)
+        return base
+
+    def _call(self, picks, indicators, market=None, ai_side_effect=None, cfg=None):
+        from daytrading_report import build_daytrading_report
+        if market is None:
+            market = {"index_change_pct": 0.0, "futures_premium_pct": 0.0}
+        assessment = _make_assessment(score=8, data_ok=True)
+        cfg = cfg or self._cfg()
+        ai_patch = (
+            patch("daytrading_report.run_daytrading_analysis", side_effect=ai_side_effect)
+            if ai_side_effect is not None
+            else patch("daytrading_report.run_daytrading_analysis")
+        )
+        with patch("daytrading_report._get_stock_universe", return_value=picks), \
+             patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
+             patch("daytrading_report._fetch_market", return_value=market), \
+             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._get_indicators", return_value=indicators), \
+             patch("stock_query._assess_day_trading", return_value=assessment), \
+             patch("daytrading_config.load_daytrading_config", return_value=cfg), \
+             patch("daytrading_monitor.replace_today") as mock_save, \
+             ai_patch as mock_ai:
+            report = build_daytrading_report(api=None, db_path=":memory:")
+        return report, mock_ai, mock_save
+
+    def _fake_ai(self, action, entry_low=None, entry_high=None,
+                 target_price=None, stop_loss=None, summary="LLM 評論"):
+        from daytrading_analyzer import DayTradingAnalysis
+
+        def _inner(code, name, **kw):
+            return DayTradingAnalysis(
+                code=code, name=name, action=action, confidence=9,
+                entry_low=entry_low, entry_high=entry_high,
+                target_price=target_price, stop_loss=stop_loss,
+                timing="突破" if action == "long" else "觀望",
+                summary=summary,
+            )
+        return _inner
+
+    def test_advisor_mode_decision_ignores_llm_long_when_rule_says_skip(self):
+        """規則判 skip（量比不足）時，即使 LLM 評論說 long，最終仍是 skip 決策。"""
+        indicators = self._indicators(volume_ratio=0.1)
+        picks = [_make_pick("2330", "台積電")]
+        _, _, mock_save = self._call(
+            picks, indicators,
+            ai_side_effect=self._fake_ai("long", entry_low=50.0, entry_high=60.0,
+                                          target_price=70.0, stop_loss=45.0),
+        )
+        assert mock_save.called
+        pos = next(p for p in mock_save.call_args[0][0] if p.code == "2330")
+        assert pos.status == "watching"
+        assert pos.entry_low != 50.0
+        assert pos.entry_high != 60.0
+
+    def test_advisor_mode_uses_rule_entry_range_when_long(self):
+        """規則判 long 時，進場區間來自 dt_rules.rule_entry_range，不是 LLM 給的值。"""
+        import dt_rules
+        indicators = self._indicators()  # 全部條件通過 → 規則判 long
+        picks = [_make_pick("2330", "台積電")]
+        _, _, mock_save = self._call(
+            picks, indicators,
+            ai_side_effect=self._fake_ai("skip", summary="LLM 評論：觀望"),
+        )
+        pos = next(p for p in mock_save.call_args[0][0] if p.code == "2330")
+        expected_low, expected_high = dt_rules.rule_entry_range(indicators)
+        assert pos.entry_low == expected_low
+        assert pos.entry_high == expected_high
+        assert pos.target_price is not None
+        assert pos.stop_loss is not None
+        assert "(顧問評論)" in pos.ai_summary
+
+    def test_advisor_mode_llm_failure_does_not_block_decision(self):
+        """LLM 評論呼叫失敗（例外）：決策仍完全來自規則，不拋出例外。"""
+        indicators = self._indicators()
+        picks = [_make_pick("2330", "台積電")]
+        report, _, mock_save = self._call(
+            picks, indicators, ai_side_effect=Exception("timeout"),
+        )
+        assert isinstance(report, str)
+        pos = next(p for p in mock_save.call_args[0][0] if p.code == "2330")
+        assert pos.entry_low is not None
+        assert "(顧問評論)" in pos.ai_summary
+
+    def test_advisor_mode_skip_has_none_prices(self):
+        indicators = self._indicators(volume_ratio=0.1)
+        picks = [_make_pick("2330", "台積電")]
+        _, _, mock_save = self._call(
+            picks, indicators, ai_side_effect=self._fake_ai("skip"),
+        )
+        pos = next(p for p in mock_save.call_args[0][0] if p.code == "2330")
+        assert pos.entry_low is None
+        assert pos.entry_high is None
+        assert pos.target_price is None
+        assert pos.stop_loss is None
+
+    def test_decider_mode_unaffected_by_rule(self):
+        """decider 模式：即使規則會判 skip，最終決策仍完全來自 LLM（零回歸）。"""
+        indicators = self._indicators(volume_ratio=0.1)  # 規則會判 skip
+        picks = [_make_pick("2330", "台積電")]
+        _, _, mock_save = self._call(
+            picks, indicators,
+            ai_side_effect=self._fake_ai("long", entry_low=99.0, entry_high=101.0,
+                                          target_price=105.0, stop_loss=97.0),
+            cfg=self._cfg(llm_mode="decider"),
+        )
+        pos = next(p for p in mock_save.call_args[0][0] if p.code == "2330")
+        assert pos.entry_low == 99.0
+        assert pos.entry_high == 101.0
+        assert pos.target_price == 105.0
+        assert pos.stop_loss == 97.0
+
+    def test_decider_mode_calls_llm_exactly_as_before(self):
+        indicators = self._indicators()
+        picks = [_make_pick("2330", "台積電")]
+        _, mock_ai, _ = self._call(
+            picks, indicators, ai_side_effect=self._fake_ai("long"),
+            cfg=self._cfg(llm_mode="decider"),
+        )
+        mock_ai.assert_called_once()
+        _, kwargs = mock_ai.call_args
+        assert kwargs["code"] == "2330"
+        assert kwargs["dt_score"] == 8
+
+
+class TestAiDecisionLogWiring:
+    """8:30 段落不論 llm_mode 為何都要落庫到 ai_decision_log。"""
+
+    def _base_patches(self, picks, indicators, cfg, ai_side_effect):
+        market = {"index_change_pct": 0.0, "futures_premium_pct": 0.0}
+        assessment = _make_assessment(score=8, data_ok=True)
+        return [
+            patch("daytrading_report._get_stock_universe", return_value=picks),
+            patch("daytrading_report._fetch_historical_win_rate", return_value=None),
+            patch("daytrading_report._fetch_market", return_value=market),
+            patch("daytrading_report._fetch_chip_data", return_value={}),
+            patch("daytrading_report._get_indicators", return_value=indicators),
+            patch("stock_query._assess_day_trading", return_value=assessment),
+            patch("daytrading_config.load_daytrading_config", return_value=cfg),
+            patch("daytrading_monitor.replace_today"),
+            patch("daytrading_report.run_daytrading_analysis", side_effect=ai_side_effect),
+        ]
+
+    def test_logs_decision_for_decider_mode_with_rule_action_populated(self):
+        from daytrading_config import DaytradingConfig
+        from daytrading_analyzer import DayTradingAnalysis
+        cfg = DaytradingConfig(llm_mode="decider", analysis_count=8, display_count=20)
+        indicators = {
+            "current_price": 100.0, "VWAP": 99.0, "ATR": 3.0,
+            "volume_ratio": 2.0, "bullish_alignment": True,
+            "bearish_alignment": False, "RSI": 55.0,
+        }
+        picks = [_make_pick("2330", "台積電")]
+
+        def _ai(code, name, **kw):
+            return DayTradingAnalysis(
+                code=code, name=name, action="long", confidence=8,
+                entry_low=99.0, entry_high=101.0, target_price=105.0, stop_loss=97.0,
+                timing="拉回", summary="做多",
+            )
+
+        patches = self._base_patches(picks, indicators, cfg, _ai)
+        from daytrading_report import build_daytrading_report
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], patches[7], patches[8], \
+             patch("daytrading_db.DaytradingDB.log_ai_decision") as mock_log:
+            build_daytrading_report(api=None, db_path=":memory:")
+
+        assert mock_log.called
+        _, kwargs = mock_log.call_args
+        assert kwargs["stage"] == "premarket"
+        assert kwargs["llm_mode"] == "decider"
+        assert kwargs["final_action"] == "long"
+        assert kwargs["parsed_action"] == "long"
+        # decider 模式也順便算規則決策，供反事實比較
+        assert kwargs["rule_action"] in ("long", "skip")
+
+    def test_logs_decision_for_advisor_mode(self):
+        from daytrading_config import DaytradingConfig
+        from daytrading_analyzer import DayTradingAnalysis
+        cfg = DaytradingConfig(llm_mode="advisor", analysis_count=8, display_count=20)
+        indicators = {
+            "current_price": 100.0, "VWAP": 99.0, "ATR": 3.0,
+            "volume_ratio": 2.0, "bullish_alignment": True,
+            "bearish_alignment": False, "RSI": 55.0,
+        }
+        picks = [_make_pick("2330", "台積電")]
+
+        def _ai(code, name, **kw):
+            return DayTradingAnalysis(
+                code=code, name=name, action="skip", confidence=0,
+                entry_low=None, entry_high=None, target_price=None, stop_loss=None,
+                timing="觀望", summary="LLM 評論：觀望",
+            )
+
+        patches = self._base_patches(picks, indicators, cfg, _ai)
+        from daytrading_report import build_daytrading_report
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], patches[7], patches[8], \
+             patch("daytrading_db.DaytradingDB.log_ai_decision") as mock_log:
+            build_daytrading_report(api=None, db_path=":memory:")
+
+        assert mock_log.called
+        _, kwargs = mock_log.call_args
+        assert kwargs["stage"] == "premarket"
+        assert kwargs["llm_mode"] == "advisor"
+        assert kwargs["final_action"] == "long"     # 規則判 long
+        assert kwargs["parsed_action"] == "skip"    # LLM 評論說 skip
+        assert kwargs["rule_action"] == "long"
+
+    def test_log_failure_does_not_break_report(self):
+        from daytrading_config import DaytradingConfig
+        from daytrading_analyzer import DayTradingAnalysis
+        cfg = DaytradingConfig(llm_mode="decider", analysis_count=8, display_count=20)
+        indicators = {"current_price": 100.0, "VWAP": 99.0}
+        picks = [_make_pick("2330", "台積電")]
+
+        def _ai(code, name, **kw):
+            return DayTradingAnalysis(
+                code=code, name=name, action="skip", confidence=0,
+                entry_low=None, entry_high=None, target_price=None, stop_loss=None,
+                timing="觀望", summary="skip",
+            )
+
+        patches = self._base_patches(picks, indicators, cfg, _ai)
+        from daytrading_report import build_daytrading_report
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], patches[7], patches[8], \
+             patch("daytrading_db.DaytradingDB.log_ai_decision", side_effect=Exception("db down")):
+            report = build_daytrading_report(api=None, db_path=":memory:")
+        assert isinstance(report, str)
 
 
 class TestTelegramBotDaytradingRouting:

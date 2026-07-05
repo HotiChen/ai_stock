@@ -10,7 +10,7 @@ Main scheduler — daily jobs:
   10:00  DT 盤中檢查       : 持倉損益報告 + 剩餘候選提示（可二次進場）
   13:00  DT 出場警報       : 30 分鐘倒數提醒 + 損益預覽
   13:15  停止 tick 監控
-  13:25  ForceCloseJob     : 強制平倉當沖部位
+  13:15  ForceCloseJob     : 強制平倉當沖部位（config.FORCE_CLOSE_TIME）
   13:35  PostMarketJob     : 停監控 + 存每日摘要
   13:35  DaytradingReview  : 收盤後檢討當日預測準確度
 
@@ -30,7 +30,7 @@ load_dotenv()
 
 from daytrading_config import load_daytrading_config, DaytradingConfig
 from deep_analyzer import run_deep_analysis
-from executor import place_stock_order, ExecutionResult, force_stop_loss, _normalize_action
+from executor import place_stock_order, ExecutionResult, force_stop_loss, _normalize_action, calc_risk_quantity
 from logger import get_logger
 from market_scan import batch_fetch_snapshots
 from market_scanner import ScanCriteria, get_all_stock_codes, screen_candidates, fetch_twse_sim_candidates
@@ -543,7 +543,8 @@ def _get_snapshot_price(api, code: str, fallback: float) -> float:
 
 class ForceCloseJob:
     """
-    13:25 job (10 min before market close):
+    收盤強平 job（config.FORCE_CLOSE_TIME，預設 13:15——落在連續交易時段內，
+    市價單有效；13:25 起為收盤集合競價，市價單會被退單）:
       Sell all open buy positions at market price to avoid overnight exposure.
     """
 
@@ -602,6 +603,15 @@ class ForceCloseJob:
             )
 
             if success:
+                # 若為當沖持倉，原子標記 closed：強平後（至輪詢時段結束前）
+                # 的 5 分鐘輪詢不得對已強平的持倉再送第二筆賣單。
+                try:
+                    from daytrading_monitor import claim_for_close
+                    if claim_for_close(code):
+                        log.info("ForceClose: DT 持倉 %s 已標記 closed", code)
+                except Exception as dt_err:
+                    log.warning("ForceClose: DT claim_for_close(%s) 失敗: %s", code, dt_err)
+
                 multiplier       = 1000 if lot_type == "common" else 1
                 estimated_amount = close_price * quantity * multiplier
 
@@ -663,21 +673,74 @@ class ForceCloseJob:
 
 # ── Day-trading auto buy ─────────────────────────────────────────────────────
 
+def _save_dt_buy_trade(result, db_path: str = DB_PATH, chat_id: Optional[str] = None) -> None:
+    """當沖買單成交後寫入 daily_trades（action="buy"），讓收盤 ForceCloseJob /
+    load_current_positions 看得見當沖持倉。
+
+    下單已成功，DB 寫入失敗不得中斷流程：log.error + Telegram 告警即可。
+    """
+    try:
+        save_daily_trade({
+            "trade_date": date.today(),
+            "code":       result.code,
+            "name":       result.name,
+            "action":     "buy",
+            "quantity":   result.quantity,
+            "price":      result.price,
+            "amount":     result.amount,
+            "pnl":        None,
+            "lot_type":   result.lot_type,
+            "sector":     "當沖",
+            "note":       "daytrade_buy",
+        }, db_path)
+    except Exception as db_err:
+        log.error("DT buy save_daily_trade failed for %s: %s", getattr(result, "code", "?"), db_err)
+        if chat_id:
+            try:
+                from telegram_bot import send_text
+                send_text(
+                    chat_id,
+                    f"⚠️ 當沖買入 {getattr(result, 'code', '?')} 已成交，"
+                    f"但持倉記錄寫入失敗：{db_err}\n請確認收盤強平能看到此持倉！",
+                )
+            except Exception:
+                pass
+
+
 def _auto_buy_dt_positions(
     api,
     positions: list,
     dt_config: "DaytradingConfig",
     dt_path: str = "data/daytrading_positions.json",
+    db_path: str = DB_PATH,
 ) -> None:
-    """DT_MANUAL_CONFIRM=false 時，自動買入所有 watching 當沖持倉。"""
+    """DT_MANUAL_CONFIRM=false 時，自動買入所有 watching 當沖持倉。
+
+    當日虧損熔斷觸發後（dt_risk.is_circuit_breaker_active）拒絕所有新買單。
+    有停損價時改用風險額倉位法（calc_risk_quantity）決定下單金額；缺停損價
+    或算出 0 股時退回固定 budget_per_stock 預算法（行為相容）。
+    """
     from daytrading_monitor import (
-        load_daytrading_positions, save_daytrading_positions,
-        mark_position_entered, fetch_current_price,
+        load_daytrading_positions, mark_entered, fetch_current_price,
     )
+    import dt_risk
+
+    if dt_risk.is_circuit_breaker_active():
+        log.warning("DT 熔斷中，跳過本輪自動買入（%d 檔候選）", len(positions))
+        if TELEGRAM_CHAT_ID:
+            try:
+                from telegram_bot import send_text
+                flag = dt_risk.get_circuit_breaker_flag()
+                send_text(
+                    TELEGRAM_CHAT_ID,
+                    f"🚫 當日虧損熔斷已觸發，本日不再自動買入。\n{flag.get('message', '')}",
+                )
+            except Exception:
+                pass
+        return
 
     all_positions = load_daytrading_positions(path=dt_path)
     pos_map = {p.code: p for p in all_positions if p.status == "watching"}
-    changed = False
 
     for pos in positions:
         code = pos.code
@@ -688,29 +751,73 @@ def _auto_buy_dt_positions(
             if price is None:
                 log.warning("DT auto-buy: 無法取得 %s 報價，跳過", code)
                 continue
+
+            stop_loss_price = pos_map[code].stop_loss
+            budget = dt_config.budget_per_stock
+            risk_shares, risk_reason = calc_risk_quantity(
+                total_budget=CAPITAL,
+                risk_pct=dt_config.risk_per_trade_pct,
+                entry_price=price,
+                stop_loss_price=stop_loss_price,
+                budget_cap=dt_config.budget_per_stock,
+                hard_limit=HARD_LIMIT,
+            )
+            if risk_shares > 0:
+                budget = risk_shares * price
+                log.info("DT auto-buy risk sizing: %s shares=%d budget=%.0f",
+                         code, risk_shares, budget)
+            elif risk_reason:
+                log.debug("DT auto-buy risk sizing fallback %s: %s", code, risk_reason)
+
             result = place_stock_order(
                 api=api,
                 code=code, name=pos_map[code].name,
                 action="buy",
-                budget=dt_config.budget_per_stock,
+                budget=budget,
                 price=price,
                 hard_limit=HARD_LIMIT,
                 paper_trading=PAPER_TRADING,
             )
             if result.success:
-                mark_position_entered(pos_map[code], result.price, result.quantity, result.lot_type)
-                changed = True
+                # 原子單筆進場標記（不覆蓋其他持倉；跨 process 安全）
+                entered = mark_entered(code, result.price, result.quantity,
+                                       result.lot_type, path=dt_path)
+                if not entered:
+                    # 券商已成交但持倉狀態機沒有這筆 → 監控/強平都看不到，必須告警
+                    log.error("DT auto-buy: %s 不在今日持倉庫，狀態未更新（券商已成交）", code)
+                    if TELEGRAM_CHAT_ID:
+                        try:
+                            from telegram_bot import send_text
+                            send_text(
+                                TELEGRAM_CHAT_ID,
+                                f"⚠️ <b>持倉狀態未更新</b>\n"
+                                f"{code} 券商已成交，但不在今日持倉庫中，"
+                                f"系統將無法監控/強平此部位，請人工確認！",
+                            )
+                        except Exception:
+                            pass
                 log.info("DT auto-buy: %s qty=%d price=%.2f", code, result.quantity, result.price)
+                _save_dt_buy_trade(result, db_path=db_path, chat_id=TELEGRAM_CHAT_ID or None)
                 if TELEGRAM_CHAT_ID:
                     try:
                         from telegram_bot import send_text
+                        risk_line = ""
+                        if risk_shares > 0 and stop_loss_price is not None:
+                            risk_amt = CAPITAL * dt_config.risk_per_trade_pct / 100.0
+                            per_share_risk = price - stop_loss_price
+                            risk_line = (
+                                f"\n風險額 {risk_amt:,.0f} 元"
+                                f"（總資金 {dt_config.risk_per_trade_pct:.1f}%）"
+                                f"／每股風險 {per_share_risk:,.2f} 元"
+                            )
                         send_text(
                             TELEGRAM_CHAT_ID,
                             f"🤖 當沖自動買入：<b>{code} {pos_map[code].name}</b>\n"
                             f"買入價 {result.price:,.2f}　"
                             f"數量 {result.quantity}"
                             f"{'張' if result.lot_type == 'common' else '股'}\n"
-                            f"金額 {result.amount:,.0f} 元",
+                            f"金額 {result.amount:,.0f} 元"
+                            f"{risk_line}",
                         )
                     except Exception:
                         pass
@@ -718,9 +825,6 @@ def _auto_buy_dt_positions(
                 log.warning("DT auto-buy failed %s: %s", code, result.reason)
         except Exception as e:
             log.warning("DT auto-buy exception %s: %s", code, e)
-
-    if changed:
-        save_daytrading_positions(all_positions, path=dt_path)
 
 
 # ── Paper-trading（紙上追蹤，DT_PAPER_ONLY=true 時啟用）────────────────────────
@@ -781,26 +885,81 @@ def _paper_monitor_tick(
 
 # ── Day-trading sell-signal executor ─────────────────────────────────────────
 
+def _record_dt_exit(alert, pos, db_path: str = DB_PATH) -> None:
+    """輪詢出場成功後寫入 daily_trades 的 sell 記錄（含 pnl）。
+
+    與 monitor_agent.AlertWorker 的 tick 路徑共用 note="auto_exit" 語意，讓
+    dt_risk.get_today_dt_realized_pnl（熔斷）與 PostMarketJob 看得到所有當沖
+    已實現損益。
+
+    防重複：同一檔同一天 tick 路徑（AlertWorker）與輪詢路徑都可能執行——
+    寫入前檢查今日是否已有該 code 的 auto_exit sell 記錄，已存在則跳過。
+
+    pnl 以「股數」計：common 的 quantity 是「張」（1 張 = 1000 股）須乘 1000，
+    intraday_odd 的 quantity 是「股」。DB 失敗不得中斷出場流程（log.error）。
+    """
+    try:
+        today = date.today()
+        already_recorded = any(
+            t.get("code") == pos.code
+            and t.get("action") == "sell"
+            and t.get("note") == "auto_exit"
+            for t in load_daily_trades(today, db_path)
+        )
+        if already_recorded:
+            log.info("DT 出場記錄：%s 今日已有 auto_exit sell（tick 路徑先寫入），跳過", pos.code)
+            return
+        multiplier = 1000 if pos.lot_type == "common" else 1
+        exit_price = alert.price
+        if pos.entry_price is not None and exit_price is not None:
+            pnl = (exit_price - pos.entry_price) * pos.quantity * multiplier
+        else:
+            pnl = None
+        save_daily_trade({
+            "trade_date":  today,
+            "code":        pos.code,
+            "name":        pos.name,
+            "action":      "sell",
+            "quantity":    pos.quantity,
+            "price":       exit_price,
+            "amount":      (exit_price or 0.0) * pos.quantity * multiplier,
+            "pnl":         pnl,
+            "lot_type":    pos.lot_type,
+            "sector":      "當沖",
+            "note":        "auto_exit",
+            "exit_reason": alert.alert_type,
+        }, db_path)
+    except Exception as e:
+        log.error("DT 出場記錄寫入失敗 %s: %s", pos.code, e)
+
+
 def _run_dt_sell_alerts(
     api,
     sell_alerts: list,
     dt_config: "DaytradingConfig",
     dt_path: str = "data/daytrading_positions.json",
+    db_path: str = DB_PATH,
 ) -> None:
     """觸發追蹤停利 / 停損 / 強制平倉時，自動執行賣單並更新持倉狀態。
 
     所有 DT 賣單均自動執行（不需手動確認），確保及時出場。
     `require_manual_confirm` 只管理買入確認，不影響出場。
+    賣單成功後寫入 daily_trades 的 sell 記錄（含 pnl，_record_dt_exit）。
+
+    重複下單防護（CAS claim）：下賣單前先原子搶佔 active→closed
+    （claim_for_close），沒搶到代表另一條出場路徑（tick AlertWorker /
+    收盤強平）已在處理，本路徑跳過；賣單失敗則回滾 active 供下輪重試。
     """
     from daytrading_monitor import (
         load_daytrading_positions,
-        save_daytrading_positions,
+        claim_for_close,
+        revert_to_active,
+        record_sell_attempt,
         format_alerts_message,
     )
 
     positions = load_daytrading_positions(path=dt_path)
     pos_map = {p.code: p for p in positions if p.status == "active"}
-    changed = False
 
     for alert in sell_alerts:
         code = alert.code
@@ -813,6 +972,11 @@ def _run_dt_sell_alerts(
             log.warning("DT sell alert for %s but quantity=0, skipping", code)
             continue
 
+        # CAS：搶不到 = 另一路徑已處理，絕不下第二筆賣單
+        if not claim_for_close(code, path=dt_path):
+            log.info("DT 出場：%s 已由其他路徑 claim，跳過（避免重複下單）", code)
+            continue
+
         success = force_stop_loss(
             api=api,
             code=pos.code,
@@ -822,28 +986,54 @@ def _run_dt_sell_alerts(
             paper_trading=PAPER_TRADING,
         )
         if success:
-            pos.status = "closed"
-            changed = True
+            # claim 時已原子轉 closed，這裡不需再標記
             log.info(
                 "DT 出場：%s %s reason=%s price=%.2f",
                 code, pos.name, alert.alert_type, alert.price,
             )
+            # 出場已實現損益寫入 daily_trades（熔斷 / PostMarketJob 依據）
+            _record_dt_exit(alert, pos, db_path=db_path)
+            if TELEGRAM_CHAT_ID:
+                try:
+                    from telegram_bot import send_text
+                    send_text(
+                        TELEGRAM_CHAT_ID,
+                        f"✅ 出場已送出\n{format_alerts_message([alert])}",
+                    )
+                except Exception as e:
+                    log.warning("DT sell notify failed: %s", e)
         else:
-            log.error("DT 出場失敗：%s %s", code, pos.name)
-
-        if TELEGRAM_CHAT_ID:
-            try:
-                from telegram_bot import send_text
-                status_tag = "✅ 出場已送出" if success else "❌ 出場失敗，請手動處理"
-                send_text(
-                    TELEGRAM_CHAT_ID,
-                    f"{status_tag}\n{format_alerts_message([alert])}",
-                )
-            except Exception as e:
-                log.warning("DT sell notify failed: %s", e)
-
-    if changed:
-        save_daytrading_positions(positions, path=dt_path)
+            # 賣單失敗：回滾 claim（closed→active）＋記錄重試次數，
+            # 下一輪同規則會再次觸發賣單重試。
+            revert_to_active(code, path=dt_path)
+            attempts = record_sell_attempt(
+                code, f"force_stop_loss returned False ({alert.alert_type})",
+                path=dt_path,
+            )
+            log.error("DT 出場失敗（第 %d 次）：%s %s", attempts, code, pos.name)
+            # 告警節流：第 1–2 次發重試訊息；第 3 次發一次升級告警；
+            # 之後只記 log（避免券商長時間中斷時每 5 分鐘轟炸同一則告警）。
+            if TELEGRAM_CHAT_ID and attempts <= 3:
+                try:
+                    from telegram_bot import send_text
+                    if attempts == 3:
+                        # 連續失敗達門檻 → 升級人工介入告警（只發這一次）
+                        send_text(
+                            TELEGRAM_CHAT_ID,
+                            f"🚨 <b>當沖出場連續失敗 {attempts} 次，需人工介入</b>\n"
+                            f"{pos.code} {pos.name}　數量 {pos.quantity}"
+                            f"{'張' if pos.lot_type == 'common' else '股'}\n"
+                            f"原因：{alert.alert_type}\n"
+                            f"請立即手動平倉！（後續重試只記 log，不再重發此告警）",
+                        )
+                    else:
+                        send_text(
+                            TELEGRAM_CHAT_ID,
+                            f"❌ 出場失敗（第 {attempts} 次重試中）\n"
+                            f"{format_alerts_message([alert])}",
+                        )
+                except Exception as e:
+                    log.warning("DT sell notify failed: %s", e)
 
 
 # ── DT Opening Confirmation (9:05) ───────────────────────────────────────────
@@ -853,12 +1043,23 @@ def _opening_confirm_dt_positions(
     dt_config: "DaytradingConfig",
     dt_path: str = "data/daytrading_positions.json",
 ) -> None:
-    """9:05 開盤再確認：AI 結合 8:30 預測 + 當前大盤氣氛，給出進場或放棄建議。"""
+    """9:05 開盤再確認。
+
+    llm_mode="decider"（預設）：AI 結合 8:30 預測 + 當前大盤氣氛，給出進場或
+    放棄建議（現狀行為，零回歸）。
+    llm_mode="advisor"：改由 dt_rules.rule_opening_reconfirm 的確定性規則決定
+    proceed，省略本次 LLM 呼叫（省成本），Telegram 訊息標明「規則決策」。
+    兩種 mode 都會把決策落庫到 ai_decision_log（stage="reconfirm"），供
+    dt_counterfactual.py 之類的反事實分析工具比較「規則 vs LLM」。
+    """
+    import dt_rules
     from daytrading_monitor import (
-        load_daytrading_positions, save_daytrading_positions, mark_position_skipped,
+        load_daytrading_positions, mark_skipped, update_entry_range,
     )
     from monitor_agent import get_snapshot
-    from daytrading_analyzer import run_opening_reconfirm
+    from daytrading_analyzer import run_opening_reconfirm, OpeningReconfirm
+
+    llm_mode = getattr(dt_config, "llm_mode", "decider")
 
     all_positions = load_daytrading_positions(path=dt_path)
     watching      = [p for p in all_positions if p.status == "watching"]
@@ -879,7 +1080,6 @@ def _opening_confirm_dt_positions(
     skipped:   list = []
     reasons:   dict = {}   # code → reason string
     snap_cache: dict = {}
-    changed = False
 
     for pos in watching:
         snap = get_snapshot(api, pos.code) if api is not None else None
@@ -889,37 +1089,83 @@ def _opening_confirm_dt_positions(
         change_price  = snap.get("change_price", 0.0) if snap else 0.0
         volume        = snap.get("volume",       0)   if snap else 0
 
-        result = run_opening_reconfirm(
-            code=pos.code, name=pos.name,
-            dt_score=pos.dt_score,
-            entry_low=pos.entry_low, entry_high=pos.entry_high,
-            target_price=pos.target_price, stop_loss=pos.stop_loss,
-            ai_summary=pos.ai_summary,
-            current_price=current_price,
-            change_price=change_price,
-            volume=volume,
-            market=market,
+        # 規則決策一律算出來（兩種 mode 都要），供落庫做「規則 vs LLM」反事實比較。
+        rule_result = dt_rules.rule_opening_reconfirm(
+            pos, current_price, change_price, volume, market,
         )
 
+        capture: dict = {}
+        if llm_mode == "advisor":
+            result = OpeningReconfirm(
+                code=pos.code, name=pos.name,
+                proceed=rule_result.proceed,
+                reason=f"[規則決策] {rule_result.reason}",
+                updated_entry_low=None, updated_entry_high=None,
+            )
+        else:
+            result = run_opening_reconfirm(
+                code=pos.code, name=pos.name,
+                dt_score=pos.dt_score,
+                entry_low=pos.entry_low, entry_high=pos.entry_high,
+                target_price=pos.target_price, stop_loss=pos.stop_loss,
+                ai_summary=pos.ai_summary,
+                current_price=current_price,
+                change_price=change_price,
+                volume=volume,
+                market=market,
+                capture=capture,
+            )
+
+        # AI 決策全落庫（task 4）：不論 llm_mode、成功與否都要記錄，失敗不得
+        # 影響交易流程。
+        try:
+            from daytrading_db import DaytradingDB
+            now = datetime.now()
+            DaytradingDB().log_ai_decision(
+                date=date.today().isoformat(),
+                time=now.strftime("%H:%M"),
+                code=pos.code,
+                stage="reconfirm",
+                llm_mode=llm_mode,
+                dt_score=pos.dt_score,
+                prompt=capture.get("prompt"),
+                raw_response=capture.get("raw"),
+                parsed_action=capture.get("parsed_action"),
+                rule_action="proceed" if rule_result.proceed else "skip",
+                final_action="proceed" if result.proceed else "skip",
+                features={
+                    "current_price": current_price,
+                    "change_price": change_price,
+                    "volume": volume,
+                    "market": market,
+                    "entry_low": pos.entry_low,
+                    "entry_high": pos.entry_high,
+                },
+            )
+        except Exception as e:
+            log.debug("log_ai_decision(reconfirm, %s) failed: %s", pos.code, e)
+
         if result.proceed:
-            # AI 可能調整進場區間
+            # AI 可能調整進場區間 → 原子單欄更新（不 bulk 回存整列快照，
+            # 避免覆蓋並發的 status/sell_attempts 原子變更）
+            pos_changed = False
             if result.updated_entry_low is not None:
                 pos.entry_low  = result.updated_entry_low
-                changed = True
+                pos_changed = True
             if result.updated_entry_high is not None:
                 pos.entry_high = result.updated_entry_high
-                changed = True
+                pos_changed = True
+            if pos_changed:
+                update_entry_range(pos.code, pos.entry_low, pos.entry_high,
+                                   path=dt_path)
             confirmed.append(pos)
             log.info("DT 9:05 確認進場 %s %s: %s", pos.code, pos.name, result.reason)
         else:
-            mark_position_skipped(pos)
+            # 原子單筆放棄標記（不覆蓋其他持倉；跨 process 安全）
+            mark_skipped(pos.code, path=dt_path)
             skipped.append(pos)
             reasons[pos.code] = result.reason
-            changed = True
             log.info("DT 9:05 放棄 %s %s: %s", pos.code, pos.name, result.reason)
-
-    if changed:
-        save_daytrading_positions(all_positions, path=dt_path)
 
     log.info("DT 9:05 確認：%d 繼續 / %d 放棄", len(confirmed), len(skipped))
 
@@ -935,8 +1181,10 @@ def _opening_confirm_dt_positions(
         lines = [
             "⚡ <b>當沖開盤確認 09:05</b>",
             f"{idx_arrow} 大盤 {idx_pct:+.2f}%　台指期溢貼水 {fp_pct:+.2f}%",
-            "━━━━━━━━━━━━━━━━",
         ]
+        if llm_mode == "advisor":
+            lines.append("🤖 <i>本次為規則決策（advisor 模式，LLM 僅供評論）</i>")
+        lines.append("━━━━━━━━━━━━━━━━")
 
         if confirmed:
             for pos in confirmed:
@@ -1064,7 +1312,8 @@ def _exit_warning(
             else:
                 lines.append(f"⬜ <b>{pos.code} {pos.name}</b>　無法取得報價")
         lines.append(f"\n💰 合計損益：<b>{total_pnl:+,.0f} 元</b>")
-        lines.append("<i>⚠️ 13:25 系統將自動強制平倉</i>")
+        import config as _cfg_fc
+        lines.append(f"<i>⚠️ {_cfg_fc.FORCE_CLOSE_TIME} 系統將自動強制平倉</i>")
 
     try:
         from telegram_bot import send_text
@@ -1079,9 +1328,254 @@ def _exit_warning(
 
 _RUNNING = True
 
-# 盤中當沖監控：09:15–13:15 每 5 分鐘掃描一次
-from datetime import time as _dtime
-_DT_MON_END = _dtime(13, 15)   # tick 訂閱到此時段結束後取消
+from datetime import time as _dtime, timedelta as _timedelta
+
+# 收盤強制平倉時刻：config.FORCE_CLOSE_TIME（預設 13:15）。
+# 必須落在連續交易時段（09:00–13:24:59）內——13:25 起為收盤集合競價，
+# 市價單會被交易所退單，強平會靜默失敗。
+def _parse_force_close_time() -> _dtime:
+    import config as _cfg
+    try:
+        h, m = map(int, _cfg.FORCE_CLOSE_TIME.split(":"))
+        t = _dtime(h, m)
+        if t >= _dtime(13, 25):
+            log.warning(
+                "FORCE_CLOSE_TIME=%s 落在收盤集合競價（市價單會被退單），"
+                "改用 13:15", _cfg.FORCE_CLOSE_TIME,
+            )
+            return _dtime(13, 15)
+        return t
+    except Exception as e:
+        log.warning("FORCE_CLOSE_TIME 解析失敗（%s），改用 13:15", e)
+        return _dtime(13, 15)
+
+
+_FORCE_CLOSE_T = _parse_force_close_time()
+
+# tick 訂閱到強平時刻結束（強平後由 claim 機制保證不重複下單）
+_DT_MON_END = _FORCE_CLOSE_T
+
+# 5 分鐘輪詢出場路徑（非紙上模式）：09:15 起、強平前 1 分鐘結束（避免重疊）
+_DT_POLL_START    = _dtime(9, 15)
+_DT_POLL_END      = (
+    datetime.combine(date.min, _FORCE_CLOSE_T) - _timedelta(minutes=1)
+).time()
+_DT_POLL_INTERVAL = 300   # 秒（5 分鐘節流）
+
+
+def _build_dt_watchlist(positions: list) -> list[dict]:
+    """把 DaytradingPosition 清單轉成 MonitorAgent.set_watchlist 需要的 dict 清單。
+
+    只保留 watching / active 狀態（closed / skipped 不監控）。
+    """
+    return [
+        {
+            "code":            p.code,
+            "name":            p.name,
+            "target_price":    p.target_price,
+            "stop_loss_price": p.stop_loss,
+            "entry_price":     p.entry_price,
+            "quantity":        p.quantity,
+            "lot_type":        p.lot_type,
+        }
+        for p in positions if p.status in ("watching", "active")
+    ]
+
+
+def _refresh_dt_watchlist(dt_agent, dt_path: str = "data/daytrading_positions.json") -> list[dict]:
+    """從 JSON 重新載入持倉並更新 tick 監控 agent 的 watchlist。
+
+    解決手動確認模式下 09:10 快照過期（entry_price=None/quantity=0）問題：
+    Telegram process 成交後改寫 JSON，主迴圈輪詢時刷新即可帶入實際進場價/數量。
+    set_watchlist 內部會重建 dict 並自 sidecar seed peaks（peak 持久化不受影響）。
+    """
+    from daytrading_monitor import load_daytrading_positions
+    positions = load_daytrading_positions(path=dt_path)
+    watchlist = _build_dt_watchlist(positions)
+    if watchlist:
+        dt_agent.set_watchlist(watchlist)
+    return watchlist
+
+
+def _maybe_trigger_circuit_breaker(
+    api,
+    dt_config: "DaytradingConfig",
+    dt_path: str = "data/daytrading_positions.json",
+    db_path: str = DB_PATH,
+) -> None:
+    """當日虧損熔斷檢查：一天只觸發一次（旗標已存在時直接略過）。
+
+    觸發時：
+      1. 對所有 active 當沖持倉構造 force_close 類型警報，複用
+         _run_dt_sell_alerts 既有機制全平倉（成功者由其內部 mark_closed）。
+      2. 寫入當日熔斷旗標（dt_risk.set_circuit_breaker_flag）—— 讓
+         _auto_buy_dt_positions / telegram_bot._handle_dt_buy 之後拒絕新買單。
+      3. 發送 Telegram 告警。
+
+    旗標先寫入再嘗試全平倉，確保即使全平倉過程拋例外，「本日不再觸發 / 停止
+    進場」的效果仍然生效（force_stop_loss 失敗時既有的 5 分鐘輪詢出場路徑仍會
+    持續嘗試出場，見 _run_dt_sell_alerts 的重試機制）。
+    """
+    import dt_risk
+    from daytrading_monitor import load_daytrading_positions, DaytradingAlert
+
+    if dt_risk.is_circuit_breaker_active():
+        return
+
+    result = dt_risk.check_circuit_breaker(dt_config, db_path)
+    if not result.triggered:
+        return
+
+    log.error("DT 熔斷觸發：%s", result.message)
+    dt_risk.set_circuit_breaker_flag(result.realized_pnl, result.message)
+
+    positions = [p for p in load_daytrading_positions(path=dt_path) if p.status == "active"]
+    if positions:
+        force_alerts = [
+            DaytradingAlert(
+                code=p.code, name=p.name, alert_type="force_close",
+                price=p.entry_price or 0.0,
+                message=f"熔斷全平倉：{result.message}",
+                time=datetime.now(), sell_required=True,
+            )
+            for p in positions
+        ]
+        _run_dt_sell_alerts(api, force_alerts, dt_config, dt_path=dt_path, db_path=db_path)
+
+    if TELEGRAM_CHAT_ID:
+        try:
+            from telegram_bot import send_text
+            send_text(
+                TELEGRAM_CHAT_ID,
+                f"🚨 <b>當日虧損熔斷觸發</b>\n{result.message}\n"
+                f"已對所有當沖持倉送出強制平倉，本日不再新進場。",
+            )
+        except Exception as e:
+            log.warning("熔斷告警發送失敗: %s", e)
+
+
+def _dt_poll_tick(
+    api,
+    dt_config: "DaytradingConfig",
+    dt_agent=None,
+    dt_path: str = "data/daytrading_positions.json",
+    db_path: str = DB_PATH,
+) -> list:
+    """單次輪詢：熔斷檢查 + 刷新 tick watchlist（若 agent 存在）+ 跑 5 分鐘輪詢出場掃描。
+
+    回傳本次已執行的 sell 警報清單（供測試斷言）。
+    """
+    from daytrading_monitor import run_daytrading_monitor
+
+    # 當日虧損熔斷檢查（一天只觸發一次）；失敗不得阻擋既有輪詢出場路徑。
+    try:
+        _maybe_trigger_circuit_breaker(api, dt_config, dt_path=dt_path, db_path=db_path)
+    except Exception as e:
+        log.warning("DT 熔斷檢查失敗: %s", e)
+
+    # Task 3：刷新 tick 監控 watchlist（帶入 Telegram process 成交後的實際持倉）
+    if dt_agent is not None:
+        try:
+            _refresh_dt_watchlist(dt_agent, dt_path=dt_path)
+        except Exception as e:
+            log.warning("DT watchlist 刷新失敗: %s", e)
+
+    # Task 1：5 分鐘輪詢出場路徑（每次都從 JSON 重新載入，天然跨 process 同步）
+    alerts = run_daytrading_monitor(api=api, path=dt_path, config=dt_config)
+    sell_alerts = [a for a in alerts if getattr(a, "sell_required", False)]
+    if sell_alerts:
+        _run_dt_sell_alerts(api, sell_alerts, dt_config, dt_path=dt_path, db_path=db_path)
+    return sell_alerts
+
+
+def _maybe_dt_poll(
+    now: datetime,
+    api,
+    dt_config: "DaytradingConfig",
+    state: dict,
+    dt_agent=None,
+    dt_path: str = "data/daytrading_positions.json",
+    db_path: str = DB_PATH,
+):
+    """非紙上模式的 5 分鐘節流輪詢包裝。
+
+    state = {"last_poll": datetime | None}（呼叫端持有，跨迴圈保存）。
+    - 紙上模式：不走此路徑（回 None）
+    - 交易時段外（非 09:15–13:30）：不執行（回 None）
+    - 距上次執行未滿 5 分鐘：跳過（回 None）
+    否則更新 state["last_poll"] 並執行 _dt_poll_tick，回傳已執行的 sell 警報清單。
+    tick watchlist 刷新只在 13:15 前（tick 訂閱時段）進行。
+    """
+    if dt_config.paper_trade_only:
+        return None
+    t = now.time()
+    if not (_DT_POLL_START <= t <= _DT_POLL_END):
+        return None
+    last = state.get("last_poll")
+    if last is not None and (now - last).total_seconds() < _DT_POLL_INTERVAL:
+        return None
+    state["last_poll"] = now
+    return _dt_poll_tick(
+        api, dt_config,
+        dt_agent=(dt_agent if t <= _DT_MON_END else None),
+        dt_path=dt_path,
+        db_path=db_path,
+    )
+
+
+def _run_dt_reconcile(api, dt_config: "DaytradingConfig", tag: str) -> None:
+    """券商對帳（10:00 / 13:20）：比對 DB active 持倉與券商實際持倉，有差異發告警。
+
+    只在「非紙上、非模擬」且有 api 時執行。對帳失敗（券商查詢例外）不告警，只 log。
+    """
+    if dt_config.paper_trade_only or SIMULATION or api is None:
+        return
+    try:
+        import dt_position_store
+        report = dt_position_store.reconcile_with_broker(
+            api, chat_id=(TELEGRAM_CHAT_ID or None),
+        )
+        if report is None:
+            log.warning("DT 對帳（%s）：無法取得券商持倉，略過", tag)
+        else:
+            log.info(
+                "DT 對帳（%s）：matched=%d db_only=%d qty_mismatch=%d broker_only=%d",
+                tag, len(report["matched"]), len(report["db_only"]),
+                len(report["qty_mismatch"]), len(report["broker_only"]),
+            )
+    except Exception as e:
+        log.warning("DT 對帳（%s）失敗: %s", tag, e)
+
+
+def _run_force_close_job(api, db_path: str = DB_PATH, chat_id: Optional[str] = None) -> None:
+    """收盤強制平倉（預設 13:15），包 try/except。強平失敗是資金安全事件 → 另發 Telegram 告警。"""
+    try:
+        ForceCloseJob(api=api, db_path=db_path).run()
+    except Exception as e:
+        log.error("ForceCloseJob 失敗: %s", e)
+        if chat_id:
+            try:
+                from telegram_bot import send_text
+                send_text(
+                    chat_id,
+                    f"🚨 <b>{_FORCE_CLOSE_T.strftime('%H:%M')} 強制平倉失敗</b>\n{e}\n請立即手動檢查並平倉所有當沖持倉！",
+                )
+            except Exception as te:
+                log.warning("ForceClose 告警發送失敗: %s", te)
+
+
+def _run_postmarket_job(monitor, db_path: str, execution_id: str):
+    """13:35 收盤結算，包 try/except。回傳 total_pnl，失敗回 None。"""
+    try:
+        from notifier import notify_market_close
+        job = PostMarketJob(monitor=monitor, db_path=db_path, execution_id=execution_id)
+        total_pnl = job.run(trades_summary="自動收盤")
+        trades = load_daily_trades(date.today(), db_path)
+        notify_market_close(total_pnl=total_pnl, trade_count=len(trades))
+        return total_pnl
+    except Exception as e:
+        log.warning("PostMarketJob 失敗: %s", e)
+        return None
 
 
 def _handle_signal(sig, frame):
@@ -1134,6 +1628,7 @@ def main() -> None:
     approved_picks: list[dict] = []
     _dt_agent = None   # MonitorAgent（tick 訂閱，09:05 下單後啟動）
     _fired_today: set[str] = set()  # 防止同一 job 在同一天重複執行
+    _dt_poll_state: dict = {"last_poll": None}  # 5 分鐘輪詢出場路徑節流狀態
 
     while _RUNNING:
         now = datetime.now()
@@ -1164,6 +1659,13 @@ def main() -> None:
                 _paper_monitor_tick(api, dt_config)
             except Exception as e:
                 log.warning("Paper monitor tick 失敗: %s", e)
+        else:
+            # 非紙上模式：09:15–13:30 每 5 分鐘輪詢一次出場路徑（run_daytrading_monitor）
+            # + 刷新 tick 監控 watchlist。每次都從 JSON 重新載入，天然跨 process 同步。
+            try:
+                _maybe_dt_poll(now, api, dt_config, _dt_poll_state, dt_agent=_dt_agent)
+            except Exception as e:
+                log.warning("DT 輪詢監控失敗: %s", e)
 
         # 08:30 pre-market：波段選股 + 當沖預測報告（同時推播 Telegram）
         if t.hour == 8 and t.minute == 30 and f"{today_prefix}-0830" not in _fired_today:
@@ -1257,18 +1759,7 @@ def main() -> None:
                     from daytrading_monitor import load_daytrading_positions
                     from monitor_agent import MonitorAgent
                     positions = load_daytrading_positions()
-                    watchlist = [
-                        {
-                            "code":            p.code,
-                            "name":            p.name,
-                            "target_price":    p.target_price,
-                            "stop_loss_price": p.stop_loss,
-                            "entry_price":     p.entry_price,
-                            "quantity":        p.quantity,
-                            "lot_type":        p.lot_type,
-                        }
-                        for p in positions if p.status in ("watching", "active")
-                    ]
+                    watchlist = _build_dt_watchlist(positions)
                     if watchlist and api is not None:
                         _dt_agent = MonitorAgent(
                             api_key="", secret_key="", simulation=False,
@@ -1291,6 +1782,16 @@ def main() -> None:
                 _mid_session_check(api)
             except Exception as e:
                 log.warning("DT 盤中檢查失敗: %s", e)
+            # 10:00 券商對帳（非紙上、非模擬）
+            if f"{today_prefix}-1000-reconcile" not in _fired_today:
+                _run_dt_reconcile(api, dt_config, "10:00")
+                _fired_today.add(f"{today_prefix}-1000-reconcile")
+            time.sleep(60)
+
+        # 13:20 券商對帳（強平前最後一次核對持倉一致性）
+        elif t.hour == 13 and t.minute == 20 and f"{today_prefix}-1320-reconcile" not in _fired_today:
+            _run_dt_reconcile(api, dt_config, "13:20")
+            _fired_today.add(f"{today_prefix}-1320-reconcile")
             time.sleep(60)
 
         # 13:00 出場警報：30 分鐘倒數提醒
@@ -1301,10 +1802,11 @@ def main() -> None:
                 log.warning("DT 出場警報失敗: %s", e)
             time.sleep(60)
 
-        # 13:25 force-close all positions before market close
-        elif t.hour == 13 and t.minute == 25:
+        # 收盤強制平倉（config.FORCE_CLOSE_TIME，預設 13:15——必須在連續
+        # 交易時段內，13:25 起的集合競價不收市價單）
+        elif t.hour == _FORCE_CLOSE_T.hour and t.minute == _FORCE_CLOSE_T.minute:
             if api:
-                ForceCloseJob(api=api, db_path=DB_PATH).run()
+                _run_force_close_job(api, DB_PATH, TELEGRAM_CHAT_ID or None)
             time.sleep(60)
 
         # 13:35 post-market
@@ -1321,14 +1823,9 @@ def main() -> None:
                 except Exception as e:
                     log.warning("Paper 收盤結算失敗: %s", e)
 
-            job = PostMarketJob(
-                monitor=monitor,
-                db_path=DB_PATH,
-                execution_id=f"main-{now.date().isoformat()}",
+            _run_postmarket_job(
+                monitor, DB_PATH, f"main-{now.date().isoformat()}",
             )
-            total_pnl = job.run(trades_summary="自動收盤")
-            trades = load_daily_trades(date.today(), DB_PATH)
-            notify_market_close(total_pnl=total_pnl, trade_count=len(trades))
             monitor = None
             approved_picks = []
 

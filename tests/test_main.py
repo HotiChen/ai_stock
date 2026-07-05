@@ -1209,8 +1209,13 @@ class TestScanCandidates:
         assert isinstance(scan_candidates(None), list)
 
     def test_returns_empty_when_api_is_none(self):
+        # scan_candidates(api=None) 現在會走 TWSE OpenAPI 模擬模式 fallback
+        # （fetch_twse_sim_candidates），不再直接回傳 []。
         from main import scan_candidates
-        assert scan_candidates(None) == []
+        with patch("main.fetch_twse_sim_candidates", return_value=[]) as mock_twse:
+            result = scan_candidates(None)
+        mock_twse.assert_called_once()
+        assert result == []
 
     @patch("main.get_all_stock_codes")
     @patch("main.batch_fetch_snapshots")
@@ -1241,9 +1246,13 @@ class TestScanCandidates:
 
     @patch("main.get_all_stock_codes")
     def test_api_error_returns_empty(self, mock_codes):
+        # Shioaji 失敗後現在會 fallback 到 TWSE OpenAPI 模擬模式，
+        # 不再直接回傳 []（見 main.scan_candidates 的 try/except 分支）。
         from main import scan_candidates
         mock_codes.side_effect = Exception("API error")
-        result = scan_candidates(MagicMock())
+        with patch("main.fetch_twse_sim_candidates", return_value=[]) as mock_twse:
+            result = scan_candidates(MagicMock())
+        mock_twse.assert_called_once()
         assert result == []
 
     @patch("main.get_all_stock_codes")

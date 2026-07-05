@@ -244,6 +244,19 @@ class TestMarketOpenDuplicateOrderSmoke:
     只 mock Shioaji API 物件，讓第一次成功落單，第二次被防重複攔截。
     """
 
+    @pytest.fixture(autouse=True)
+    def _real_order_path(self, monkeypatch):
+        # main.py 在 import 時把 PAPER_TRADING 讀成模組層級常數
+        # （PAPER_TRADING = os.getenv("PAPER_TRADING", "true") != "false"），
+        # main 模組通常已被其他測試檔 import 過並快取在 sys.modules，
+        # 所以光 monkeypatch env var 對它沒有作用，必須直接 monkeypatch
+        # main.PAPER_TRADING 這個已存在的模組屬性，才能讓 MarketOpenJob 走
+        # 真實下單路徑（呼叫 api.place_order）而非 paper 模擬路徑。
+        # 同時也設 env var，涵蓋 main 尚未被 import 過的情況。
+        monkeypatch.setenv("PAPER_TRADING", "false")
+        import main
+        monkeypatch.setattr(main, "PAPER_TRADING", False)
+
     @patch("main.MonitorAgent")
     def test_0900_same_stock_same_action_blocked_on_second_run(
         self, mock_monitor_cls, db

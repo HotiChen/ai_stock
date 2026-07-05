@@ -141,11 +141,14 @@ class TestParseDaytradingResponse:
         return parse_daytrading_response(code, name, raw)
 
     def test_valid_json_returns_correct_fields(self):
+        # target_price / stop_loss 不再信任 LLM 的原始值，改用 ATR 公式（或無
+        # indicators 時的固定百分比保底：entry_high*1.03）計算，
+        # 見 daytrading_analyzer._calc_prices_from_atr。
         result = self._parse(_valid_json())
         assert result.action == "long"
         assert result.confidence == 7
         assert result.entry_low == 99.0
-        assert result.target_price == 105.0
+        assert result.target_price == pytest.approx(104.03)
         assert result.timing == "拉回"
 
     def test_json_in_markdown_block_extracted(self):
@@ -207,49 +210,64 @@ class TestLongPriceValidation:
         assert result.target_price is None
         assert result.stop_loss is None
 
-    # 1. 合法區間正常通過
+    # 1. 合法區間正常通過（target/stop 由 fallback 公式算出，非 LLM 原始值）
     def test_valid_long_passes(self):
         result = self._parse(_valid_json())
         assert result.action == "long"
         assert result.entry_low == 99.0
         assert result.entry_high == 101.0
-        assert result.target_price == 105.0
-        assert result.stop_loss == 97.0
+        assert result.target_price == pytest.approx(104.03)  # entry_high * 1.03
+        assert result.stop_loss == pytest.approx(96.03)      # entry_low * 0.97
 
     # 2. entry_low > entry_high → skip
     def test_entry_low_gt_entry_high_degrades(self):
         raw = _valid_json(entry_low=105.0, entry_high=99.0)
         self._degraded(self._parse(raw))
 
-    # 3. stop_loss == entry_low → skip
+    # 3~6. LLM 給的 stop_loss / target_price 不再被信任或驗證——parse_daytrading_response
+    # 完全用 ATR 公式（或固定百分比保底）重算，因此就算 LLM 給的值邏輯上不合理
+    # （等於或劣於 entry 邊界），只要 entry_low/entry_high 區間本身合法，
+    # 仍應正常判定為 long，且 target/stop 以計算值為準、忽略 LLM 原始值。
     def test_stop_loss_equal_entry_low_degrades(self):
         raw = _valid_json(stop_loss=99.0, entry_low=99.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.stop_loss == pytest.approx(96.03)   # entry_low(99) * 0.97，忽略 LLM 的 99.0
+        assert result.target_price == pytest.approx(104.03)
 
-    # 4. stop_loss > entry_low → skip
     def test_stop_loss_gt_entry_low_degrades(self):
         raw = _valid_json(stop_loss=103.0, entry_low=99.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.stop_loss == pytest.approx(96.03)   # 忽略 LLM 給的 103.0（高於 entry_low）
+        assert result.target_price == pytest.approx(104.03)
 
-    # 5. target_price == entry_high → skip
     def test_target_price_equal_entry_high_degrades(self):
         raw = _valid_json(target_price=101.0, entry_high=101.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.target_price == pytest.approx(104.03)  # 忽略 LLM 給的 101.0
+        assert result.stop_loss == pytest.approx(96.03)
 
-    # 6. target_price < entry_high → skip
     def test_target_price_lt_entry_high_degrades(self):
         raw = _valid_json(target_price=98.0, entry_high=101.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.target_price == pytest.approx(104.03)  # 忽略 LLM 給的 98.0（低於 entry_high）
+        assert result.stop_loss == pytest.approx(96.03)
 
     # 7. entry_low = 0 → skip
     def test_zero_entry_low_degrades(self):
         raw = _valid_json(entry_low=0.0)
         self._degraded(self._parse(raw))
 
-    # 8. stop_loss 為負數 → skip
+    # 8. LLM 給負數 stop_loss 也不影響——一樣被公式重算值取代，entry range 合法即 long
     def test_negative_stop_loss_degrades(self):
         raw = _valid_json(stop_loss=-5.0)
-        self._degraded(self._parse(raw))
+        result = self._parse(raw)
+        assert result.action == "long"
+        assert result.stop_loss == pytest.approx(96.03)   # 忽略 LLM 給的 -5.0
+        assert result.target_price == pytest.approx(104.03)
 
     # 9. entry_low 為 null → skip
     def test_missing_entry_low_degrades(self):
@@ -327,6 +345,135 @@ class TestRunDaytradingAnalysis:
         result, _ = self._run()
         assert result.code == "2330"
         assert result.name == "台積電"
+
+
+# ── run_daytrading_analysis: optional `capture` (for ai_decision_log) ────────
+
+class TestRunDaytradingAnalysisCapture:
+    """capture 參數是新增的可選 dict，供呼叫端取得 prompt/raw/parsed_action 落庫；
+    不傳 capture 時行為必須與現狀完全一致（零回歸）。"""
+
+    def test_capture_none_behaves_identically(self):
+        """不傳 capture（預設 None）時，行為與既有呼叫完全相同。"""
+        from daytrading_analyzer import run_daytrading_analysis
+        with patch("daytrading_analyzer.call_haiku", return_value=_valid_json()):
+            result = run_daytrading_analysis(
+                code="2330", name="台積電",
+                indicators=_indicators(), chip=_chip(), market=_market(), dt_score=7,
+            )
+        assert result.action == "long"
+
+    def test_capture_dict_populated_on_success(self):
+        from daytrading_analyzer import run_daytrading_analysis
+        capture: dict = {}
+        with patch("daytrading_analyzer.call_haiku", return_value=_valid_json()):
+            result = run_daytrading_analysis(
+                code="2330", name="台積電",
+                indicators=_indicators(), chip=_chip(), market=_market(), dt_score=7,
+                capture=capture,
+            )
+        assert "prompt" in capture and capture["prompt"]
+        assert capture["raw"] == _valid_json()
+        assert capture["parsed_action"] == result.action == "long"
+
+    def test_capture_not_populated_when_score_too_low(self):
+        """dt_score 太低直接 skip、未呼叫 AI，capture 應維持空 dict。"""
+        from daytrading_analyzer import run_daytrading_analysis
+        capture: dict = {}
+        result = run_daytrading_analysis(
+            code="2330", name="台積電",
+            indicators=_indicators(), chip=_chip(), market=_market(), dt_score=1,
+            capture=capture,
+        )
+        assert result.action == "skip"
+        assert capture == {}
+
+    def test_capture_not_populated_on_haiku_exception(self):
+        from daytrading_analyzer import run_daytrading_analysis
+        capture: dict = {}
+        with patch("daytrading_analyzer.call_haiku", side_effect=Exception("timeout")):
+            result = run_daytrading_analysis(
+                code="2330", name="台積電",
+                indicators=_indicators(), chip=_chip(), market=_market(), dt_score=7,
+                capture=capture,
+            )
+        assert result.action == "skip"
+        assert capture == {}
+
+
+# ── run_opening_reconfirm: optional `capture` (for ai_decision_log) ──────────
+
+class TestRunOpeningReconfirmCapture:
+    def _reconfirm_json(self, proceed=True):
+        return json.dumps({
+            "proceed": proceed,
+            "reason": "大盤走強，維持進場",
+            "updated_entry_low": None,
+            "updated_entry_high": None,
+        })
+
+    def test_capture_none_behaves_identically(self):
+        from daytrading_analyzer import run_opening_reconfirm
+        with patch("daytrading_analyzer.call_haiku", return_value=self._reconfirm_json()):
+            result = run_opening_reconfirm(
+                code="2330", name="台積電", dt_score=7,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                ai_summary="盤前建議做多",
+                current_price=100.0, change_price=0.5, volume=1000,
+                market=_market(),
+            )
+        assert result.proceed is True
+
+    def test_capture_populated_on_success(self):
+        from daytrading_analyzer import run_opening_reconfirm
+        capture: dict = {}
+        raw = self._reconfirm_json(proceed=True)
+        with patch("daytrading_analyzer.call_haiku", return_value=raw):
+            result = run_opening_reconfirm(
+                code="2330", name="台積電", dt_score=7,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                ai_summary="盤前建議做多",
+                current_price=100.0, change_price=0.5, volume=1000,
+                market=_market(),
+                capture=capture,
+            )
+        assert capture["prompt"]
+        assert capture["raw"] == raw
+        assert capture["parsed_action"] == "proceed"
+        assert result.proceed is True
+
+    def test_capture_parsed_action_skip_when_proceed_false(self):
+        from daytrading_analyzer import run_opening_reconfirm
+        capture: dict = {}
+        with patch("daytrading_analyzer.call_haiku", return_value=self._reconfirm_json(proceed=False)):
+            run_opening_reconfirm(
+                code="2330", name="台積電", dt_score=7,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                ai_summary="盤前建議做多",
+                current_price=100.0, change_price=0.5, volume=1000,
+                market=_market(),
+                capture=capture,
+            )
+        assert capture["parsed_action"] == "skip"
+
+    def test_capture_not_populated_on_exception(self):
+        from daytrading_analyzer import run_opening_reconfirm
+        capture: dict = {}
+        with patch("daytrading_analyzer.call_haiku", side_effect=Exception("timeout")):
+            result = run_opening_reconfirm(
+                code="2330", name="台積電", dt_score=7,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                ai_summary="盤前建議做多",
+                current_price=100.0, change_price=0.5, volume=1000,
+                market=_market(),
+                capture=capture,
+            )
+        assert result.proceed is False
+        assert capture == {}
 
 
 # ── Integration: daytrading_report with AI analysis ──────────────────────────

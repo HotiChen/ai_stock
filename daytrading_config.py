@@ -63,6 +63,22 @@ class DaytradingConfig:
     """8:30 當沖預測訊息顯示、以及存進複盤 DB 的檔數（不觸發 AI 分析）。
     應 >= analysis_count；排名超過 analysis_count 的只顯示不追蹤。"""
 
+    daily_max_loss: float = 3000.0
+    """當日已實現虧損上限（元，正數）。當日當沖已實現損益 <= -daily_max_loss 時
+    觸發熔斷（circuit breaker）：全平倉 active 持倉、當日停止新進場、Telegram 告警。"""
+
+    risk_per_trade_pct: float = 1.0
+    """單筆風險佔總資金百分比（%）。用於風險額倉位法：
+    風險額 = 總資金 × risk_per_trade_pct / 100，股數 = 風險額 ÷ 每股風險
+    （進場價 - 停損價）。"""
+
+    llm_mode: str = "decider"
+    """LLM 在當沖決策中的角色：
+      "decider" （預設）：LLM 直接決定 action/entry（8:30）與 proceed（9:05），現狀行為。
+      "advisor"          ：改由 dt_rules.py 的確定性規則決定，LLM 僅提供評論摘要，
+                           不影響最終決策（可省略 9:05 LLM 呼叫節省成本）。
+    非法值（不在上述兩者中）於載入時 fallback 為 "decider" 並記 log.warning。"""
+
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
@@ -88,6 +104,9 @@ def load_daytrading_config(path: str = _DEFAULT_PATH) -> DaytradingConfig:
         "paper_trade_only":     ("DT_PAPER_ONLY",          lambda v: v.lower() == "true"),
         "analysis_count":       ("DT_ANALYSIS_COUNT",      int),
         "display_count":        ("DT_DISPLAY_COUNT",       int),
+        "daily_max_loss":       ("DT_DAILY_MAX_LOSS",      float),
+        "risk_per_trade_pct":   ("DT_RISK_PER_TRADE_PCT",  float),
+        "llm_mode":             ("DT_LLM_MODE",            str),
     }
     for field, (env_key, cast) in env_map.items():
         val = os.getenv(env_key)
@@ -98,11 +117,27 @@ def load_daytrading_config(path: str = _DEFAULT_PATH) -> DaytradingConfig:
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        defaults.update(data)
+        # 只接受 dataclass 已知欄位；未知/舊欄位忽略並記錄 warning，避免 crash。
+        unknown = [k for k in data if k not in defaults]
+        if unknown:
+            import logging
+            logging.getLogger(__name__).warning(
+                "load_daytrading_config 忽略未知欄位: %s", ", ".join(sorted(unknown))
+            )
+        defaults.update({k: v for k, v in data.items() if k in defaults})
     except FileNotFoundError:
         pass
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("load_daytrading_config JSON error: %s", e)
+
+    # 3. llm_mode 合法性檢查（env 與 JSON 都可能帶入非法值）
+    if defaults.get("llm_mode") not in ("decider", "advisor"):
+        import logging
+        logging.getLogger(__name__).warning(
+            "load_daytrading_config llm_mode 不合法: %r，fallback 為 'decider'",
+            defaults.get("llm_mode"),
+        )
+        defaults["llm_mode"] = "decider"
 
     return DaytradingConfig(**defaults)

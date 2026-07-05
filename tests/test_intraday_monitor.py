@@ -24,7 +24,10 @@ def _position(code="2330", name="台積電", qty=1, price=800.0) -> Position:
     )
 
 def _portfolio(*positions: Position) -> SimulatedPortfolio:
-    p = SimulatedPortfolio(initial_capital=500_000.0)
+    # 500_000 不足以覆蓋 _position() 的預設持倉成本（1 張 * 800 元 = 800,000 元，
+    # test_checks_each_position 更疊加第二檔共 1,300,000 元），SimulatedPortfolio
+    # 會 raise ValueError「資金不足」。調高本測試用初始資金以涵蓋所有既有用例。
+    p = SimulatedPortfolio(initial_capital=2_000_000.0)
     for pos in positions:
         p.open_position(
             pos.code, pos.name, pos.quantity, pos.avg_cost,

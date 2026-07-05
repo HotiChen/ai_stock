@@ -39,7 +39,11 @@ def _planset(agg=None, bal=None, con=None) -> PlanSet:
         generated_at=TODAY,
     )
 
-def _portfolio(capital=500_000.0) -> SimulatedPortfolio:
+def _portfolio(capital=3_000_000.0) -> SimulatedPortfolio:
+    # portfolio.open_position() 資金不足時會 raise ValueError（並非放行負現金），
+    # execute_plan() 會捕捉該例外、記成失敗訊息、不建倉。這裡的買賣測試多半用
+    # 850 元/500 元的股價 * 1000 股（1 張）計價，預設資金調高以確保單張、
+    # 甚至同一輪買兩檔的情境都不會被「資金不足」擋下。
     return SimulatedPortfolio(initial_capital=capital)
 
 
@@ -99,11 +103,14 @@ class TestExecutePlan:
 
     @patch("telegram_bot._fetch_stock_price", return_value=850.0)
     def test_open_deducts_cash(self, mock_price):
-        port = _portfolio(500_000.0)
+        # portfolio.open_position() 資金不足時會 raise（不允許負現金），
+        # 用足夠資金才能驗證買進後現金確實減少。
+        capital = 2_000_000.0
+        port = _portfolio(capital)
         plan = _plan("aggressive", [_pick("2330", "台積電", "open", qty=1)])
         execute_plan(plan, port, TODAY)
-        # 850 * 1000 = 850,000 → cash = 500,000 - 850,000 = -350,000 (simulation allows negative)
-        assert port.get_available_capital() < 500_000.0
+        # 850 * 1000 = 850,000 → cash = 2,000,000 - 850,000 = 1,150,000
+        assert port.get_available_capital() < capital
 
     @patch("telegram_bot._fetch_stock_price", return_value=850.0)
     def test_returns_log_messages(self, mock_price):
@@ -154,7 +161,7 @@ class TestExecutePlan:
 
     @patch("telegram_bot._fetch_stock_price", return_value=520.0)
     def test_close_increases_cash(self, mock_price):
-        port = _portfolio(200_000.0)
+        port = _portfolio(1_000_000.0)
         port.open_position("2454", "聯發科", quantity=1, price=500.0,
                            is_fractional=False, shares=0,
                            reason="test", entry_date=TODAY)

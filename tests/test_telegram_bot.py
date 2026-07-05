@@ -168,8 +168,16 @@ def test_approve_all_callback(monkeypatch):
         assert "全部批准" in text or "全部" in text
 
 
-def test_reject_all_callback(monkeypatch):
+def test_reject_all_callback(monkeypatch, tmp_path):
+    # handle_callback("reject_all") 會呼叫 research_db.reject_all_picks_from_plan()，
+    # 對 bot.DB_PATH 執行真實 SQL UPDATE。預設 DB_PATH="data/research.db" 在乾淨環境
+    # 下不存在（data/ 被 .gitignore 排除、table 也未建立），因此明確用一個已
+    # init_db() 過的暫存 DB，不依賴執行環境是否剛好留有舊的 data/research.db。
+    from research_db import init_db
+    db_path = str(tmp_path / "t.db")
+    init_db(db_path)
     monkeypatch.setattr(bot, "CHAT_ID", "123")
+    monkeypatch.setattr(bot, "DB_PATH", db_path)
     with patch("telegram_bot._post"), \
          patch("telegram_bot.send_text") as mock_send:
         bot.process_update(_make_callback("123", "reject_all"))

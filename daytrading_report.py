@@ -10,10 +10,11 @@ daytrading_report.py — 今日當沖預測報告
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
-from daytrading_analyzer import run_daytrading_analysis
+import dt_rules
+from daytrading_analyzer import DayTradingAnalysis, _calc_prices_from_atr, run_daytrading_analysis
 
 log = logging.getLogger(__name__)
 
@@ -158,6 +159,75 @@ def _get_stock_universe(api, top_n: int = 50) -> list[dict]:
     return result
 
 
+def _advisor_analysis(
+    code: str,
+    name: str,
+    indicators: Optional[dict],
+    chip: Optional[dict],
+    market: dict,
+    dt_score: int,
+    rule: "dt_rules.RuleDecision",
+    capture: dict,
+) -> DayTradingAnalysis:
+    """llm_mode="advisor"：dt_rules 決定 action/entry，LLM 僅提供評論摘要
+    （呼叫失敗完全不影響決策，只影響 summary 文字）。target/stop 沿用既有
+    ATR 公式路徑（daytrading_analyzer._calc_prices_from_atr），把規則算出的
+    進場區間餵給它，行為與 decider 模式的 ATR 計算方式一致。
+    """
+    entry_low, entry_high = dt_rules.rule_entry_range(indicators)
+    if rule.action != "long":
+        entry_low = entry_high = None
+
+    dqs, missing = 5, []
+    try:
+        comment = run_daytrading_analysis(
+            code=code, name=name, indicators=indicators, chip=chip,
+            market=market, dt_score=dt_score, capture=capture,
+        )
+        comment_text = comment.summary or "（無評論）"
+        dqs = comment.data_quality_score
+        missing = comment.missing_data
+        # parsed_action：LLM 評論本身的判斷（僅供落庫比較，不影響決策）。
+        # 明確覆寫而非只靠 run_daytrading_analysis 內部填入，確保呼叫端把
+        # run_daytrading_analysis 整個替換掉（測試常見作法）時仍可正確取值。
+        capture["parsed_action"] = comment.action
+    except Exception as e:
+        log.debug("advisor 模式 AI 評論失敗 %s: %s", code, e)
+        comment_text = "AI 評論不可用"
+    summary = f"(顧問評論) {comment_text}"
+
+    target_price = stop_loss = None
+    if rule.action == "long" and entry_high is not None:
+        atr = None
+        if indicators:
+            raw_atr = indicators.get("ATR")
+            try:
+                atr = float(raw_atr) if raw_atr is not None else None
+            except (TypeError, ValueError):
+                atr = None
+        target_price, stop_loss = _calc_prices_from_atr(entry_high, atr)
+
+        # ATR 不存在時，固定百分比保底（與 parse_daytrading_response 的保底邏輯一致）
+        if stop_loss is None and entry_low is not None:
+            stop_loss = round(entry_low * 0.97, 2)
+        if target_price is None:
+            target_price = round(entry_high * 1.03, 2)
+        # 確保停損不落在進場區間內
+        if stop_loss is not None and entry_low is not None and stop_loss >= entry_low:
+            stop_loss = round(entry_low * 0.97, 2)
+
+    return DayTradingAnalysis(
+        code=code, name=name,
+        action=rule.action, confidence=dt_score,
+        entry_low=entry_low, entry_high=entry_high,
+        target_price=target_price, stop_loss=stop_loss,
+        timing="開盤" if rule.action == "long" else "觀望",
+        summary=summary,
+        data_quality_score=dqs,
+        missing_data=missing,
+    )
+
+
 def build_daytrading_report(
     api=None,
     db_path: str = DB_PATH,
@@ -172,13 +242,15 @@ def build_daytrading_report(
     （預設分析 8 / 顯示 20，可用 DT_ANALYSIS_COUNT / DT_DISPLAY_COUNT 覆蓋）。
     不依賴 research.db，獨立運作。
     """
-    if analysis_count is None or display_count is None:
-        from daytrading_config import load_daytrading_config
-        _cfg = load_daytrading_config()
-        if analysis_count is None:
-            analysis_count = _cfg.analysis_count
-        if display_count is None:
-            display_count = _cfg.display_count
+    # llm_mode 一律要讀（決定 8:30 AI 決策是否降級為顧問），analysis_count /
+    # display_count 未指定時一併從同一份設定取得。
+    from daytrading_config import load_daytrading_config
+    _cfg = load_daytrading_config()
+    if analysis_count is None:
+        analysis_count = _cfg.analysis_count
+    if display_count is None:
+        display_count = _cfg.display_count
+    llm_mode = _cfg.llm_mode
 
     from stock_query import _assess_day_trading
 
@@ -272,18 +344,65 @@ def build_daytrading_report(
         return header + "<i>今日各股當沖條件不成熟，建議觀望。</i>"
 
     # 8. AI 當沖分析（前 analysis_count 名，均已通過資料門檻）
+    #    llm_mode="decider"（預設）：LLM 直接決定 action/entry，行為與現狀完全相同。
+    #    llm_mode="advisor"        ：dt_rules 決定 action/entry，LLM 只提供評論
+    #                                （失敗不影響決策），target/stop 仍走既有 ATR 公式。
+    #    兩種 mode 都會順便算出規則決策（rule_decide_action），落庫供反事實分析
+    #    比較「規則 vs LLM」（task 4：ai_decision_log）。
     ai_map: dict = {}
     for r in qualified[:analysis_count]:
-        try:
-            ai_map[r["code"]] = run_daytrading_analysis(
+        capture: dict = {}
+        rule = dt_rules.rule_decide_action(r["dt_score"], r["indicators"], market)
+
+        if llm_mode == "advisor":
+            ai_map[r["code"]] = _advisor_analysis(
                 code=r["code"], name=r["name"],
-                indicators=r["indicators"],
-                chip=r["chip"],
-                market=market,
+                indicators=r["indicators"], chip=r["chip"], market=market,
+                dt_score=r["dt_score"], rule=rule, capture=capture,
+            )
+        else:
+            try:
+                ai_map[r["code"]] = run_daytrading_analysis(
+                    code=r["code"], name=r["name"],
+                    indicators=r["indicators"],
+                    chip=r["chip"],
+                    market=market,
+                    dt_score=r["dt_score"],
+                    capture=capture,
+                )
+                # decider 模式：parsed_action 就是最終決策本身。明確設定（而非只
+                # 靠 run_daytrading_analysis 內部填入 capture），確保測試把
+                # run_daytrading_analysis 整個 mock 掉時仍能正確落庫。
+                capture["parsed_action"] = ai_map[r["code"]].action
+            except Exception as e:
+                log.debug("run_daytrading_analysis(%s) failed: %s", r["code"], e)
+
+        # AI 決策全落庫（task 4）：不論 llm_mode、成功與否都要記錄，失敗不得
+        # 影響報表產生。
+        try:
+            from daytrading_db import DaytradingDB
+            ai = ai_map.get(r["code"])
+            now = datetime.now()
+            DaytradingDB(db_path).log_ai_decision(
+                date=date.today().isoformat(),
+                time=now.strftime("%H:%M"),
+                code=r["code"],
+                stage="premarket",
+                llm_mode=llm_mode,
                 dt_score=r["dt_score"],
+                prompt=capture.get("prompt"),
+                raw_response=capture.get("raw"),
+                parsed_action=capture.get("parsed_action"),
+                rule_action=rule.action,
+                final_action=ai.action if ai else None,
+                features={
+                    "indicators": r["indicators"],
+                    "chip": r["chip"],
+                    "market": market,
+                },
             )
         except Exception as e:
-            log.debug("run_daytrading_analysis(%s) failed: %s", r["code"], e)
+            log.debug("log_ai_decision(premarket, %s) failed: %s", r["code"], e)
 
     # 8b. 儲存盤中監控倉位
     #     存所有 AI 分析過的 qualified 標的（含 AI 判斷 skip 的），全部設為 watching，
@@ -291,7 +410,7 @@ def build_daytrading_report(
     #     skip 標的 entry/target/stop 為 None，監控（check_position_alerts）與
     #     9:05 reconfirm（build_opening_reconfirm_prompt）均已 None-safe。
     try:
-        from daytrading_monitor import DaytradingPosition, save_daytrading_positions
+        from daytrading_monitor import DaytradingPosition, replace_today
         dt_positions = [
             DaytradingPosition(
                 code=r["code"], name=r["name"],
@@ -304,7 +423,7 @@ def build_daytrading_report(
             if (ai := ai_map.get(r["code"])) is not None
         ]
         if dt_positions:
-            save_daytrading_positions(dt_positions)
+            replace_today(dt_positions)
     except Exception as e:
         log.warning("save_daytrading_positions failed: %s", e)
 

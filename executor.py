@@ -101,6 +101,64 @@ def calc_quantity(budget: float, price: float, lot_type: str) -> int:
         return int(budget // price)
 
 
+def calc_risk_quantity(
+    total_budget: float,
+    risk_pct: float,
+    entry_price: Optional[float],
+    stop_loss_price: Optional[float],
+    budget_cap: float,
+    hard_limit: float,
+) -> tuple[int, str]:
+    """風險額倉位法：依「單筆最大虧損」反推股數，而非固定預算。
+
+    風險額 = total_budget × risk_pct / 100
+    每股風險 = entry_price - stop_loss_price
+    股數 = 風險額 ÷ 每股風險，向下取整（股為單位，非張）
+
+    再套用金額上限（budget_cap 與 hard_limit 取更嚴格者）：若風險額算出的股數
+    金額超過上限，改依上限金額用 calc_lot_type/calc_quantity 的既有邏輯
+    （買得起整張優先整張）重算，並把結果換算回「股」為單位回傳，讓呼叫端可
+    一致地用 ``budget = quantity * entry_price`` 交給 place_stock_order（其
+    guard 會再依此 budget 自行決定整張/零股與最終張數/股數）。
+
+    entry_price 或 stop_loss_price 缺失、或每股風險 <= 0（停損價未低於進場價）、
+    或風險額不足買入最小單位時，回傳 (0, reason)：呼叫端應退回固定預算法。
+    """
+    if entry_price is None or entry_price <= 0:
+        return 0, "缺少進場價，改用固定預算法"
+    if stop_loss_price is None:
+        return 0, "缺少停損價，改用固定預算法"
+
+    per_share_risk = entry_price - stop_loss_price
+    if per_share_risk <= 0:
+        return 0, "停損價未低於進場價（每股風險 <= 0），改用固定預算法"
+
+    risk_amount = total_budget * (risk_pct / 100.0)
+    shares = int(risk_amount // per_share_risk)
+    if shares <= 0:
+        return 0, "風險額不足買入最小單位，改用固定預算法"
+
+    amount_cap = min(budget_cap, hard_limit)
+    if shares * entry_price > amount_cap:
+        capped_lot_type = calc_lot_type(amount_cap, entry_price)
+        capped_qty = calc_quantity(amount_cap, entry_price, capped_lot_type)
+        shares = capped_qty * SHARES_PER_LOT if capped_lot_type == "common" else capped_qty
+        return shares, f"風險股數金額超過上限 {amount_cap:,.0f}，已依上限調整為 {shares} 股"
+
+    # 未觸上限路徑同樣做整張正規化：回傳值必須等於 place_stock_order 以
+    # budget = shares × entry_price 實際會成交的股數，否則 Telegram 顯示的
+    # 風險額股數與實際曝險不一致（例：2500 股 → common 2 張 = 2000 股）。
+    budget = shares * entry_price
+    lot_type = calc_lot_type(budget, entry_price)
+    qty = calc_quantity(budget, entry_price, lot_type)
+    normalized = qty * SHARES_PER_LOT if lot_type == "common" else qty
+    if normalized <= 0:
+        return 0, "正規化後不足最小單位，改用固定預算法"
+    if normalized != shares:
+        return normalized, f"已正規化為整張單位（{shares} → {normalized} 股）"
+    return shares, ""
+
+
 def check_hard_limit(amount: float, limit: float) -> bool:
     """Return True if amount does not exceed the hard dollar limit."""
     return amount <= limit

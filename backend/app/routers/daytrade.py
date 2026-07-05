@@ -41,12 +41,12 @@ if _AI_STOCK_DIR not in sys.path:
 # ── Countdown helper ──────────────────────────────────────────────────────────
 
 def _calc_countdown_seconds() -> int:
-    """Return seconds remaining until 13:25 (force-close) in Taipei time."""
+    """Return seconds remaining until 13:15 (force-close) in Taipei time."""
     try:
         # Use stdlib timezone — pytz may not be installed
         tz = timezone(timedelta(hours=8))
         now = datetime.now(tz)
-        force_close = now.replace(hour=13, minute=25, second=0, microsecond=0)
+        force_close = now.replace(hour=13, minute=15, second=0, microsecond=0)
         remaining = int((force_close - now).total_seconds())
         return max(0, remaining)
     except Exception:
@@ -180,7 +180,7 @@ def _mock_risk() -> RiskCockpit:
 def _mock_daytrade_live() -> DaytradeLive:
     return DaytradeLive(
         countdown_seconds=_calc_countdown_seconds(),
-        force_close_at="13:25:00",
+        force_close_at="13:15:00",
         monitoring_count=2,
         closed_count=0,
         unrealized_pnl=3500,
@@ -304,7 +304,7 @@ def _build_live_from_real() -> DaytradeLive:
 
     return DaytradeLive(
         countdown_seconds=_calc_countdown_seconds(),
-        force_close_at="13:25:00",
+        force_close_at="13:15:00",
         monitoring_count=len([p for p in positions if p.thread_state == ThreadState.MONITORING]),
         closed_count=0,
         unrealized_pnl=unrealized,
