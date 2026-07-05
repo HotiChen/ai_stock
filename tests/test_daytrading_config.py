@@ -137,3 +137,74 @@ class TestLoadConfigUnknownFields:
             json.dump({"take_profit_pct": 7.5}, f)
         cfg = load_daytrading_config(path=path)
         assert cfg.take_profit_pct == 7.5
+
+
+# ── Task: llm_mode（decider = 現狀 LLM 決策 / advisor = 規則決策，LLM 僅評論）──
+
+class TestLlmMode:
+    def test_default_is_decider(self):
+        from daytrading_config import DaytradingConfig
+        cfg = DaytradingConfig()
+        assert cfg.llm_mode == "decider"
+
+    def test_dataclass_accepts_advisor(self):
+        from daytrading_config import DaytradingConfig
+        cfg = DaytradingConfig(llm_mode="advisor")
+        assert cfg.llm_mode == "advisor"
+
+    def test_load_defaults_to_decider_when_no_env(self):
+        import os
+        from unittest.mock import patch
+        from daytrading_config import load_daytrading_config
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DT_LLM_MODE", None)
+            cfg = load_daytrading_config()
+        assert cfg.llm_mode == "decider"
+
+    def test_env_override_advisor(self):
+        import os
+        from unittest.mock import patch
+        from daytrading_config import load_daytrading_config
+        with patch.dict(os.environ, {"DT_LLM_MODE": "advisor"}):
+            cfg = load_daytrading_config()
+        assert cfg.llm_mode == "advisor"
+
+    def test_env_override_decider_explicit(self):
+        import os
+        from unittest.mock import patch
+        from daytrading_config import load_daytrading_config
+        with patch.dict(os.environ, {"DT_LLM_MODE": "decider"}):
+            cfg = load_daytrading_config()
+        assert cfg.llm_mode == "decider"
+
+    def test_invalid_env_value_falls_back_to_decider_with_warning(self, caplog):
+        import os
+        import logging
+        from unittest.mock import patch
+        from daytrading_config import load_daytrading_config
+        with patch.dict(os.environ, {"DT_LLM_MODE": "auto_pilot"}):
+            with caplog.at_level(logging.WARNING):
+                cfg = load_daytrading_config()
+        assert cfg.llm_mode == "decider"
+        assert any("llm_mode" in r.message for r in caplog.records)
+
+    def test_invalid_json_value_falls_back_to_decider_with_warning(self, tmp_path, caplog):
+        import json
+        import logging
+        from daytrading_config import load_daytrading_config
+        path = str(tmp_path / "cfg.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"llm_mode": "nonsense"}, f)
+        with caplog.at_level(logging.WARNING):
+            cfg = load_daytrading_config(path=path)
+        assert cfg.llm_mode == "decider"
+        assert any("llm_mode" in r.message for r in caplog.records)
+
+    def test_json_advisor_value_accepted(self, tmp_path):
+        import json
+        from daytrading_config import load_daytrading_config
+        path = str(tmp_path / "cfg.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"llm_mode": "advisor"}, f)
+        cfg = load_daytrading_config(path=path)
+        assert cfg.llm_mode == "advisor"

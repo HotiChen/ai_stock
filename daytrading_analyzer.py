@@ -381,8 +381,15 @@ def run_opening_reconfirm(
     change_price: float,
     volume: int,
     market: dict,
+    capture: Optional[dict] = None,
 ) -> OpeningReconfirm:
-    """9:05 開盤再確認：結合 8:30 預測 + 當前大盤氣氛，AI 判斷是否繼續進場。"""
+    """9:05 開盤再確認：結合 8:30 預測 + 當前大盤氣氛，AI 判斷是否繼續進場。
+
+    capture（可選）：呼叫端傳入空 dict，成功時會被填入
+    {"prompt": ..., "raw": ..., "parsed_action": "proceed"|"skip"}，供
+    ai_decision_log 落庫使用。不傳（預設 None）時行為與現狀完全相同。
+    失敗（例外）不會填入 capture，代表 LLM 從未真正做出決策。
+    """
     _skip = OpeningReconfirm(
         code=code, name=name, proceed=False,
         reason="AI 分析失敗，保守放棄",
@@ -403,9 +410,16 @@ def run_opening_reconfirm(
             except (TypeError, ValueError):
                 return None
 
+        proceed = bool(data.get("proceed", False))
+
+        if capture is not None:
+            capture["prompt"] = prompt
+            capture["raw"] = raw
+            capture["parsed_action"] = "proceed" if proceed else "skip"
+
         return OpeningReconfirm(
             code=code, name=name,
-            proceed=bool(data.get("proceed", False)),
+            proceed=proceed,
             reason=str(data.get("reason", "")),
             updated_entry_low=_f(data.get("updated_entry_low")),
             updated_entry_high=_f(data.get("updated_entry_high")),
@@ -425,8 +439,15 @@ def run_daytrading_analysis(
     market: Optional[dict],
     dt_score: int,
     extra_context: str = "",
+    capture: Optional[dict] = None,
 ) -> DayTradingAnalysis:
-    """呼叫 Haiku 做當沖 AI 分析。dt_score < 4 直接回傳 skip，節省 API 成本。"""
+    """呼叫 Haiku 做當沖 AI 分析。dt_score < 4 直接回傳 skip，節省 API 成本。
+
+    capture（可選）：呼叫端傳入空 dict，成功時會被填入
+    {"prompt": ..., "raw": ..., "parsed_action": ...}，供 ai_decision_log 落庫
+    使用。不傳（預設 None）時行為與現狀完全相同。dt_score 太低或呼叫失敗都
+    不會填入 capture，代表 LLM 從未真正做出決策。
+    """
     _skip = DayTradingAnalysis(
         code=code, name=name, action="skip", confidence=0,
         entry_low=None, entry_high=None,
@@ -443,7 +464,12 @@ def run_daytrading_analysis(
             extra_context=extra_context,
         )
         raw = call_haiku(prompt)
-        return parse_daytrading_response(code, name, raw, indicators=indicators)
+        result = parse_daytrading_response(code, name, raw, indicators=indicators)
+        if capture is not None:
+            capture["prompt"] = prompt
+            capture["raw"] = raw
+            capture["parsed_action"] = result.action
+        return result
     except Exception as e:
         log.warning("run_daytrading_analysis failed for %s: %s", code, e)
         return _skip

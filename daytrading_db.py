@@ -1,19 +1,37 @@
 """
 daytrading_db.py — 當沖預測記錄 + 收盤檢討資料庫
 
-一張表 dt_prediction_log：
-  盤前：存 AI 預測欄位（entry_low / target_price / stop_loss …）
-  收盤：補 OHLC + outcome + was_correct
+兩張表：
+  dt_prediction_log ：
+    盤前：存 AI 預測欄位（entry_low / target_price / stop_loss …）
+    收盤：補 OHLC + outcome + was_correct
+  ai_decision_log ：
+    LLM 決策全落庫（llm_mode="decider"/"advisor" 皆落庫），供 dt_counterfactual.py
+    之類的反事實分析工具重建「LLM 決策 vs 規則決策」的完整歷史。落庫失敗不得
+    影響交易流程（log_ai_decision 內部 try/except，絕不對外拋出）。
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
+log = logging.getLogger(__name__)
+
 _DEFAULT_PATH = "data/daytrading_review.db"
+
+
+def _hash_prompt(prompt: Optional[str]) -> Optional[str]:
+    """sha256 前 16 碼。prompt 為 None/空字串時回傳 None（代表當次沒有實際呼叫 LLM
+    或未取得 prompt，例如 advisor 模式省略 9:05 呼叫）。"""
+    if not prompt:
+        return None
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -71,6 +89,24 @@ class DaytradingDB:
                     reviewed_at   TEXT,
                     created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
                     UNIQUE(date, code)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_decision_log (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date          TEXT    NOT NULL,
+                    time          TEXT    NOT NULL,
+                    code          TEXT    NOT NULL,
+                    stage         TEXT    NOT NULL,        -- 'premarket' | 'reconfirm'
+                    llm_mode      TEXT    NOT NULL,
+                    dt_score      INTEGER NOT NULL DEFAULT 0,
+                    prompt_hash   TEXT,
+                    raw_response  TEXT,
+                    parsed_action TEXT,
+                    rule_action   TEXT,
+                    final_action  TEXT,
+                    features_json TEXT    NOT NULL DEFAULT '{}',
+                    created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
                 )
             """)
 
@@ -158,6 +194,57 @@ class DaytradingDB:
             "losses":   row["losses"] or 0,
             "win_rate": round(wins / total, 3) if total else None,
         }
+
+    # ── AI 決策全落庫（反事實分析用）───────────────────────────────────
+
+    def log_ai_decision(
+        self,
+        *,
+        date: str,
+        time: str,
+        code: str,
+        stage: str,                    # 'premarket' | 'reconfirm'
+        llm_mode: str,
+        dt_score: int,
+        prompt: Optional[str],
+        raw_response: Optional[str],
+        parsed_action: Optional[str],
+        rule_action: Optional[str],
+        final_action: Optional[str],
+        features: Optional[dict] = None,
+    ) -> None:
+        """落庫一筆 AI 決策記錄。不論 llm_mode 為何都應呼叫（decider 模式的
+        rule_action 也順便算出來存，供「規則 vs LLM」反事實比較）。
+
+        失敗（含 DB I/O 錯誤）只記 log.warning，絕不對外拋出——落庫是輔助分析
+        用途，不得影響交易主流程。
+        """
+        try:
+            features_json = json.dumps(features or {}, ensure_ascii=False, default=str)
+            prompt_hash = _hash_prompt(prompt)
+            with self._conn() as conn:
+                conn.execute("""
+                    INSERT INTO ai_decision_log
+                        (date, time, code, stage, llm_mode, dt_score, prompt_hash,
+                         raw_response, parsed_action, rule_action, final_action, features_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (date, time, code, stage, llm_mode, dt_score, prompt_hash,
+                      raw_response, parsed_action, rule_action, final_action, features_json))
+        except Exception as e:
+            log.warning("log_ai_decision(%s, stage=%s) failed: %s", code, stage, e)
+
+    def get_ai_decisions(self, target_date: str, stage: Optional[str] = None) -> list[sqlite3.Row]:
+        """查詢某日的 AI 決策記錄，stage 可篩選 'premarket' / 'reconfirm'。"""
+        with self._conn() as conn:
+            if stage is not None:
+                return conn.execute("""
+                    SELECT * FROM ai_decision_log
+                    WHERE date = ? AND stage = ? ORDER BY id
+                """, (target_date, stage)).fetchall()
+            return conn.execute("""
+                SELECT * FROM ai_decision_log
+                WHERE date = ? ORDER BY id
+            """, (target_date,)).fetchall()
 
     def recent_history(self, days: int = 14) -> list[sqlite3.Row]:
         """近 N 日所有已複盤記錄，供 UI 顯示。"""

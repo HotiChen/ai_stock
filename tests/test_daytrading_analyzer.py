@@ -347,6 +347,135 @@ class TestRunDaytradingAnalysis:
         assert result.name == "台積電"
 
 
+# ── run_daytrading_analysis: optional `capture` (for ai_decision_log) ────────
+
+class TestRunDaytradingAnalysisCapture:
+    """capture 參數是新增的可選 dict，供呼叫端取得 prompt/raw/parsed_action 落庫；
+    不傳 capture 時行為必須與現狀完全一致（零回歸）。"""
+
+    def test_capture_none_behaves_identically(self):
+        """不傳 capture（預設 None）時，行為與既有呼叫完全相同。"""
+        from daytrading_analyzer import run_daytrading_analysis
+        with patch("daytrading_analyzer.call_haiku", return_value=_valid_json()):
+            result = run_daytrading_analysis(
+                code="2330", name="台積電",
+                indicators=_indicators(), chip=_chip(), market=_market(), dt_score=7,
+            )
+        assert result.action == "long"
+
+    def test_capture_dict_populated_on_success(self):
+        from daytrading_analyzer import run_daytrading_analysis
+        capture: dict = {}
+        with patch("daytrading_analyzer.call_haiku", return_value=_valid_json()):
+            result = run_daytrading_analysis(
+                code="2330", name="台積電",
+                indicators=_indicators(), chip=_chip(), market=_market(), dt_score=7,
+                capture=capture,
+            )
+        assert "prompt" in capture and capture["prompt"]
+        assert capture["raw"] == _valid_json()
+        assert capture["parsed_action"] == result.action == "long"
+
+    def test_capture_not_populated_when_score_too_low(self):
+        """dt_score 太低直接 skip、未呼叫 AI，capture 應維持空 dict。"""
+        from daytrading_analyzer import run_daytrading_analysis
+        capture: dict = {}
+        result = run_daytrading_analysis(
+            code="2330", name="台積電",
+            indicators=_indicators(), chip=_chip(), market=_market(), dt_score=1,
+            capture=capture,
+        )
+        assert result.action == "skip"
+        assert capture == {}
+
+    def test_capture_not_populated_on_haiku_exception(self):
+        from daytrading_analyzer import run_daytrading_analysis
+        capture: dict = {}
+        with patch("daytrading_analyzer.call_haiku", side_effect=Exception("timeout")):
+            result = run_daytrading_analysis(
+                code="2330", name="台積電",
+                indicators=_indicators(), chip=_chip(), market=_market(), dt_score=7,
+                capture=capture,
+            )
+        assert result.action == "skip"
+        assert capture == {}
+
+
+# ── run_opening_reconfirm: optional `capture` (for ai_decision_log) ──────────
+
+class TestRunOpeningReconfirmCapture:
+    def _reconfirm_json(self, proceed=True):
+        return json.dumps({
+            "proceed": proceed,
+            "reason": "大盤走強，維持進場",
+            "updated_entry_low": None,
+            "updated_entry_high": None,
+        })
+
+    def test_capture_none_behaves_identically(self):
+        from daytrading_analyzer import run_opening_reconfirm
+        with patch("daytrading_analyzer.call_haiku", return_value=self._reconfirm_json()):
+            result = run_opening_reconfirm(
+                code="2330", name="台積電", dt_score=7,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                ai_summary="盤前建議做多",
+                current_price=100.0, change_price=0.5, volume=1000,
+                market=_market(),
+            )
+        assert result.proceed is True
+
+    def test_capture_populated_on_success(self):
+        from daytrading_analyzer import run_opening_reconfirm
+        capture: dict = {}
+        raw = self._reconfirm_json(proceed=True)
+        with patch("daytrading_analyzer.call_haiku", return_value=raw):
+            result = run_opening_reconfirm(
+                code="2330", name="台積電", dt_score=7,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                ai_summary="盤前建議做多",
+                current_price=100.0, change_price=0.5, volume=1000,
+                market=_market(),
+                capture=capture,
+            )
+        assert capture["prompt"]
+        assert capture["raw"] == raw
+        assert capture["parsed_action"] == "proceed"
+        assert result.proceed is True
+
+    def test_capture_parsed_action_skip_when_proceed_false(self):
+        from daytrading_analyzer import run_opening_reconfirm
+        capture: dict = {}
+        with patch("daytrading_analyzer.call_haiku", return_value=self._reconfirm_json(proceed=False)):
+            run_opening_reconfirm(
+                code="2330", name="台積電", dt_score=7,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                ai_summary="盤前建議做多",
+                current_price=100.0, change_price=0.5, volume=1000,
+                market=_market(),
+                capture=capture,
+            )
+        assert capture["parsed_action"] == "skip"
+
+    def test_capture_not_populated_on_exception(self):
+        from daytrading_analyzer import run_opening_reconfirm
+        capture: dict = {}
+        with patch("daytrading_analyzer.call_haiku", side_effect=Exception("timeout")):
+            result = run_opening_reconfirm(
+                code="2330", name="台積電", dt_score=7,
+                entry_low=99.0, entry_high=101.0,
+                target_price=105.0, stop_loss=97.0,
+                ai_summary="盤前建議做多",
+                current_price=100.0, change_price=0.5, volume=1000,
+                market=_market(),
+                capture=capture,
+            )
+        assert result.proceed is False
+        assert capture == {}
+
+
 # ── Integration: daytrading_report with AI analysis ──────────────────────────
 
 class TestDaytradingReportWithAI:

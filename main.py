@@ -1006,12 +1006,23 @@ def _opening_confirm_dt_positions(
     dt_config: "DaytradingConfig",
     dt_path: str = "data/daytrading_positions.json",
 ) -> None:
-    """9:05 開盤再確認：AI 結合 8:30 預測 + 當前大盤氣氛，給出進場或放棄建議。"""
+    """9:05 開盤再確認。
+
+    llm_mode="decider"（預設）：AI 結合 8:30 預測 + 當前大盤氣氛，給出進場或
+    放棄建議（現狀行為，零回歸）。
+    llm_mode="advisor"：改由 dt_rules.rule_opening_reconfirm 的確定性規則決定
+    proceed，省略本次 LLM 呼叫（省成本），Telegram 訊息標明「規則決策」。
+    兩種 mode 都會把決策落庫到 ai_decision_log（stage="reconfirm"），供
+    dt_counterfactual.py 之類的反事實分析工具比較「規則 vs LLM」。
+    """
+    import dt_rules
     from daytrading_monitor import (
         load_daytrading_positions, save_daytrading_positions, mark_skipped,
     )
     from monitor_agent import get_snapshot
-    from daytrading_analyzer import run_opening_reconfirm
+    from daytrading_analyzer import run_opening_reconfirm, OpeningReconfirm
+
+    llm_mode = getattr(dt_config, "llm_mode", "decider")
 
     all_positions = load_daytrading_positions(path=dt_path)
     watching      = [p for p in all_positions if p.status == "watching"]
@@ -1042,17 +1053,61 @@ def _opening_confirm_dt_positions(
         change_price  = snap.get("change_price", 0.0) if snap else 0.0
         volume        = snap.get("volume",       0)   if snap else 0
 
-        result = run_opening_reconfirm(
-            code=pos.code, name=pos.name,
-            dt_score=pos.dt_score,
-            entry_low=pos.entry_low, entry_high=pos.entry_high,
-            target_price=pos.target_price, stop_loss=pos.stop_loss,
-            ai_summary=pos.ai_summary,
-            current_price=current_price,
-            change_price=change_price,
-            volume=volume,
-            market=market,
+        # 規則決策一律算出來（兩種 mode 都要），供落庫做「規則 vs LLM」反事實比較。
+        rule_result = dt_rules.rule_opening_reconfirm(
+            pos, current_price, change_price, volume, market,
         )
+
+        capture: dict = {}
+        if llm_mode == "advisor":
+            result = OpeningReconfirm(
+                code=pos.code, name=pos.name,
+                proceed=rule_result.proceed,
+                reason=f"[規則決策] {rule_result.reason}",
+                updated_entry_low=None, updated_entry_high=None,
+            )
+        else:
+            result = run_opening_reconfirm(
+                code=pos.code, name=pos.name,
+                dt_score=pos.dt_score,
+                entry_low=pos.entry_low, entry_high=pos.entry_high,
+                target_price=pos.target_price, stop_loss=pos.stop_loss,
+                ai_summary=pos.ai_summary,
+                current_price=current_price,
+                change_price=change_price,
+                volume=volume,
+                market=market,
+                capture=capture,
+            )
+
+        # AI 決策全落庫（task 4）：不論 llm_mode、成功與否都要記錄，失敗不得
+        # 影響交易流程。
+        try:
+            from daytrading_db import DaytradingDB
+            now = datetime.now()
+            DaytradingDB().log_ai_decision(
+                date=date.today().isoformat(),
+                time=now.strftime("%H:%M"),
+                code=pos.code,
+                stage="reconfirm",
+                llm_mode=llm_mode,
+                dt_score=pos.dt_score,
+                prompt=capture.get("prompt"),
+                raw_response=capture.get("raw"),
+                parsed_action=capture.get("parsed_action"),
+                rule_action="proceed" if rule_result.proceed else "skip",
+                final_action="proceed" if result.proceed else "skip",
+                features={
+                    "current_price": current_price,
+                    "change_price": change_price,
+                    "volume": volume,
+                    "market": market,
+                    "entry_low": pos.entry_low,
+                    "entry_high": pos.entry_high,
+                },
+            )
+        except Exception as e:
+            log.debug("log_ai_decision(reconfirm, %s) failed: %s", pos.code, e)
 
         if result.proceed:
             # AI 可能調整進場區間
@@ -1092,8 +1147,10 @@ def _opening_confirm_dt_positions(
         lines = [
             "⚡ <b>當沖開盤確認 09:05</b>",
             f"{idx_arrow} 大盤 {idx_pct:+.2f}%　台指期溢貼水 {fp_pct:+.2f}%",
-            "━━━━━━━━━━━━━━━━",
         ]
+        if llm_mode == "advisor":
+            lines.append("🤖 <i>本次為規則決策（advisor 模式，LLM 僅供評論）</i>")
+        lines.append("━━━━━━━━━━━━━━━━")
 
         if confirmed:
             for pos in confirmed:
