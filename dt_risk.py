@@ -28,8 +28,9 @@ daily_trades 中，DT 出場記錄目前有兩個實際寫入點：
      sector（DT 買入固定寫 "當沖"，波段買入寫實際產業別），因此用
      sector=="當沖" 排除波段部位的強平損益。
 
-_run_dt_sell_alerts（5 分鐘輪詢出場路徑）目前並未寫入 daily_trades pnl 記錄
-（已知缺口，未在本任務範圍內修補，另見任務回報）。
+main.py _run_dt_sell_alerts（5 分鐘輪詢出場路徑）出場成功後亦寫入
+action="sell", note="auto_exit" 的 pnl 記錄（_record_dt_exit，與 tick 路徑
+同語意且互相防重複），因此本模組的過濾規則同時涵蓋兩條出場路徑。
 """
 
 import json
