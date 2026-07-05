@@ -45,7 +45,9 @@ STOCK_NAMES: dict[str, str] = {
     "1760": "寶齡富錦",  "6532": "瑞感科技",  "3532": "台勝科",
 }
 STOP_LOSS_PCT: float = float(_get("STOP_LOSS_PCT", "5"))
-FORCE_CLOSE_TIME: str = _get("FORCE_CLOSE_TIME", "13:25")
+# 收盤強制平倉時刻。必須在連續交易時段（09:00–13:24:59）內：
+# 13:25–13:30 為收盤集合競價，市價單會被交易所退單。
+FORCE_CLOSE_TIME: str = _get("FORCE_CLOSE_TIME", "13:15")
 
 # Day-trading specific (loaded via daytrading_config.load_daytrading_config())
 DT_BUDGET: float           = float(_get("DT_BUDGET", "30000"))

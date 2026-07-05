@@ -39,11 +39,11 @@ if _AI_STOCK_DIR not in sys.path:
 # ── Countdown ─────────────────────────────────────────────────────────────────
 
 def _calc_countdown_seconds() -> int:
-    """Return seconds until 13:25 Taipei time (force close). Always correct."""
+    """Return seconds until 13:15 Taipei time (force close). Always correct."""
     try:
         tz = timezone(timedelta(hours=8))
         now = datetime.now(tz)
-        force_close = now.replace(hour=13, minute=25, second=0, microsecond=0)
+        force_close = now.replace(hour=13, minute=15, second=0, microsecond=0)
         return max(0, int((force_close - now).total_seconds()))
     except Exception:
         return 9900
@@ -115,7 +115,7 @@ async def get_live_snapshot() -> dict:
 
         live = DaytradeLive(
             countdown_seconds=_calc_countdown_seconds(),
-            force_close_at="13:25:00",
+            force_close_at="13:15:00",
             monitoring_count=len(positions),
             closed_count=0,
             unrealized_pnl=int(unrealized),
@@ -199,7 +199,7 @@ async def get_live_snapshot() -> dict:
         )
         live = DaytradeLive(
             countdown_seconds=_calc_countdown_seconds(),  # always real
-            force_close_at="13:25:00",
+            force_close_at="13:15:00",
             monitoring_count=1,
             closed_count=0,
             unrealized_pnl=1500,

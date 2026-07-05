@@ -22,7 +22,7 @@ dt_risk.py — 當日虧損熔斷（circuit breaker）
 daily_trades 中，DT 出場記錄目前有兩個實際寫入點：
   1. monitor_agent.py AlertWorker（tick 監控，auto_execute=True，只有 DT 的
      tick agent 會啟用）：action="sell", note="auto_exit", pnl=(exit-entry)*qty。
-  2. main.py ForceCloseJob（13:25 強平，僅 SIMULATION 模式立即寫入確認 sell；
+  2. main.py ForceCloseJob（收盤強平，僅 SIMULATION 模式立即寫入確認 sell；
      真實模式寫 force_close_requested，pnl=None，成交未確認故不計入）：
      action="sell", note="force_close_simulation"，sector 沿用進場時寫入的
      sector（DT 買入固定寫 "當沖"，波段買入寫實際產業別），因此用

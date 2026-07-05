@@ -62,7 +62,9 @@ class TestMaybeDtPoll:
         pos_path = str(tmp_path / "pos.json")
         _seed_active(pos_path)
         state = {"last_poll": None}
-        cfg = _cfg(force_close_time="13:00")   # 10:00 未達強平時間
+        # check_trailing_stop 用牆上時鐘判斷強平時間，測試必須設在永遠
+        # 不會到達的時刻，否則下午跑測試會誤觸 force_close（time-of-day flaky）
+        cfg = _cfg(force_close_time="23:59")
 
         with patch("daytrading_monitor.fetch_current_price", return_value=100.5), \
              patch("main._run_dt_sell_alerts") as mock_alerts:
@@ -124,7 +126,7 @@ class TestMaybeDtPoll:
         assert not mock_tick.called
 
     def test_boundary_times_run(self, tmp_path):
-        """09:15 / 13:24 邊界時間應執行；13:25（強平時刻）起不再輪詢。"""
+        """09:15 / 13:14 邊界時間應執行；13:15（強平時刻）起不再輪詢。"""
         import main
         pos_path = str(tmp_path / "pos.json")
         _seed_active(pos_path)
@@ -132,9 +134,9 @@ class TestMaybeDtPoll:
         with patch("main._dt_poll_tick", return_value=[]) as mock_tick:
             main._maybe_dt_poll(datetime(2026, 7, 3, 9, 15, 0), MagicMock(), cfg,
                                 {"last_poll": None}, dt_path=pos_path)
-            main._maybe_dt_poll(datetime(2026, 7, 3, 13, 24, 0), MagicMock(), cfg,
+            main._maybe_dt_poll(datetime(2026, 7, 3, 13, 14, 0), MagicMock(), cfg,
                                 {"last_poll": None}, dt_path=pos_path)
-            main._maybe_dt_poll(datetime(2026, 7, 3, 13, 25, 0), MagicMock(), cfg,
+            main._maybe_dt_poll(datetime(2026, 7, 3, 13, 15, 0), MagicMock(), cfg,
                                 {"last_poll": None}, dt_path=pos_path)
         assert mock_tick.call_count == 2
 

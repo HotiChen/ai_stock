@@ -1202,7 +1202,7 @@ def _handle_dt_buy(chat_id: str, code: str,
                 f"{code} 券商已成交，但不在今日持倉庫中，"
                 f"系統將無法監控/強平此部位，請人工確認！",
             )
-        # 寫入 daily_trades，讓 13:25 ForceCloseJob 看得見此當沖持倉。
+        # 寫入 daily_trades，讓收盤 ForceCloseJob 看得見此當沖持倉。
         # 下單已成功，DB 寫入失敗不得中斷流程。
         try:
             save_daily_trade({
@@ -1224,7 +1224,7 @@ def _handle_dt_buy(chat_id: str, code: str,
                 send_text(
                     chat_id,
                     f"⚠️ {code} 已成交，但持倉記錄寫入失敗：{db_err}\n"
-                    f"請確認 13:25 強平能看到此持倉！",
+                    f"請確認收盤強平能看到此持倉！",
                 )
             except Exception:
                 pass

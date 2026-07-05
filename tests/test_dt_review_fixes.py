@@ -251,7 +251,11 @@ class TestForceCloseMarksDT:
     def test_poll_window_ends_before_force_close(self):
         import main
         from datetime import time as dtime
-        assert main._DT_POLL_END < dtime(13, 25)
+        # 強平時刻由 config.FORCE_CLOSE_TIME 驅動，預設 13:15（必須在連續交易
+        # 時段內：13:25 起為收盤集合競價，市價單會被退單）
+        assert main._FORCE_CLOSE_T == dtime(13, 15)
+        assert main._DT_POLL_END < main._FORCE_CLOSE_T
+        assert main._DT_MON_END <= main._FORCE_CLOSE_T
 
 
 # ── F6: 升級告警節流 ─────────────────────────────────────────────────────────

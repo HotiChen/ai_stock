@@ -10,7 +10,7 @@ Main scheduler — daily jobs:
   10:00  DT 盤中檢查       : 持倉損益報告 + 剩餘候選提示（可二次進場）
   13:00  DT 出場警報       : 30 分鐘倒數提醒 + 損益預覽
   13:15  停止 tick 監控
-  13:25  ForceCloseJob     : 強制平倉當沖部位
+  13:15  ForceCloseJob     : 強制平倉當沖部位（config.FORCE_CLOSE_TIME）
   13:35  PostMarketJob     : 停監控 + 存每日摘要
   13:35  DaytradingReview  : 收盤後檢討當日預測準確度
 
@@ -543,7 +543,8 @@ def _get_snapshot_price(api, code: str, fallback: float) -> float:
 
 class ForceCloseJob:
     """
-    13:25 job (10 min before market close):
+    收盤強平 job（config.FORCE_CLOSE_TIME，預設 13:15——落在連續交易時段內，
+    市價單有效；13:25 起為收盤集合競價，市價單會被退單）:
       Sell all open buy positions at market price to avoid overnight exposure.
     """
 
@@ -602,7 +603,7 @@ class ForceCloseJob:
             )
 
             if success:
-                # 若為當沖持倉，原子標記 closed：13:25 之後（至輪詢時段結束前）
+                # 若為當沖持倉，原子標記 closed：強平後（至輪詢時段結束前）
                 # 的 5 分鐘輪詢不得對已強平的持倉再送第二筆賣單。
                 try:
                     from daytrading_monitor import claim_for_close
@@ -673,7 +674,7 @@ class ForceCloseJob:
 # ── Day-trading auto buy ─────────────────────────────────────────────────────
 
 def _save_dt_buy_trade(result, db_path: str = DB_PATH, chat_id: Optional[str] = None) -> None:
-    """當沖買單成交後寫入 daily_trades（action="buy"），讓 13:25 ForceCloseJob /
+    """當沖買單成交後寫入 daily_trades（action="buy"），讓收盤 ForceCloseJob /
     load_current_positions 看得見當沖持倉。
 
     下單已成功，DB 寫入失敗不得中斷流程：log.error + Telegram 告警即可。
@@ -700,7 +701,7 @@ def _save_dt_buy_trade(result, db_path: str = DB_PATH, chat_id: Optional[str] = 
                 send_text(
                     chat_id,
                     f"⚠️ 當沖買入 {getattr(result, 'code', '?')} 已成交，"
-                    f"但持倉記錄寫入失敗：{db_err}\n請確認 13:25 強平能看到此持倉！",
+                    f"但持倉記錄寫入失敗：{db_err}\n請確認收盤強平能看到此持倉！",
                 )
             except Exception:
                 pass
@@ -947,7 +948,7 @@ def _run_dt_sell_alerts(
 
     重複下單防護（CAS claim）：下賣單前先原子搶佔 active→closed
     （claim_for_close），沒搶到代表另一條出場路徑（tick AlertWorker /
-    13:25 強平）已在處理，本路徑跳過；賣單失敗則回滾 active 供下輪重試。
+    收盤強平）已在處理，本路徑跳過；賣單失敗則回滾 active 供下輪重試。
     """
     from daytrading_monitor import (
         load_daytrading_positions,
@@ -1311,7 +1312,8 @@ def _exit_warning(
             else:
                 lines.append(f"⬜ <b>{pos.code} {pos.name}</b>　無法取得報價")
         lines.append(f"\n💰 合計損益：<b>{total_pnl:+,.0f} 元</b>")
-        lines.append("<i>⚠️ 13:25 系統將自動強制平倉</i>")
+        import config as _cfg_fc
+        lines.append(f"<i>⚠️ {_cfg_fc.FORCE_CLOSE_TIME} 系統將自動強制平倉</i>")
 
     try:
         from telegram_bot import send_text
@@ -1326,13 +1328,38 @@ def _exit_warning(
 
 _RUNNING = True
 
-# 盤中當沖監控：09:15–13:15 每 5 分鐘掃描一次
-from datetime import time as _dtime
-_DT_MON_END = _dtime(13, 15)   # tick 訂閱到此時段結束後取消
+from datetime import time as _dtime, timedelta as _timedelta
 
-# 5 分鐘輪詢出場路徑（非紙上模式）：交易時段 09:15–13:30 內每 5 分鐘掃一次
+# 收盤強制平倉時刻：config.FORCE_CLOSE_TIME（預設 13:15）。
+# 必須落在連續交易時段（09:00–13:24:59）內——13:25 起為收盤集合競價，
+# 市價單會被交易所退單，強平會靜默失敗。
+def _parse_force_close_time() -> _dtime:
+    import config as _cfg
+    try:
+        h, m = map(int, _cfg.FORCE_CLOSE_TIME.split(":"))
+        t = _dtime(h, m)
+        if t >= _dtime(13, 25):
+            log.warning(
+                "FORCE_CLOSE_TIME=%s 落在收盤集合競價（市價單會被退單），"
+                "改用 13:15", _cfg.FORCE_CLOSE_TIME,
+            )
+            return _dtime(13, 15)
+        return t
+    except Exception as e:
+        log.warning("FORCE_CLOSE_TIME 解析失敗（%s），改用 13:15", e)
+        return _dtime(13, 15)
+
+
+_FORCE_CLOSE_T = _parse_force_close_time()
+
+# tick 訂閱到強平時刻結束（強平後由 claim 機制保證不重複下單）
+_DT_MON_END = _FORCE_CLOSE_T
+
+# 5 分鐘輪詢出場路徑（非紙上模式）：09:15 起、強平前 1 分鐘結束（避免重疊）
 _DT_POLL_START    = _dtime(9, 15)
-_DT_POLL_END      = _dtime(13, 24)   # 13:25 ForceCloseJob 前結束，避免與強平重疊
+_DT_POLL_END      = (
+    datetime.combine(date.min, _FORCE_CLOSE_T) - _timedelta(minutes=1)
+).time()
 _DT_POLL_INTERVAL = 300   # 秒（5 分鐘節流）
 
 
@@ -1521,7 +1548,7 @@ def _run_dt_reconcile(api, dt_config: "DaytradingConfig", tag: str) -> None:
 
 
 def _run_force_close_job(api, db_path: str = DB_PATH, chat_id: Optional[str] = None) -> None:
-    """13:25 強制平倉，包 try/except。強平失敗是資金安全事件 → 另發 Telegram 告警。"""
+    """收盤強制平倉（預設 13:15），包 try/except。強平失敗是資金安全事件 → 另發 Telegram 告警。"""
     try:
         ForceCloseJob(api=api, db_path=db_path).run()
     except Exception as e:
@@ -1531,7 +1558,7 @@ def _run_force_close_job(api, db_path: str = DB_PATH, chat_id: Optional[str] = N
                 from telegram_bot import send_text
                 send_text(
                     chat_id,
-                    f"🚨 <b>13:25 強制平倉失敗</b>\n{e}\n請立即手動檢查並平倉所有當沖持倉！",
+                    f"🚨 <b>{_FORCE_CLOSE_T.strftime('%H:%M')} 強制平倉失敗</b>\n{e}\n請立即手動檢查並平倉所有當沖持倉！",
                 )
             except Exception as te:
                 log.warning("ForceClose 告警發送失敗: %s", te)
@@ -1775,8 +1802,9 @@ def main() -> None:
                 log.warning("DT 出場警報失敗: %s", e)
             time.sleep(60)
 
-        # 13:25 force-close all positions before market close
-        elif t.hour == 13 and t.minute == 25:
+        # 收盤強制平倉（config.FORCE_CLOSE_TIME，預設 13:15——必須在連續
+        # 交易時段內，13:25 起的集合競價不收市價單）
+        elif t.hour == _FORCE_CLOSE_T.hour and t.minute == _FORCE_CLOSE_T.minute:
             if api:
                 _run_force_close_job(api, DB_PATH, TELEGRAM_CHAT_ID or None)
             time.sleep(60)
