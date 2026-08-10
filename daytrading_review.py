@@ -19,6 +19,12 @@ log = logging.getLogger(__name__)
 _DEFAULT_DB = "data/daytrading_review.db"
 
 
+#: 當日振幅低於此百分比時，視為「預測無法被驗證」而非「沒觸發」。
+#: 台股正常交易日個股振幅極少低於 0.5%；低於此值幾乎必然是報價來源
+#: 異常（券商未登入時股價退化）。見 _determine_outcome 的說明。
+_MIN_TESTABLE_RANGE_PCT = 0.5
+
+
 def _fetch_intraday_bars(code: str) -> Optional[list[dict]]:
     """抓今日分鐘 K 線，回傳 list of {open, high, low, close} 或 None。
 
@@ -85,7 +91,27 @@ def _determine_outcome(
     - 都沒碰到                    → neutral，  was_correct = None
 
     若僅有一根日 K（fallback），保留原始保守邏輯（stop 優先）。
+
+    資料品質守衛
+    ------------
+    當日振幅小於 ``_MIN_TESTABLE_RANGE_PCT`` 時直接回傳 ``untestable``。
+    這不是「沒觸發」，是「這筆預測根本無法被驗證」——2026-05-29 那批 29 筆
+    記錄產生於券商登入失敗期間，股價退化到當日振幅平均只有 0.03%，而目標
+    固定在 ±3%，數學上永遠碰不到。若記成 neutral，它們會混進反事實分析的
+    分母，用假的 ~0% 報酬稀釋統計。
+
+    已知取捨：漲停鎖死的個股當日振幅也可能接近 0，會一併被標為 untestable。
+    這類個股實際上也無法當沖進出，排除在勝率統計外是可接受的。
     """
+    if bars:
+        highs = [b["high"] for b in bars if b.get("high") is not None]
+        lows  = [b["low"]  for b in bars if b.get("low")  is not None]
+        if highs and lows:
+            day_high, day_low = max(highs), min(lows)
+            ref = bars[0].get("open") or day_high
+            if ref and (day_high - day_low) / ref * 100 < _MIN_TESTABLE_RANGE_PCT:
+                return "untestable", None
+
     for bar in bars:
         hit_target = target_price is not None and bar["high"] >= target_price
         hit_stop   = stop_loss    is not None and bar["low"]  <= stop_loss
@@ -158,8 +184,12 @@ def run_daytrading_review(
     for r in results:
         row    = r["row"]
         ohlc   = r["ohlc"]
-        icon   = {"hit_target": "✅", "hit_stop": "❌", "neutral": "⬜"}[r["outcome"]]
-        label  = {"hit_target": "達目標", "hit_stop": "觸停損", "neutral": "未觸發"}[r["outcome"]]
+        # 用 .get 而非 [] ——新增 outcome 值時不該讓整份複盤摘要炸掉
+        icon   = {"hit_target": "✅", "hit_stop": "❌",
+                  "neutral": "⬜", "untestable": "⚠️"}.get(r["outcome"], "❔")
+        label  = {"hit_target": "達目標", "hit_stop": "觸停損",
+                  "neutral": "未觸發", "untestable": "資料不足，無法驗證"}.get(
+                      r["outcome"], r["outcome"])
 
         lines.append(
             f"{icon} <b>{row['code']} {row['name']}</b>（評分 {row['dt_score']}/10）"

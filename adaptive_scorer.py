@@ -97,10 +97,17 @@ def _bucket_winrates(rows: list[sqlite3.Row]) -> dict[str, float]:
     buckets: dict[str, list[int]] = {label: [] for _, _, label in _BUCKETS}
 
     for r in rows:
+        # was_correct 為 None 代表這筆預測「沒有分出勝負」（neutral：當日既沒
+        # 碰到目標也沒碰到停損，或資料不足以驗證）。它不是一次失敗，必須排除
+        # 在樣本外。先前寫成 `r["was_correct"] or 0`，Python 會把 None 轉成 0，
+        # 等於把每一筆未觸發都記成敗績，系統性低估勝率。
+        if r["was_correct"] is None:
+            continue
+
         score = r["dt_score"]
         for lo, hi, label in _BUCKETS:
             if lo <= score <= hi:
-                buckets[label].append(r["was_correct"] or 0)
+                buckets[label].append(int(r["was_correct"]))
                 break
 
     result: dict[str, float] = {}

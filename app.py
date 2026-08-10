@@ -1824,6 +1824,7 @@ def tab_ai():
                         "hit_target": "✅ 達目標",
                         "hit_stop":   "❌ 觸停損",
                         "neutral":    "⬜ 未觸發",
+                        "untestable": "⚠️ 資料不足",
                     }.get(r["outcome"], r["outcome"])
                     rows.append({
                         "日期":   r["date"],

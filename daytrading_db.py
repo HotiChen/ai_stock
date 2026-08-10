@@ -61,11 +61,43 @@ class DTReview:
     ai_commentary: str = ""
 
 
+#: 後來才加進 schema 的欄位。``CREATE TABLE IF NOT EXISTS`` 對既有資料表是
+#: no-op，所以光靠建表語句永遠補不上這些欄位——正式環境的
+#: data/daytrading_review.db 就因此缺了 was_correct，讓 adaptive_scorer 每天
+#: 靜默失敗（no such column）長達數月。新增欄位時一併登記在這裡。
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # (資料表, 欄位, 型別)
+    ("dt_prediction_log", "was_correct",   "INTEGER"),
+    ("dt_prediction_log", "ai_commentary", "TEXT NOT NULL DEFAULT ''"),
+    ("dt_prediction_log", "reviewed_at",   "TEXT"),
+    ("dt_prediction_log", "entry_low",     "REAL"),
+    ("dt_prediction_log", "entry_high",    "REAL"),
+)
+
+
+def _apply_migrations(conn) -> None:
+    """替既有資料表補上缺少的欄位。
+
+    只做 ADD COLUMN，既有列的新欄位一律留成 NULL——不臆測歷史資料的值。
+    以 PRAGMA 檢查而非 try/except duplicate column，因此可重複執行。
+    """
+    for table, column, coltype in _MIGRATIONS:
+        exists = conn.execute(
+            f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
+        ).fetchone()
+        if not exists:
+            continue  # 表還沒建，CREATE TABLE 會帶齊欄位
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 class DaytradingDB:
     def __init__(self, path: str = _DEFAULT_PATH) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         with self._conn() as conn:
+            _apply_migrations(conn)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS dt_prediction_log (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,

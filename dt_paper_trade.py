@@ -239,7 +239,22 @@ def run_daily_paper_trade(
 
     # 進場價：當日開盤
     entry = pick["daily_open"]
-    outcome = pick["outcome"]   # hit_target / hit_stop / neutral
+    outcome = pick["outcome"]   # hit_target / hit_stop / neutral / untestable
+
+    # untestable：當日振幅過小，這筆預測無法被驗證（多半是報價來源異常）。
+    # 不可當成 neutral 用收盤價結算——那會憑空生出一筆 ~0% 的假交易紀錄，
+    # 污染模擬倉的績效曲線。比照 no_pick 的作法記錄並跳過。
+    if outcome == "untestable":
+        trade = dict(
+            date=today, code=pick["code"], name=pick.get("name"),
+            dt_score=pick.get("dt_score"),
+            entry_price=None, exit_price=None, outcome="untestable",
+            position_size=0, pnl=0, pnl_pct=0,
+            capital_before=capital, capital_after=capital,
+            note="當日振幅過小，預測無法驗證，略過",
+        )
+        db.save_trade(trade)
+        return trade
 
     # 出場價
     if outcome == "hit_target" and pick.get("target_price"):

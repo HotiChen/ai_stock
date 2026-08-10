@@ -68,6 +68,13 @@ def _calc_ret(row: sqlite3.Row) -> Optional[float]:
         return None
 
     outcome = row["outcome"]
+
+    # untestable：當日振幅過小，這筆預測根本無法被驗證（多半是報價來源異常
+    # 時產生的記錄）。不可退回 daily_close——那會把它算成一筆 ~0% 的真實報酬，
+    # 用假資料稀釋整份反事實分析的分母。
+    if outcome == "untestable":
+        return None
+
     if outcome == "hit_target" and row["target_price"]:
         exit_price = row["target_price"]
     elif outcome == "hit_stop" and row["stop_loss"]:
