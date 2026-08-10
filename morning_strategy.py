@@ -133,11 +133,30 @@ def run() -> None:
     api = _get_api()
     try:
         candidates = build_candidates(api)
-        log.info("開始生成三套策略計劃...")
+        log.info("開始生成三套策略計劃...（候選股 %d 檔）", len(candidates))
         plan_set = generate_strategy_plans(
             goal, current_value, candidates,
             portfolio=portfolio, weekly_hint=weekly_hint,
         )
+
+        # generate_strategy_plans 有多條 return None 的路徑（LLM 回應解析失敗、
+        # 候選股為空、券商登入失敗導致股價全 0 等）。推播端的 save_pending_planset
+        # 會直接取 plan_set.aggressive，傳 None 進去會炸 AttributeError，
+        # 而且是在「把待執行計畫存檔」這一步炸，可能留下壞掉的 pending 狀態。
+        # 沒有計畫就不推播，但一定要留下紀錄，否則排程會靜默失敗。
+        if plan_set is None:
+            # 不臆測原因：候選股是 0 或不是 0，指向的問題完全不同。
+            # 給出實際數字並指向上游日誌，比猜一個常見原因更有用。
+            hint = (
+                "候選股為 0，通常是券商登入失敗或盤前無報價——請檢查上方的 Shioaji 日誌"
+                if not candidates
+                else "候選股正常，問題多半出在 LLM 呼叫（金鑰失效、逾時、回應無法解析）"
+                     "——請檢查上方 call_sonnet / ANTHROPIC_API_KEY 相關訊息"
+            )
+            log.error("策略生成失敗（回傳 None），略過推播。候選股 %d 檔；%s。",
+                      len(candidates), hint)
+            return
+
         log.info("策略生成完成，推播到 Telegram...")
         send_morning_push(briefing=None, plan_set=plan_set, starting_capital=current_value)
         log.info("=== morning_strategy 完成 ===")
