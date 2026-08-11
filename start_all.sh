@@ -51,7 +51,11 @@ fi
 if lsof -ti :1234 > /dev/null 2>&1; then
   echo "[$(date '+%H:%M:%S')] 後端 :1234 已在執行，略過"
 else
-  nohup bash -c "cd '$SCRIPT_DIR/backend' && source '$SCRIPT_DIR/venv/bin/activate' && uvicorn app.main:app --host 0.0.0.0 --port 1234" >> logs/backend.log 2>&1 &
+  # 用系統 python3 而不是 venv：venv/bin/python 這個執行檔位於外接 SSD 上，
+  # macOS TCC 是按執行檔路徑授權的，SSD 上的 python 沒有「完全磁碟取用權限」，
+  # 連自己的 venv/pyvenv.cfg 都讀不到（PermissionError: Operation not permitted）。
+  # /usr/local/bin/python3 在內接碟且已授權，main.py 本來就是用它跑的。
+  nohup bash -c "cd '$SCRIPT_DIR/backend' && python3 -m uvicorn app.main:app --host 0.0.0.0 --port 1234" >> logs/backend.log 2>&1 &
   echo "[$(date '+%H:%M:%S')] ✅ 後端 :1234 已啟動 (PID: $!)"
 fi
 
