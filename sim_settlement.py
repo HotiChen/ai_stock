@@ -30,7 +30,8 @@ def settle_positions(
             "total_pnl": float,
             "total_pnl_pct": float,   # total_pnl / 總投入成本
             "per_stock": [
-                {"code": ..., "name": ..., "pnl": ..., "closing_price": ...},
+                {"code": ..., "name": ..., "entry_price": ...,
+                 "pnl": ..., "closing_price": ...},
                 ...
             ],
         }
@@ -56,6 +57,7 @@ def settle_positions(
         per_stock.append({
             "code": pos.code,
             "name": pos.name,
+            "entry_price": pos.entry_price,
             "pnl": pnl,
             "closing_price": closing,
         })
