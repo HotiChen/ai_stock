@@ -3,79 +3,13 @@ import { useState, useEffect } from 'react';
 import AppChrome from '../components/AppChrome';
 import EquityCurve from '../components/EquityCurve';
 import MonthlyHeatmap from '../components/MonthlyHeatmap';
+import EmptyHint from '../components/EmptyHint';
 import { api } from '../api';
-import type { BacktestResult, BacktestParams } from '../types';
+import type { BacktestResult, BacktestParams, PaperTradeSummary, PaperTradeRecord } from '../types';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-interface EquityPoint { date: string; capital: number }
-
-interface PaperSummary {
-  start_date: string;
-  total_days: number;
-  real_trades: number;
-  no_trade_days: number;
-  initial_capital: number;
-  current_capital: number;
-  total_pnl: number;
-  total_pnl_pct: number;
-  win_rate: number;
-  hits: number;
-  stops: number;
-  neutrals: number;
-  max_drawdown: number;
-  avg_win: number;
-  avg_loss: number;
-  expectancy: number;
-  streak_win: number;
-  streak_loss: number;
-  equity_curve: EquityPoint[];
-}
-
-interface PaperRecord {
-  id: number;
-  date: string;
-  code: string | null;
-  name: string | null;
-  dt_score: number | null;
-  entry_price: number | null;
-  exit_price: number | null;
-  outcome: string | null;
-  pnl: number;
-  pnl_pct: number;
-  capital_before: number;
-  capital_after: number;
-  note: string;
-}
-
-// ── Backtest mock ─────────────────────────────────────────────────────────────
-
-const MOCK_RESULT: BacktestResult = {
-  id: 'BT-20260529-001',
-  range: { start: '2026-01-01', end: '2026-05-29' },
-  initial_capital: 1000000,
-  slippage: 0.1,
-  strategy: 'AI TopN v2.1',
-  trades: 147,
-  wins: 93,
-  losses: 54,
-  winrate: 0.633,
-  total_pnl: 287400,
-  total_pnl_pct: 0.2874,
-  avg_win: 5820,
-  avg_loss: -2340,
-  sharpe: 1.87,
-  max_dd: -0.082,
-  beat_index_pct: 0.154,
-  monthly_returns: [0.042, 0.071, -0.018, 0.089, 0.063, 0.031],
-  equity_curve: Array.from({ length: 30 }, (_, i) => ({
-    date: new Date(Date.now() - (29 - i) * 86400000).toISOString().slice(0, 10),
-    me: 1000000 + i * 9870 + Math.sin(i * 0.3) * 12000,
-    index: 1000000 + i * 4200 + Math.sin(i * 0.2) * 8000,
-  })),
-  trades_sample: [],
-  ai_conclusion: '策略在五個月內表現優於大盤 15.4%，Sharpe 值 1.87 顯示風險調整後報酬良好。主要優勢來自高信心篩選（≥0.75）和板塊輪動。建議調整：\n\n1. 提高最小信心門檻至 0.78\n2. 加入大盤環境過濾（TAIEX > -0.5%）\n3. 對高 β 股放寬停損至 3.5%',
-};
+type EquityPoint = PaperTradeSummary['equity_curve'][number];
 
 const STRATEGIES = ['AI TopN v2.1', 'AI TopN v2.0', 'Momentum Only', 'Mean Reversion'];
 
@@ -164,18 +98,15 @@ const OUTCOME_ZH: Record<string, string> = {
 // ── Paper trade tab ───────────────────────────────────────────────────────────
 
 function PaperTradeTab() {
-  const [summary, setSummary] = useState<PaperSummary | null>(null);
-  const [history, setHistory] = useState<PaperRecord[]>([]);
+  const [summary, setSummary] = useState<PaperTradeSummary | null>(null);
+  const [history, setHistory] = useState<PaperTradeRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
     (async () => {
       try {
-        const [s, h] = await Promise.all([
-          fetch('/api/paper-trade/summary', { headers: { Authorization: `Bearer ${localStorage.getItem('access_token')}` } }).then(r => r.json()),
-          fetch('/api/paper-trade/history',  { headers: { Authorization: `Bearer ${localStorage.getItem('access_token')}` } }).then(r => r.json()),
-        ]);
+        const [s, h] = await Promise.all([api.getPaperTradeSummary(), api.getPaperTradeHistory()]);
         setSummary(s);
         setHistory(h);
       } catch (e) {
@@ -356,18 +287,8 @@ function BacktestTab() {
     slippage: 0.1,
   });
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<BacktestResult>(MOCK_RESULT);
+  const [result, setResult] = useState<BacktestResult | null>(null);
   const [editing, setEditing] = useState(false);
-
-  const kpis = [
-    { label: '累計報酬', value: `+${(result.total_pnl_pct * 100).toFixed(2)}%`, color: 'var(--up)' },
-    { label: 'vs 大盤', value: `+${(result.beat_index_pct * 100).toFixed(2)}%`, color: 'var(--up)' },
-    { label: '勝率', value: `${(result.winrate * 100).toFixed(1)}%`, color: 'var(--fg)' },
-    { label: 'Sharpe', value: result.sharpe.toFixed(2), color: 'var(--fg)' },
-    { label: '最大回撤', value: `${(result.max_dd * 100).toFixed(1)}%`, color: 'var(--down)' },
-    { label: '平均盈利', value: `+${result.avg_win.toLocaleString()}`, color: 'var(--up)' },
-    { label: '平均虧損', value: result.avg_loss.toLocaleString(), color: 'var(--down)' },
-  ];
 
   async function runBacktest() {
     setRunning(true);
@@ -375,7 +296,7 @@ function BacktestTab() {
       const res = await api.runBacktest(params);
       setResult(res);
     } catch {
-      // keep mock data
+      // 保留先前真實結果（若有），不覆蓋成假資料
     } finally {
       setRunning(false);
       setEditing(false);
@@ -386,7 +307,7 @@ function BacktestTab() {
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Params bar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '10px 16px', borderBottom: '1px solid var(--border)', background: 'var(--surface)', flexWrap: 'wrap', flexShrink: 0 }}>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>{result.id}</span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>{result?.id ?? '尚未執行'}</span>
         <span style={{ fontSize: 11, color: 'var(--muted)' }}>{params.start} ~ {params.end}</span>
         {STRATEGIES.map(s => (
           <button key={s} onClick={() => setParams(p => ({ ...p, strategy: s }))}
@@ -426,6 +347,30 @@ function BacktestTab() {
         </div>
       )}
 
+      {result ? (
+        <BacktestResultBody result={result} />
+      ) : (
+        <EmptyHint text="尚未執行回測，設定參數後按「重新執行」開始" />
+      )}
+    </div>
+  );
+}
+
+// ── Backtest result body (KPI strip + equity/heatmap + sample trades + AI conclusion) ──
+
+function BacktestResultBody({ result }: { result: BacktestResult }) {
+  const kpis = [
+    { label: '累計報酬', value: `+${(result.total_pnl_pct * 100).toFixed(2)}%`, color: 'var(--up)' },
+    { label: 'vs 大盤', value: `+${(result.beat_index_pct * 100).toFixed(2)}%`, color: 'var(--up)' },
+    { label: '勝率', value: `${(result.winrate * 100).toFixed(1)}%`, color: 'var(--fg)' },
+    { label: 'Sharpe', value: result.sharpe.toFixed(2), color: 'var(--fg)' },
+    { label: '最大回撤', value: `${(result.max_dd * 100).toFixed(1)}%`, color: 'var(--down)' },
+    { label: '平均盈利', value: `+${result.avg_win.toLocaleString()}`, color: 'var(--up)' },
+    { label: '平均虧損', value: result.avg_loss.toLocaleString(), color: 'var(--down)' },
+  ];
+
+  return (
+    <>
       {/* KPI strip */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 1, background: 'var(--border)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
         {kpis.map(kpi => (
@@ -456,31 +401,26 @@ function BacktestTab() {
         <div style={{ flex: 1, background: 'var(--bg)', display: 'flex', flexDirection: 'column', gap: 1 }}>
           <div style={{ padding: 16 }}>
             <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono)', marginBottom: 8 }}>SAMPLE TRADES · 交易明細</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '50px 60px 1fr 70px 70px', gap: '4px 8px', fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono)', borderBottom: '1px solid var(--border)', paddingBottom: 4, marginBottom: 4 }}>
-              <span>日期</span><span>代碼</span><span>名稱</span><span>方向</span><span style={{ textAlign: 'right' }}>損益</span>
-            </div>
-            {[
-              { date: '05/28', code: '2330', name: '台積電', side: '買', pnl: 8400 },
-              { date: '05/28', code: '2454', name: '聯發科', side: '買', pnl: -3200 },
-              { date: '05/27', code: '2382', name: '廣達',   side: '買', pnl: 5600 },
-              { date: '05/27', code: '2317', name: '鴻海',   side: '買', pnl: -1800 },
-              { date: '05/26', code: '2308', name: '台達電', side: '買', pnl: 12300 },
-              { date: '05/26', code: '2303', name: '聯電',   side: '買', pnl: -900 },
-              { date: '05/23', code: '2345', name: '智邦',   side: '買', pnl: 3400 },
-              { date: '05/23', code: '2412', name: '中華電', side: '買', pnl: -1200 },
-              { date: '05/22', code: '2881', name: '富邦金', side: '買', pnl: 6700 },
-              { date: '05/22', code: '2886', name: '兆豐金', side: '買', pnl: 2100 },
-            ].map((t, i) => (
-              <div key={i} style={{ display: 'grid', gridTemplateColumns: '50px 60px 1fr 70px 70px', gap: '4px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
-                <span style={{ color: 'var(--muted)' }}>{t.date}</span>
-                <span>{t.code}</span>
-                <span style={{ color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
-                <span style={{ color: 'var(--muted)' }}>{t.side}</span>
-                <span style={{ textAlign: 'right', color: t.pnl >= 0 ? 'var(--up)' : 'var(--down)' }}>
-                  {t.pnl >= 0 ? '+' : ''}{t.pnl.toLocaleString()}
-                </span>
-              </div>
-            ))}
+            {result.trades_sample.length === 0 ? (
+              <EmptyHint text="暫無交易明細樣本" />
+            ) : (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '50px 60px 1fr 70px 70px', gap: '4px 8px', fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono)', borderBottom: '1px solid var(--border)', paddingBottom: 4, marginBottom: 4 }}>
+                  <span>日期</span><span>代碼</span><span>名稱</span><span>方向</span><span style={{ textAlign: 'right' }}>損益</span>
+                </div>
+                {result.trades_sample.map((t, i) => (
+                  <div key={t.id ?? i} style={{ display: 'grid', gridTemplateColumns: '50px 60px 1fr 70px 70px', gap: '4px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
+                    <span style={{ color: 'var(--muted)' }}>{t.date}</span>
+                    <span>{t.code}</span>
+                    <span style={{ color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
+                    <span style={{ color: 'var(--muted)' }}>{t.side === 'buy' ? '買' : '賣'}</span>
+                    <span style={{ textAlign: 'right', color: (t.pnl ?? 0) >= 0 ? 'var(--up)' : 'var(--down)' }}>
+                      {t.pnl === undefined ? '—' : `${t.pnl >= 0 ? '+' : ''}${t.pnl.toLocaleString()}`}
+                    </span>
+                  </div>
+                ))}
+              </>
+            )}
           </div>
           <div style={{ background: '#0d1117', padding: 16, margin: '0 1px 1px', borderRadius: 2 }}>
             <div style={{ fontSize: 9, color: '#666', fontFamily: 'var(--font-mono)', letterSpacing: 1, marginBottom: 8 }}>AI CONCLUSION</div>
@@ -488,7 +428,7 @@ function BacktestTab() {
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 

@@ -5,101 +5,10 @@ import AppChrome from '../components/AppChrome';
 import Kpi from '../components/Kpi';
 import Card from '../components/Card';
 import Pill from '../components/Pill';
+import EmptyHint from '../components/EmptyHint';
 import { api } from '../api';
 import { getSecondsToForceClose } from '../lib/time';
 import type { PortfolioSummary, Position, SectorAllocation } from '../types';
-
-const MOCK_POSITIONS: Position[] = [
-  {
-    code: '2330', name: '台積電', sector: '半導體',
-    side: 'buy', entry_price: 1100, last_price: 1135, quantity: 1,
-    lot: 'common', cost: 110000, market_value: 113500,
-    pnl: 3500, pnl_pct: 3.18,
-    target_price: 1185, stop_loss_price: 1050,
-    distance_to_tp_pct: 4.41, distance_to_sl_pct: 7.49,
-    thread_state: 'monitoring', confidence: 0.86,
-    opened_at: '2026-05-29T09:15:00Z',
-  },
-  {
-    code: '2454', name: '聯發科', sector: '半導體',
-    side: 'buy', entry_price: 1250, last_price: 1270, quantity: 1,
-    lot: 'common', cost: 125000, market_value: 127000,
-    pnl: 2000, pnl_pct: 1.60,
-    target_price: 1350, stop_loss_price: 1200,
-    distance_to_tp_pct: 6.30, distance_to_sl_pct: 5.51,
-    thread_state: 'monitoring', confidence: 0.81,
-    opened_at: '2026-05-29T09:22:00Z',
-  },
-  {
-    code: '2382', name: '廣達', sector: 'AI 伺服器',
-    side: 'buy', entry_price: 290, last_price: 295, quantity: 2,
-    lot: 'common', cost: 58000, market_value: 59000,
-    pnl: 1000, pnl_pct: 1.72,
-    target_price: 320, stop_loss_price: 270,
-    distance_to_tp_pct: 8.47, distance_to_sl_pct: 8.47,
-    thread_state: 'monitoring', confidence: 0.78,
-    opened_at: '2026-05-29T09:30:00Z',
-  },
-  {
-    code: '2308', name: '台達電', sector: '電源管理',
-    side: 'buy', entry_price: 360, last_price: 362, quantity: 2,
-    lot: 'common', cost: 72000, market_value: 72400,
-    pnl: 400, pnl_pct: 0.56,
-    target_price: 390, stop_loss_price: 340,
-    distance_to_tp_pct: 7.73, distance_to_sl_pct: 6.08,
-    thread_state: 'monitoring', confidence: 0.76,
-    opened_at: '2026-05-29T09:45:00Z',
-  },
-];
-
-const MOCK_SECTORS: SectorAllocation[] = [
-  { name: '半導體', ratio: 0.48, limit: 0.50, value: 240500 },
-  { name: 'AI 伺服器', ratio: 0.16, limit: 0.30, value: 59000 },
-  { name: '電源管理', ratio: 0.19, limit: 0.30, value: 72400 },
-  { name: '現金', ratio: 0.17, limit: 1.0, value: 63600 },
-];
-
-const MOCK_RECENT_PNL: { date: string; pnl: number }[] = [
-  { date: '5/16', pnl: 4200 },
-  { date: '5/17', pnl: -1800 },
-  { date: '5/18', pnl: 3100 },
-  { date: '5/19', pnl: -2400 },
-  { date: '5/20', pnl: 6800 },
-  { date: '5/21', pnl: 1200 },
-  { date: '5/22', pnl: -800 },
-  { date: '5/23', pnl: 5400 },
-  { date: '5/24', pnl: 3600 },
-  { date: '5/25', pnl: -1200 },
-  { date: '5/26', pnl: 7200 },
-  { date: '5/27', pnl: 2800 },
-  { date: '5/28', pnl: -1600 },
-  { date: '5/29', pnl: 6900 },
-];
-
-const MOCK_CUMULATIVE: { dates: string[]; me: number[]; index: number[] } = {
-  dates: ['5/1', '5/5', '5/8', '5/12', '5/15', '5/19', '5/22', '5/26', '5/29'],
-  me:    [100000, 102400, 105800, 103200, 108600, 112400, 115800, 119200, 121600],
-  index: [100000, 101200, 102400, 101000, 103200, 104400, 105600, 106800, 107200],
-};
-
-const MOCK_PORTFOLIO: PortfolioSummary = {
-  net_value: 435500,
-  budget: 500000,
-  free_cash: 63600,
-  cash_ratio: 0.146,
-  unrealized_pnl: 6900,
-  realized_pnl: 18420,
-  net_pnl: 25320,
-  net_pnl_pct: 0.0618,
-  position_count: 4,
-  closed_today: 2,
-  countdown_seconds: getSecondsToForceClose(),
-  positions: MOCK_POSITIONS,
-  sector_breakdown: MOCK_SECTORS,
-  recent_pnl_days: MOCK_RECENT_PNL,
-  cumulative_vs_index: MOCK_CUMULATIVE,
-  alpha_mtd: 0.0154,
-};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -439,13 +348,13 @@ function SectorBarStrip({ sectors }: { sectors: SectorAllocation[] }) {
 
 export default function Portfolio() {
   const navigate = useNavigate();
-  const [data, setData] = useState<PortfolioSummary>(MOCK_PORTFOLIO);
+  const [data, setData] = useState<PortfolioSummary | null>(null);
   const [countdown, setCountdown] = useState(getSecondsToForceClose());
 
   useEffect(() => {
     api.getPortfolio()
       .then(setData)
-      .catch(() => setData(MOCK_PORTFOLIO));
+      .catch(() => setData(null));
   }, []);
 
   // Countdown tick
@@ -453,6 +362,14 @@ export default function Portfolio() {
     const id = setInterval(() => setCountdown(s => Math.max(0, s - 1)), 1000);
     return () => clearInterval(id);
   }, []);
+
+  if (!data) {
+    return (
+      <AppChrome title="持倉 / 投資組合" eyebrow="05.1">
+        <EmptyHint text="尚無投資組合資料" />
+      </AppChrome>
+    );
+  }
 
   const { unrealized_pnl, realized_pnl, net_value, free_cash, position_count } = data;
 

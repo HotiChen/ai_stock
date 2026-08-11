@@ -17,6 +17,9 @@ import type {
   WeeklyReport,
   MarketScan,
   MarketSnapshot,
+  Trade,
+  PaperTradeSummary,
+  PaperTradeRecord,
 } from '../types';
 
 const BASE = '/api';
@@ -128,6 +131,9 @@ export const api = {
   submitOrder: (ticket: OrderTicket) =>
     apiFetch<OrderResult>('/order/submit', { method: 'POST', body: JSON.stringify(ticket) }),
 
+  // 今日已送出的委託紀錄（真實成交/委託清單，取代下單頁過去寫死的 Telegram 對話腳本）
+  getOrderHistory: () => apiFetch<Trade[]>('/order/today'),
+
   // Portfolio
   getPortfolio: () => apiFetch<PortfolioSummary>('/portfolio'),
 
@@ -136,6 +142,8 @@ export const api = {
 
   // Journal
   getJournal: () => apiFetch<JournalEntry[]>('/journal'),
+
+  getJournalChatHistory: () => apiFetch<ChatMessage[]>('/journal/chat/history'),
 
   // Chat (SSE — returns raw Response, not parsed JSON)
   sendChat: (messages: ChatMessage[]) =>
@@ -160,4 +168,9 @@ export const api = {
 
   // Scanner
   getScanner: () => apiFetch<MarketScan>('/scanner'),
+
+  // Paper Trade — dt_paper_trade.py 每日 13:35 自動執行後寫入的模擬倉紀錄
+  getPaperTradeSummary: () => apiFetch<PaperTradeSummary>('/paper-trade/summary'),
+
+  getPaperTradeHistory: () => apiFetch<PaperTradeRecord[]>('/paper-trade/history'),
 };

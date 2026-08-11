@@ -89,47 +89,6 @@ function SparklineDecoration() {
 }
 
 // ──────────────────────────────────────────────
-// Stat item for the bottom stats bar
-// ──────────────────────────────────────────────
-interface StatItemProps {
-  label: string;
-  value: string;
-  isLast?: boolean;
-}
-
-function StatItem({ label, value, isLast }: StatItemProps) {
-  return (
-    <div style={{
-      flex: 1,
-      padding: '14px 20px',
-      borderRight: isLast ? 'none' : '1px solid var(--dark-hair)',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 4,
-    }}>
-      <span style={{
-        fontFamily: 'var(--font-mono)',
-        fontSize: 10,
-        color: 'var(--dark-muted)',
-        letterSpacing: '0.14em',
-        textTransform: 'uppercase',
-      }}>
-        {label}
-      </span>
-      <span style={{
-        fontFamily: 'var(--font-mono)',
-        fontFeatureSettings: '"tnum" 1',
-        fontSize: 15,
-        fontWeight: 500,
-        color: 'var(--dark-ink)',
-      }}>
-        {value}
-      </span>
-    </div>
-  );
-}
-
-// ──────────────────────────────────────────────
 // Main Login component
 // ──────────────────────────────────────────────
 export default function Login() {
@@ -308,18 +267,6 @@ export default function Login() {
             <br />
             在盤前完成選股、盤中自動監控、13:25 強制平倉。
           </p>
-        </div>
-
-        {/* Bottom stats bar */}
-        <div style={{
-          borderTop: '1px solid var(--dark-hair)',
-          display: 'flex',
-          flexShrink: 0,
-        }}>
-          <StatItem label="今日推薦" value="8 檔" />
-          <StatItem label="信心 ≥ 0.75" value="5 檔" />
-          <StatItem label="本週勝率" value="68.4%" />
-          <StatItem label="累計報酬" value="+15.4%" isLast />
         </div>
 
         {/* Footer */}

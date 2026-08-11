@@ -5,158 +5,12 @@ import AppChrome from '../../components/AppChrome';
 import TraceStep from '../../components/TraceStep';
 import ContribRow from '../../components/ContribRow';
 import Card from '../../components/Card';
-import { api } from '../../api';
+import EmptyHint from '../../components/EmptyHint';
+import { api, isMockData } from '../../api';
 import type { ReasoningTrace } from '../../types';
 
-// ── Mock data ──────────────────────────────────────────────────────────────────
-function mockReasoningTrace(code: string): ReasoningTrace {
-  return {
-    run_id: 'PRE-20260525-001',
-    code,
-    total_duration_ms: 18240,
-    steps: [
-      {
-        phase: 'INPUT',
-        t: '08:30:00',
-        label: '接收盤前分析請求',
-        body: `{ "code": "${code}", "date": "2026-05-25", "mode": "deep" }`,
-        cost_ms: 12,
-      },
-      {
-        phase: 'FETCH',
-        t: '08:30:00',
-        label: '拉取日K / 週K 歷史資料',
-        body: `行情資料：240 日 OHLCV\n最新收盤：975 (+1.56%)\n前一日量：36,821 張`,
-        cost_ms: 340,
-      },
-      {
-        phase: 'FETCH',
-        t: '08:30:01',
-        label: '拉取法人籌碼 + 新聞',
-        body: `外資：連買 5 日，淨買超 12,840 張\n投信：買超 3,200 張\n新聞：CoWoS 擴產，N2 良率超預期`,
-        cost_ms: 820,
-      },
-      {
-        phase: 'EVAL',
-        t: '08:30:01',
-        label: '計算技術指標',
-        body: `RSI(14) = 62.4\nMACD = 金叉 (DIF: +3.2, DEA: +1.8)\nMA20 = 952 (價格在上方)\nKD: K=62, D=58\nBollinger: 上軌 998 / 中軌 952 / 下軌 906`,
-        cost_ms: 156,
-      },
-      {
-        phase: 'PROMPT',
-        t: '08:30:02',
-        label: '組裝 Prompt (system + user)',
-        body: `Tokens: 12,480 in\n包含：技術指標、籌碼、新聞、風控規則`,
-        cost_ms: 88,
-      },
-      {
-        phase: 'LLM',
-        t: '08:30:02',
-        label: 'Claude Sonnet 4.6 推理',
-        body: `模型：claude-sonnet-4-6\nAPI 請求：POST /v1/messages\n串流模式：SSE\n耗時：14,820 ms`,
-        cost_ms: 14820,
-        cost_usd: 0.0846,
-      },
-      {
-        phase: 'PARSE',
-        t: '08:30:17',
-        label: '解析 JSON 輸出',
-        body: `signal: "buy"\nconfidence: 0.86\ntarget_price: 1020\nstop_loss_price: 940`,
-        cost_ms: 34,
-      },
-      {
-        phase: 'GUARD',
-        t: '08:30:17',
-        label: '風控規則驗證',
-        body: `✓ 信心門檻 0.86 ≥ 0.75\n✓ 單筆部位 NT$142,000 ≤ 上限 25%\n! 板塊集中度 38% 接近 40% 上限\n✓ 黑名單無衝突`,
-        cost_ms: 92,
-      },
-      {
-        phase: 'OUTPUT',
-        t: '08:30:17',
-        label: '輸出最終判決',
-        body: `BUY 台積電 (${code}) | 信心 86% | TP 1,020 | SL 940\nTelegram 已推送：08:30:18`,
-        cost_ms: 78,
-      },
-    ],
-    prompt: {
-      system: `你是一個台股量化交易 AI 分析師，擅長結合技術分析、基本面與籌碼面做出交易判決。
-你的任務是分析指定股票並給出：
-1. 交易訊號 (buy/hold/sell)
-2. 信心分數 (0.0~1.0)
-3. 目標價與停損價
-4. 簡短進場理由 (繁體中文)
-
-規則：
-- 僅在信心 ≥ 0.75 時給出 buy
-- 目標價 / 停損價需基於技術面支撐阻力
-- 理由必須包含具體數據`,
-      user: `請分析以下股票：
-
-股票代碼：${code}
-日期：2026-05-25
-
-<external_data>
-技術指標：
-  RSI(14) = 62.4（回測支撐區）
-  MACD = 金叉（DIF +3.2 > DEA +1.8）
-  MA20 = 952（價格在上方 +2.4%）
-  KD = K:62 D:58（K在D上方）
-  布林通道：上軌 998 / 下軌 906
-  成交量：38,421張（+28% vs 5日均量）
-
-籌碼面：
-  外資：連買 5 日，淨買超 12,840 張
-  投信：買超 3,200 張
-  大股東：持股比例 77.3%（上季 76.8%）
-
-新聞摘要：
-  1. CoWoS 封裝擴產計畫提前，H200/B200 需求持續
-  2. N2 良率超過原定目標，量產時程提前
-  3. 法說會暗示 Q3 毛利率有望回升至 55%+
-</external_data>
-
-請給出你的分析與判決。`,
-      tokens_in: 12480,
-    },
-    response: {
-      raw: `{
-  "signal": "buy",
-  "confidence": 0.86,
-  "target_price": 1020,
-  "stop_loss_price": 940,
-  "reason": "法人連買5日，突破前高壓力，RSI回測支撐，N2良率超預期與CoWoS擴產為強烈催化劑"
-}`,
-      parsed: {
-        signal: 'buy',
-        confidence: 0.86,
-        target_price: 1020,
-        stop_loss_price: 940,
-        reason: '法人連買5日，突破前高壓力，RSI回測支撐，N2良率超預期與CoWoS擴產為強烈催化劑',
-      },
-      tokens_out: 3840,
-    },
-    contributions: [
-      { key: '法人籌碼', detail: '外資+投信連買5日', delta: 0.18, kind: 'positive' },
-      { key: 'MACD金叉', detail: 'DIF穿越DEA向上', delta: 0.14, kind: 'positive' },
-      { key: 'RSI支撐', detail: '62.4 回測50支撐未破', delta: 0.12, kind: 'positive' },
-      { key: 'CoWoS消息', detail: '擴產計畫提前', delta: 0.11, kind: 'positive' },
-      { key: 'MA20多頭', detail: '價格站上均線+2.4%', delta: 0.09, kind: 'positive' },
-      { key: '量增價漲', detail: '+28% vs 5日均量', delta: 0.08, kind: 'positive' },
-      { key: '板塊集中', detail: '半導體38%接近上限', delta: -0.04, kind: 'negative' },
-      { key: 'KD中性', detail: '尚未超買但動能仍在', delta: 0.00, kind: 'base' },
-    ],
-    final_confidence: 0.86,
-    self_check: [
-      { question: '信心分數是否有足夠的多方證據支持？', answer: '是。法人、技術、基本面三面共振，六項正面指標。', passed: true },
-      { question: '停損設定是否合理？', answer: '940 為近期低點支撐，跌破代表趨勢反轉，合理。', passed: true },
-      { question: '目標價是否基於技術阻力？', answer: '1020 為前波高點，上方有明確阻力位，合理。', passed: true },
-      { question: '是否有重大風險未納入考量？', answer: '板塊集中度38%接近上限，地緣政治風險未充分量化，應適度謹慎。', passed: false },
-    ],
-    decision_hash: 'sha256:8f3d2a1b9c4e7f6d0e5a3b8c2d1f4e9a7b6c3d2e1f0a8b7c6d5e4f3a2b1c0d',
-  };
-}
+// 本頁一律使用真實 API 資料，不再有 mockReasoningTrace() 靜默頂替。
+// 沒有資料（或後端回傳示範資料）一律顯示 EmptyHint，見下方 useEffect 與 render 邏輯。
 
 // ── Cursor blink ───────────────────────────────────────────────────────────────
 function BlinkingCursor() {
@@ -224,8 +78,8 @@ export default function Reasoning() {
   useEffect(() => {
     if (!code) return;
     api.getReasoning(code)
-      .then(setTrace)
-      .catch(() => setTrace(mockReasoningTrace(code)))
+      .then((t) => setTrace(isMockData(t) ? null : t))
+      .catch(() => setTrace(null))
       .finally(() => setLoading(false));
   }, [code]);
 
@@ -245,7 +99,15 @@ export default function Reasoning() {
     );
   }
 
-  const t = trace ?? mockReasoningTrace(code ?? '2330');
+  if (!trace) {
+    return (
+      <AppChrome title={`推理過程 · ${code}`} eyebrow="03.3">
+        <EmptyHint text="尚無推理過程紀錄" />
+      </AppChrome>
+    );
+  }
+
+  const t = trace;
   const totalCostMs = t.steps.reduce((s, step) => s + (step.cost_ms ?? 0), 0);
   const llmCostUsd = t.steps.find((s) => s.phase === 'LLM')?.cost_usd ?? 0;
 

@@ -3,94 +3,12 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import AppChrome from '../../components/AppChrome';
 import GuardRow from '../../components/GuardRow';
-import TelegramMsg from '../../components/TelegramMsg';
 import Eyebrow from '../../components/Eyebrow';
 import Pill from '../../components/Pill';
 import Button from '../../components/Button';
+import EmptyHint from '../../components/EmptyHint';
 import { api } from '../../api';
-import type { OrderTicket, OrderResult, Side, LotType, RiskCheck } from '../../types';
-
-// ── Mock data ───────────────────────────────────────────────────
-const MOCK_CHECKS: RiskCheck[] = [
-  { key: '單筆上限', sub: '≤ NT$200,000', status: 'pass', detail: 'NT$113,500 ✓' },
-  { key: '資金充足', sub: '可用 NT$363,600', status: 'pass', detail: '使用率 31.2%' },
-  { key: '板塊集中度', sub: '半導體 ≤ 50%', status: 'warn', detail: '目前 48.5% (近限)' },
-  { key: '信心門檻', sub: '≥ 0.75', status: 'pass', detail: '0.86 ✓' },
-  { key: '黑名單', sub: '標的未列入', status: 'pass', detail: '未在黑名單' },
-  { key: '13:25 距離', sub: '≥ 30 分鐘', status: 'pass', detail: '剩餘 2h42m ✓' },
-];
-
-const MOCK_TICKET: OrderTicket = {
-  code: '2330',
-  name: '台積電',
-  last_price: 975,
-  side: 'buy',
-  lot: 'common',
-  price_type: 'LMT',
-  price: 975,
-  quantity: 1,
-  amount: 975000,
-  target_price: 1010,
-  stop_loss_price: 940,
-  source: {
-    type: 'ai',
-    run_id: 'RUN-20260525-0830',
-    confidence: 0.86,
-    reason: '突破 MA20 並伴隨量能放大，RSI 60 多頭格局，板塊資金持續流入',
-    model: 'claude-sonnet-4-6',
-  },
-  risk_checks: MOCK_CHECKS,
-  mode: 'simulation',
-  dry_run_preview: `api.place_order(
-  api_key   = "***",
-  contract  = contracts.Stocks["2330"],
-  order     = Order(
-    action         = Action.Buy,
-    price          = 975,
-    quantity       = 1,
-    price_type     = StockPriceType.LimitPrice,
-    order_type     = OrderType.ROD,
-    first_sell     = False,
-  )
-)
-# DRY RUN — 模擬模式不送真實委託
-# 預期回傳: {"order_id": "mock-xxx", "status": "pending"}`,
-};
-
-// ── Telegram mock messages ──────────────────────────────────────
-interface TgMsg {
-  role: 'bot' | 'user';
-  content: string;
-  time: string;
-  isWarning?: boolean;
-  buttons?: { label: string }[];
-}
-
-const MOCK_TG_MSGS: TgMsg[] = [
-  {
-    role: 'bot',
-    content: '📊 AI 盤前選股完成\n\n🎯 2330 台積電\n💰 進場：NT$975\n🎯 目標：NT$1,010 (+3.59%)\n🛡 停損：NT$940 (-3.59%)\n\n信心指數：0.86（高）\n理由：突破 MA20，量能放大',
-    time: '08:30:05',
-    buttons: [{ label: '✅ 批准' }, { label: '❌ 跳過' }, { label: '✏️ 調整' }],
-  },
-  {
-    role: 'user',
-    content: '✅ 批准',
-    time: '08:31:22',
-  },
-  {
-    role: 'bot',
-    content: '✅ 委託已送出\n\n成交：NT$975 × 1 張\n市值：NT$975,000\n訂單編號：mock-20260525-001',
-    time: '09:15:44',
-  },
-  {
-    role: 'bot',
-    content: '⚠️ 風險提醒\n\n2330 台積電 接近停損\n現價：NT$952（-2.36%）\n停損價：NT$940（距 -1.26%）\n\n建議操作：持倉觀察 / 手動平倉',
-    time: '10:42:15',
-    isWarning: true,
-    buttons: [{ label: '手動平倉' }, { label: '調整停損' }, { label: '忽略' }],
-  },
-];
+import type { OrderTicket, OrderResult, Side, LotType, Trade } from '../../types';
 
 // ── Helpers ─────────────────────────────────────────────────────
 function fmtMoney(n: number) {
@@ -140,10 +58,12 @@ function StepGrid({ status }: { status: StepStatus[] }) {
 // ── Submit confirm modal ─────────────────────────────────────────
 function SubmitModal({
   ticket,
+  error,
   onClose,
   onConfirm,
 }: {
   ticket: OrderTicket;
+  error?: string | null;
   onClose: () => void;
   onConfirm: () => Promise<void>;
 }) {
@@ -181,6 +101,15 @@ function SubmitModal({
         <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 16, padding: '8px 10px', background: 'var(--gold-soft)', border: '1px solid var(--gold)' }}>
           送出後將透過 Telegram 進行二次確認，請於 60 秒內回應。
         </div>
+        {error && (
+          <div style={{
+            fontSize: 11, color: 'var(--up)', marginBottom: 16,
+            padding: '8px 10px', background: 'var(--up-soft)', border: '1px solid var(--up)',
+            lineHeight: 1.5,
+          }}>
+            委託送出失敗：{error}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <Button variant="default" onClick={onClose}>取消</Button>
           <Button
@@ -214,7 +143,7 @@ export default function Order() {
   const [sl, setSl] = useState(940);
 
   // Preview
-  const [ticket, setTicket] = useState<OrderTicket>(MOCK_TICKET);
+  const [ticket, setTicket] = useState<OrderTicket | null>(null);
   const [loading, setLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -224,6 +153,14 @@ export default function Order() {
   // Modals
   const [showSubmit, setShowSubmit] = useState(false);
   const [_result, setResult] = useState<OrderResult | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // 今日委託紀錄
+  const [orderHistory, setOrderHistory] = useState<Trade[]>([]);
+  const fetchOrderHistory = useCallback(() => {
+    api.getOrderHistory().then(setOrderHistory).catch(() => setOrderHistory([]));
+  }, []);
+  useEffect(() => { fetchOrderHistory(); }, [fetchOrderHistory]);
 
   // Computed amount
   const amount = lot === 'common' ? price * qty * 1000 : price * qty;
@@ -240,7 +177,7 @@ export default function Order() {
         });
         setTicket(t);
       } catch {
-        // keep mock
+        // 保留先前的真實試算結果，不覆蓋成假資料
       } finally {
         setLoading(false);
       }
@@ -250,6 +187,7 @@ export default function Order() {
   useEffect(() => { fetchPreview(); }, [side, lot, priceType, price, qty]);
 
   const handleSubmit = useCallback(async () => {
+    if (!ticket) return;
     // Animate steps
     for (let i = 0; i < STEPS.length; i++) {
       setStepStatus((prev) => prev.map((s, idx) => idx === i ? 'running' : s));
@@ -259,12 +197,22 @@ export default function Order() {
     try {
       const r = await api.submitOrder(ticket);
       setResult(r);
-    } catch {
-      setResult({ order_id: 'mock-sim-001', status: 'submitted' });
+      setSubmitError(null);
+      fetchOrderHistory();
+      setShowSubmit(false);
+      navigate('/daytrade');
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : '委託送出失敗，請重試');
     }
-    setShowSubmit(false);
-    navigate('/daytrade');
-  }, [ticket, navigate]);
+  }, [ticket, navigate, fetchOrderHistory]);
+
+  if (!ticket) {
+    return (
+      <AppChrome title="下單流程" eyebrow="04.3">
+        <EmptyHint text="尚無委託試算，請確認參數或稍後再試" />
+      </AppChrome>
+    );
+  }
 
   const passCount = ticket.risk_checks.filter((c) => c.status === 'pass').length;
   const isBuy = side === 'buy';
@@ -529,32 +477,68 @@ export default function Order() {
           </div>
         </div>
 
-        {/* ── Right column: Telegram + Actions ─── */}
+        {/* ── Right column: 今日委託紀錄 + Actions ─── */}
         <div style={{ background: 'var(--surface)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ padding: '8px 14px', borderBottom: '1px solid var(--hair)', flexShrink: 0 }}>
-            <Eyebrow label="Telegram 鏡像" right={
+            <Eyebrow label="今日委託紀錄" right={
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-2)' }}>
-                chat_id: @quant_ai_bot
+                {orderHistory.length} 筆
               </span>
             } />
           </div>
 
-          {/* Mock Telegram chat */}
-          <div style={{
-            flex: 1, overflowY: 'auto',
-            background: '#e6dfd1',
-            padding: '8px 0',
-          }}>
-            {MOCK_TG_MSGS.map((msg, i) => (
-              <TelegramMsg
-                key={i}
-                role={msg.role}
-                content={msg.content}
-                time={msg.time}
-                isWarning={msg.isWarning}
-                buttons={msg.buttons}
-              />
-            ))}
+          {/* 今日委託紀錄 */}
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            {orderHistory.length === 0 ? (
+              <EmptyHint text="今日尚無委託紀錄" />
+            ) : (
+              orderHistory.map((t) => {
+                const tIsBuy = t.side === 'buy';
+                return (
+                  <div
+                    key={t.id}
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 2,
+                      padding: '8px 14px',
+                      borderBottom: '1px solid var(--hair)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, fontSize: 12, color: 'var(--ink)' }}>
+                        {t.code}
+                      </span>
+                      <span style={{ fontSize: 11, color: 'var(--muted)' }}>{t.name}</span>
+                      <span style={{
+                        fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 500,
+                        color: tIsBuy ? 'var(--up)' : 'var(--down)',
+                      }}>
+                        {tIsBuy ? 'BUY' : 'SELL'}
+                      </span>
+                      <span style={{ flex: 1 }} />
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-2)' }}>
+                        {t.time}
+                      </span>
+                    </div>
+                    <div style={{
+                      display: 'flex', alignItems: 'baseline', gap: 10,
+                      fontFamily: 'var(--font-mono)', fontFeatureSettings: '"tnum" 1',
+                      fontSize: 11, color: 'var(--ink-2)',
+                    }}>
+                      <span>{t.quantity}{t.lot === 'common' ? '張' : '股'} @ {t.price.toLocaleString()}</span>
+                      <span>{fmtMoney(t.amount)}</span>
+                      <span style={{ flex: 1 }} />
+                      <span style={{
+                        color: t.status === 'filled' ? 'var(--ink)' : t.status === 'cancelled' ? 'var(--muted)' : 'var(--gold)',
+                      }}>
+                        {t.status === 'filled' ? '已成交' : t.status === 'cancelled' ? '已取消' : '部分成交'}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
 
           {/* Sticky bottom actions */}
@@ -609,7 +593,8 @@ export default function Order() {
       {showSubmit && (
         <SubmitModal
           ticket={{ ...ticket, side, lot, price_type: priceType, price, quantity: qty, amount, target_price: tp, stop_loss_price: sl }}
-          onClose={() => setShowSubmit(false)}
+          error={submitError}
+          onClose={() => { setShowSubmit(false); setSubmitError(null); }}
           onConfirm={handleSubmit}
         />
       )}

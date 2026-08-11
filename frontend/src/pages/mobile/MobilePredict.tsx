@@ -1,30 +1,8 @@
 // 07.1 手機 · AI 預測卡 (iPhone 402×874)
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api';
-import type { TopNRun, Pick } from '../../types';
-
-const MOCK_TOPN: TopNRun = {
-  run_id: 'r-20260529-0830',
-  date: '2026-05-29',
-  scanned: 856,
-  analyzed: 24,
-  buy_signals: 8,
-  hold_signals: 16,
-  approved: 5,
-  rejected_by_risk: 3,
-  picks: [
-    { code: '2330', name: '台積電', sector: '半導體', signal: 'buy', confidence: 0.89, target_price: 1120, stop_loss_price: 1030, last_price: 1068, change_pct: 0.018, spark: [1020, 1035, 1048, 1055, 1062, 1068], reason: '突破前高，AI 看多，量能放大', tags: ['突破', '量能'], action: 'approved', budget: 200000, budget_ratio: 0.2, run_id: 'r1', created_at: '2026-05-29T08:30:00' },
-    { code: '2382', name: '廣達', sector: 'AI伺服器', signal: 'buy', confidence: 0.81, target_price: 320, stop_loss_price: 290, last_price: 305, change_pct: 0.031, spark: [278, 285, 292, 298, 305], reason: 'AI 伺服器訂單增長超預期', tags: ['成長', '法人'], action: 'approved', budget: 150000, budget_ratio: 0.15, run_id: 'r1', created_at: '2026-05-29T08:30:00' },
-    { code: '2308', name: '台達電', sector: 'AI伺服器', signal: 'buy', confidence: 0.77, target_price: 405, stop_loss_price: 375, last_price: 391, change_pct: 0.022, spark: [368, 374, 381, 387, 391], reason: '電源供應模組出貨創高', tags: ['法人', '量能'], action: 'approved', budget: 130000, budget_ratio: 0.13, run_id: 'r1', created_at: '2026-05-29T08:30:00' },
-    { code: '2881', name: '富邦金', sector: '金融', signal: 'buy', confidence: 0.72, target_price: 92, stop_loss_price: 83, last_price: 87.3, change_pct: 0.009, spark: [82, 83.5, 85, 86.2, 87.3], reason: '升息末段壽險受益', tags: ['殖利率'], action: 'pending', budget: 100000, budget_ratio: 0.1, run_id: 'r1', created_at: '2026-05-29T08:30:00' },
-    { code: '2317', name: '鴻海', sector: '電子零件', signal: 'buy', confidence: 0.68, target_price: 158, stop_loss_price: 143, last_price: 151.5, change_pct: 0.013, spark: [142, 145, 148, 150, 151.5], reason: 'iPhone 組裝旺季備貨', tags: ['季節'], action: 'observe', budget: 80000, budget_ratio: 0.08, run_id: 'r1', created_at: '2026-05-29T08:30:00' },
-  ],
-  risk_checks: [],
-  sector_allocation: [],
-  blacklist: [],
-  cost: { duration_ms: 12400, input_tokens: 24800, output_tokens: 3200, cost_usd: 0.42, model: 'claude-sonnet-4-6' },
-  telegram_sent_at: '2026-05-29T08:32:15',
-};
+import type { Pick } from '../../types';
+import EmptyHint from '../../components/EmptyHint';
 
 function MiniSparkline({ data, color }: { data: number[]; color: string }) {
   if (data.length < 2) return null;
@@ -111,11 +89,19 @@ function MobilePickCard({ pick, rank }: { pick: Pick; rank: number }) {
 }
 
 export default function MobilePredict() {
-  const { data: run = MOCK_TOPN } = useQuery({
+  const { data: run } = useQuery({
     queryKey: ['topN'],
     queryFn: () => api.getTopN(),
     retry: false,
   });
+
+  if (!run) {
+    return (
+      <div style={{ maxWidth: 402, margin: '0 auto', background: 'var(--bg)', minHeight: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <EmptyHint text="今日尚無推薦" />
+      </div>
+    );
+  }
 
   const nowMsToOpen = (() => {
     const now = new Date();
@@ -161,7 +147,9 @@ export default function MobilePredict() {
 
       {/* Pick cards */}
       <div style={{ flex: 1, padding: '0 12px 80px' }}>
-        {run.picks.map((pick, i) => <MobilePickCard key={pick.code} pick={pick} rank={i + 1} />)}
+        {run.picks.length === 0
+          ? <EmptyHint text="今日尚無推薦標的" />
+          : run.picks.map((pick, i) => <MobilePickCard key={pick.code} pick={pick} rank={i + 1} />)}
       </div>
 
       {/* Bottom bar: countdown to open */}

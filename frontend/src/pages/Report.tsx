@@ -1,45 +1,12 @@
 // 05.4 週報
 import { useQuery } from '@tanstack/react-query';
 import AppChrome from '../components/AppChrome';
+import EmptyHint from '../components/EmptyHint';
 import { api } from '../api';
-import type { WeeklyReport } from '../types';
 
-const MOCK_REPORT: WeeklyReport = {
-  week_label: 'Week 21 · 2026',
-  narrative: '本週市場在半導體板塊強勢帶動下，AI 選股策略表現優異。五個交易日中有四日獲利，整體勝率達 68.4%，超越近四週平均水準（61.2%）。台積電突破前高帶動整個供應鏈，廣達、台達電等 AI 伺服器相關股也同步走強。\n\n風險面：聯電在大盤疲弱時進場虧損，後續應加強大盤環境過濾；鴻海追高失敗提醒我們等確認信號的重要性。整體而言本週淨損益 +18,420，達成月度目標 72.4%。',
-  net_pnl: 18420,
-  net_pnl_pct: 0.0154,
-  winrate: 0.684,
-  trades: 19,
-  best_trade_pnl: 12300,
-  avg_daily_pnl: 3684,
-  daily_details: [
-    { date: '2026-05-26', weekday: '一', pnl: 11400, trades: 4, winrate: 0.75 },
-    { date: '2026-05-27', weekday: '二', pnl: 3800, trades: 4, winrate: 0.75 },
-    { date: '2026-05-28', weekday: '三', pnl: 5200, trades: 4, winrate: 0.5 },
-    { date: '2026-05-29', weekday: '四', pnl: -980, trades: 4, winrate: 0.5 },
-    { date: '2026-05-30', weekday: '五', pnl: 0, trades: 3, winrate: 0.667 },
-  ],
-  confidence_winrate: [
-    { tier: '高信心 ≥0.80', winrate: 0.857, trades: 7 },
-    { tier: '中高 0.75–0.79', winrate: 0.714, trades: 7 },
-    { tier: '中 0.65–0.74', winrate: 0.6, trades: 5 },
-    { tier: '低 <0.65', winrate: 0.0, trades: 0 },
-  ],
-  sector_winrate: [
-    { sector: '半導體', winrate: 0.833, trades: 6 },
-    { sector: 'AI伺服器', winrate: 0.75, trades: 4 },
-    { sector: '金融', winrate: 0.667, trades: 3 },
-    { sector: '電信', winrate: 0.5, trades: 2 },
-    { sector: '電子零件', winrate: 0.5, trades: 4 },
-  ],
-  next_week_suggestions: [
-    '提高最小信心門檻至 0.78，過濾低勝率交易',
-    '加入大盤過濾：TAIEX 日內跌幅 > 0.5% 時暫停進場',
-    '半導體板塊保持高配比，AI 伺服器次之',
-    '追高停損改為 2%，避免重演鴻海案例',
-  ],
-};
+// 本頁一律使用真實 API 資料。先前這裡有一整份 MOCK_REPORT，會在沒有資料時
+// 靜默頂替，導致畫面出現看似真實的假週報敘述與假損益——已全部移除。
+// 沒有資料時請顯示空狀態（見 EmptyHint），不要編造。
 
 function DailyBar({ pnl, maxAbs }: { pnl: number; maxAbs: number }) {
   const pct = maxAbs > 0 ? Math.abs(pnl) / maxAbs : 0;
@@ -68,11 +35,19 @@ function WinrateBar({ rate }: { rate: number }) {
 }
 
 export default function Report() {
-  const { data: report = MOCK_REPORT } = useQuery({
+  const { data: report } = useQuery({
     queryKey: ['report'],
     queryFn: () => api.getWeeklyReport(),
     retry: false,
   });
+
+  if (!report) {
+    return (
+      <AppChrome title="週報" eyebrow="05.4">
+        <EmptyHint text="本週尚無週報，交易資料累積後於週五產生" />
+      </AppChrome>
+    );
+  }
 
   const maxAbsPnl = Math.max(...report.daily_details.map(d => Math.abs(d.pnl)));
 

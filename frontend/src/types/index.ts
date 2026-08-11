@@ -626,3 +626,45 @@ export interface BacktestParams {
   initial_capital: number;
   slippage: number;
 }
+
+// ============================================================
+// 05.3b 模擬倉 (Paper Trade) — dt_paper_trade.py 每日寫入
+// ============================================================
+
+export interface PaperTradeSummary {
+  start_date: string;
+  total_days: number;
+  real_trades: number;
+  no_trade_days: number;
+  initial_capital: number;
+  current_capital: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  win_rate: number;
+  hits: number;
+  stops: number;
+  neutrals: number;
+  max_drawdown: number;
+  avg_win: number;
+  avg_loss: number;
+  expectancy: number;
+  streak_win: number;
+  streak_loss: number;
+  equity_curve: { date: string; capital: number }[];
+}
+
+export interface PaperTradeRecord {
+  id: number;
+  date: string;
+  code: string | null;
+  name: string | null;
+  dt_score: number | null;
+  entry_price: number | null;
+  exit_price: number | null;
+  outcome: string | null;
+  pnl: number;
+  pnl_pct: number;
+  capital_before: number;
+  capital_after: number;
+  note: string;
+}

@@ -8,6 +8,7 @@ import Pill from '../components/Pill';
 import Sparkline from '../components/Sparkline';
 import ConfidenceTick from '../components/ConfidenceTick';
 import AlertRow from '../components/AlertRow';
+import EmptyHint from '../components/EmptyHint';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { api, isMockData } from '../api';
 import type { DaytradeLive, TopNRun, Alert, Pick, PortfolioSummary } from '../types';
@@ -769,29 +770,4 @@ function SkeletonRow() {
   );
 }
 
-/**
- * 空狀態提示。
- *
- * 存在的理由：這是一個下單系統。先前 picks/alerts 在沒有資料時會靜默退回
- * MOCK 常數，畫面照樣列出「2330 台積電 信心 0.82」，但那是寫死的示範資料，
- * 不是任何一次真實預測。使用者無從分辨，可能照著假訊號操作。
- * 寧可明確顯示「今日尚無預測」，也不要用看起來合理的假資料填滿版面。
- */
-function EmptyHint({ text }: { text: string }) {
-  return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      height: '100%',
-      minHeight: 80,
-      padding: '20px 12px',
-      color: 'var(--ink-3, #888)',
-      fontSize: 12,
-      letterSpacing: '0.02em',
-      textAlign: 'center',
-    }}>
-      {text}
-    </div>
-  );
-}
+// EmptyHint 已抽成共用元件，見 src/components/EmptyHint.tsx

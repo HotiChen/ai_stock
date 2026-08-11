@@ -6,91 +6,10 @@ import Pill from '../../components/Pill';
 import Eyebrow from '../../components/Eyebrow';
 import Button from '../../components/Button';
 import KChart, { markColor } from '../../components/KChart';
+import EmptyHint from '../../components/EmptyHint';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { api } from '../../api';
-import type { ChartView, AIMark, Tick } from '../../types';
-
-// ── Mock data ───────────────────────────────────────────────────
-function buildMockTicks(): Tick[] {
-  const base = 960;
-  const ticks: Tick[] = [];
-  let open = base;
-  for (let i = 0; i < 48; i++) {
-    const close = open + (Math.random() - 0.48) * 15;
-    const high = Math.max(open, close) + Math.random() * 6;
-    const low = Math.min(open, close) - Math.random() * 6;
-    const h = Math.floor(9 + i / 8);
-    const m = (i % 8) * 5;
-    ticks.push({
-      t: `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`,
-      open: +open.toFixed(1),
-      high: +high.toFixed(1),
-      low: +low.toFixed(1),
-      close: +close.toFixed(1),
-      volume: Math.floor(100 + Math.random() * 500),
-    });
-    open = close;
-  }
-  return ticks;
-}
-
-const MOCK_TICKS = buildMockTicks();
-
-function buildMA(ticks: Tick[], period: number): number[] {
-  return ticks.map((_, i) => {
-    if (i < period - 1) return NaN;
-    const slice = ticks.slice(i - period + 1, i + 1);
-    return slice.reduce((s, t) => s + t.close, 0) / period;
-  });
-}
-
-function buildRSI(ticks: Tick[], period = 14): number[] {
-  const rsi: number[] = new Array(ticks.length).fill(NaN);
-  if (ticks.length < period + 1) return rsi;
-  let gains = 0, losses = 0;
-  for (let i = 1; i <= period; i++) {
-    const diff = ticks[i].close - ticks[i - 1].close;
-    if (diff >= 0) gains += diff; else losses -= diff;
-  }
-  let avgGain = gains / period, avgLoss = losses / period;
-  rsi[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  for (let i = period + 1; i < ticks.length; i++) {
-    const diff = ticks[i].close - ticks[i - 1].close;
-    avgGain = (avgGain * (period - 1) + (diff >= 0 ? diff : 0)) / period;
-    avgLoss = (avgLoss * (period - 1) + (diff < 0 ? -diff : 0)) / period;
-    rsi[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  }
-  return rsi;
-}
-
-const MOCK_MARKS: AIMark[] = [
-  { index: 2,  time: '09:10', kind: 'buy',  label: 'BUY',  confidence: 0.86, reasoning: '突破 MA20，成交量放大' },
-  { index: 12, time: '10:00', kind: 'add',  label: 'ADD',  confidence: 0.78, reasoning: '拉回 MA20 支撐確認' },
-  { index: 24, time: '11:00', kind: 'warn', label: 'WARN', confidence: 0.65, reasoning: 'RSI 進入超買，注意回調' },
-  { index: 36, time: '12:00', kind: 'tp',   label: 'TP',   confidence: 0.90, reasoning: '接近目標價，可考慮減碼' },
-  { index: 42, time: '12:30', kind: 'note', label: 'NOTE', confidence: 0.72, reasoning: '大盤轉弱，持續觀察' },
-];
-
-function buildMockChart(code: string): ChartView {
-  const ticks = MOCK_TICKS;
-  const ma20 = buildMA(ticks, 20);
-  const ma5 = buildMA(ticks, 5);
-  return {
-    code,
-    ticks,
-    ma20,
-    ma5,
-    bollinger: { upper: ma20.map((v) => v + 20), mid: ma20, lower: ma20.map((v) => v - 20) },
-    rsi: buildRSI(ticks),
-    ai_marks: MOCK_MARKS,
-    next_action_suggestion: {
-      kind: 'hold',
-      text: '目前價格在 MA20 上方，RSI 71.4 接近超買區間。建議持倉觀察，若 RSI > 75 可考慮減碼 50%。',
-      confidence: 0.78,
-      suggested_value: undefined,
-    },
-  };
-}
+import type { ChartView, Position } from '../../types';
 
 // ── Legend ──────────────────────────────────────────────────────
 function ChartLegend({ ma20Valid: _ma20Valid }: { ma20Valid: boolean }) {
@@ -203,11 +122,12 @@ export default function ChartPage() {
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(700);
-  const [chartData, setChartData] = useState<ChartView>(buildMockChart(code));
+  const [chartData, setChartData] = useState<ChartView | null>(null);
   const [selectedMarkIdx, setSelectedMarkIdx] = useState<number | null>(null);
   const [adjustModal, setAdjustModal] = useState<'tp' | 'sl' | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [closingPos, setClosingPos] = useState(false);
+  const [livePosition, setLivePosition] = useState<Position | null>(null);
 
   // WS live updates
   const { data: wsData } = useWebSocket<ChartView>(`/ws/daytrade/${code}/chart`);
@@ -217,8 +137,15 @@ export default function ChartPage() {
 
   // Initial fetch
   useEffect(() => {
-    api.getChartData(code).then(setChartData).catch(() => {/* use mock */});
-    setChartData(buildMockChart(code));
+    setChartData(null);
+    api.getChartData(code).then(setChartData).catch(() => setChartData(null));
+  }, [code]);
+
+  // 目前持倉（供 TP/SL/信心/監控時長顯示，避免編造）
+  useEffect(() => {
+    api.getDaytradeLive()
+      .then((d) => setLivePosition(d.positions.find((p) => p.code === code) ?? null))
+      .catch(() => setLivePosition(null));
   }, [code]);
 
   // Measure container width
@@ -233,6 +160,14 @@ export default function ChartPage() {
     return () => ro.disconnect();
   }, []);
 
+  if (!chartData) {
+    return (
+      <AppChrome title={`K 線標記 · ${code}`} eyebrow="04.2">
+        <EmptyHint text="尚無 K 線資料" />
+      </AppChrome>
+    );
+  }
+
   const ticks = chartData.ticks;
   const last = ticks[ticks.length - 1];
   const first = ticks[0];
@@ -244,13 +179,19 @@ export default function ChartPage() {
   const changePct = openP > 0 ? ((lastClose - openP) / openP) * 100 : 0;
   const isUp = lastClose >= openP;
 
-  // Mock position metadata
-  const targetPrice = 1010;
-  const stopLossPrice = 940;
-  const monitoringMinutes = 87;
-  const confidence = 0.86;
-  const distTp = ((targetPrice - lastClose) / lastClose) * 100;
-  const distSl = ((lastClose - stopLossPrice) / lastClose) * 100;
+  // 持倉相關的目標價／停損價／信心／監控時長一律來自真實持倉資料；
+  // 沒有持倉（livePosition === null）時全部歸零，UI 需另外處理顯示。
+  const targetPrice = livePosition?.target_price ?? 0;
+  const stopLossPrice = livePosition?.stop_loss_price ?? 0;
+  const confidence = livePosition?.confidence ?? 0;
+  const monitoringMinutes = (() => {
+    if (!livePosition?.opened_at) return 0;
+    const openedAt = new Date(livePosition.opened_at).getTime();
+    if (Number.isNaN(openedAt)) return 0;
+    return Math.max(0, Math.round((Date.now() - openedAt) / 60000));
+  })();
+  const distTp = lastClose > 0 ? ((targetPrice - lastClose) / lastClose) * 100 : 0;
+  const distSl = lastClose > 0 ? ((lastClose - stopLossPrice) / lastClose) * 100 : 0;
 
   void (selectedMarkIdx !== null
     ? chartData.ai_marks.find((m) => m.index === selectedMarkIdx)
@@ -314,41 +255,50 @@ export default function ChartPage() {
           </div>
         </div>
 
-        {/* Pills */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-          <Pill color="var(--gold)" bg="var(--gold-soft)" border="var(--gold)" size={10}>
-            監控 {monitoringMinutes}m
-          </Pill>
-          <Pill
-            color={confidence >= 0.75 ? 'var(--up)' : confidence >= 0.6 ? 'var(--gold)' : 'var(--muted)'}
-            bg={confidence >= 0.75 ? 'var(--up-soft)' : confidence >= 0.6 ? 'var(--gold-soft)' : 'transparent'}
-            border={confidence >= 0.75 ? 'var(--up)' : confidence >= 0.6 ? 'var(--gold)' : 'var(--hair)'}
-            size={10}
-          >
-            AI {(confidence * 100).toFixed(0)}%
-          </Pill>
-          <Pill color="var(--down)" bg="var(--down-soft)" border="var(--down)" size={10}>
-            距TP +{distTp.toFixed(2)}%
-          </Pill>
-          <Pill color="var(--up)" bg="var(--up-soft)" border="var(--up)" size={10}>
-            距SL -{distSl.toFixed(2)}%
-          </Pill>
-        </div>
+        {livePosition ? (
+          <>
+            {/* Pills */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              <Pill color="var(--gold)" bg="var(--gold-soft)" border="var(--gold)" size={10}>
+                監控 {monitoringMinutes}m
+              </Pill>
+              <Pill
+                color={confidence >= 0.75 ? 'var(--up)' : confidence >= 0.6 ? 'var(--gold)' : 'var(--muted)'}
+                bg={confidence >= 0.75 ? 'var(--up-soft)' : confidence >= 0.6 ? 'var(--gold-soft)' : 'transparent'}
+                border={confidence >= 0.75 ? 'var(--up)' : confidence >= 0.6 ? 'var(--gold)' : 'var(--hair)'}
+                size={10}
+              >
+                AI {(confidence * 100).toFixed(0)}%
+              </Pill>
+              <Pill color="var(--down)" bg="var(--down-soft)" border="var(--down)" size={10}>
+                距TP +{distTp.toFixed(2)}%
+              </Pill>
+              <Pill color="var(--up)" bg="var(--up-soft)" border="var(--up)" size={10}>
+                距SL -{distSl.toFixed(2)}%
+              </Pill>
+            </div>
 
-        <div style={{ flex: 1 }} />
+            <div style={{ flex: 1 }} />
 
-        {/* Action buttons */}
-        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-          <Button size="small" onClick={() => setAdjustModal('tp')}>
-            調整停利
-          </Button>
-          <Button size="small" onClick={() => setAdjustModal('sl')}>
-            調整停損
-          </Button>
-          <Button size="small" variant="danger" onClick={() => setShowCloseConfirm(true)}>
-            立即平倉
-          </Button>
-        </div>
+            {/* Action buttons */}
+            <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+              <Button size="small" onClick={() => setAdjustModal('tp')}>
+                調整停利
+              </Button>
+              <Button size="small" onClick={() => setAdjustModal('sl')}>
+                調整停損
+              </Button>
+              <Button size="small" variant="danger" onClick={() => setShowCloseConfirm(true)}>
+                立即平倉
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <span style={{ fontSize: 11, color: 'var(--muted)' }}>此標的目前無持倉</span>
+            <div style={{ flex: 1 }} />
+          </>
+        )}
       </div>
 
       {/* Main body: left chart + right column */}

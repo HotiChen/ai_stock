@@ -12,6 +12,7 @@ import Button from '../../components/Button';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { api } from '../../api';
 import RiskCockpit from '../../components/RiskCockpit';
+import EmptyHint from '../../components/EmptyHint';
 import type { DaytradeLive, Position } from '../../types';
 
 // ── Sub-tab config ──────────────────────────────────────────────
@@ -23,137 +24,6 @@ const SUBTABS = [
   { id: 'threads',  label: '策略執行緒', path: '/daytrade/threads' },
   { id: 'risk',     label: '風控',       path: '/daytrade/risk' },
 ];
-
-// ── Mock data ───────────────────────────────────────────────────
-const MOCK: DaytradeLive = {
-  countdown_seconds: 9762, // ~2h42m
-  force_close_at: '13:25:00',
-  monitoring_count: 5,
-  closed_count: 2,
-  unrealized_pnl: 8420,
-  realized_pnl: 3920,
-  net_pnl: 12340,
-  net_value: 512340,
-  positions: [
-    {
-      code: '2330', name: '台積電', sector: '半導體',
-      side: 'buy',
-      entry_price: 960, last_price: 975, quantity: 1, lot: 'common',
-      cost: 960000, market_value: 975000,
-      pnl: 15000, pnl_pct: 1.56,
-      target_price: 1010, stop_loss_price: 940,
-      distance_to_tp_pct: 3.59, distance_to_sl_pct: 3.59,
-      thread_state: 'monitoring', confidence: 0.86,
-      opened_at: '09:15:00',
-    },
-    {
-      code: '2454', name: '聯發科', sector: '半導體',
-      side: 'buy',
-      entry_price: 1200, last_price: 1188, quantity: 1, lot: 'common',
-      cost: 1200000, market_value: 1188000,
-      pnl: -12000, pnl_pct: -1.0,
-      target_price: 1260, stop_loss_price: 1170,
-      distance_to_tp_pct: 6.06, distance_to_sl_pct: 1.52,
-      thread_state: 'monitoring', confidence: 0.74,
-      opened_at: '09:32:00',
-    },
-    {
-      code: '6505', name: '台塑化', sector: '石化',
-      side: 'buy',
-      entry_price: 82, last_price: 84.5, quantity: 5000, lot: 'intraday_odd',
-      cost: 410000, market_value: 422500,
-      pnl: 12500, pnl_pct: 3.05,
-      target_price: 87, stop_loss_price: 79,
-      distance_to_tp_pct: 2.96, distance_to_sl_pct: 6.51,
-      thread_state: 'monitoring', confidence: 0.79,
-      opened_at: '10:05:00',
-    },
-  ],
-  alerts: [
-    {
-      id: 'a1', time: '10:41:55', level: 'high', code: '2454', name: '聯發科',
-      text: '接近停損價 NT$1,170，目前距離 1.52%',
-      kind: 'stop_warn', resolved: false, source: 'monitor_agent', telegram_sent: true,
-    },
-    {
-      id: 'a2', time: '10:38:12', level: 'med', code: '2330', name: '台積電',
-      text: '達到 MA20 支撐確認，持續監控',
-      kind: 'note', resolved: false, source: 'monitor_agent', telegram_sent: false,
-    },
-    {
-      id: 'a3', time: '10:22:05', level: 'low', code: '6505', name: '台塑化',
-      text: 'RSI 進入超買區間 (72.4)',
-      kind: 'note', resolved: true, source: 'monitor_agent', telegram_sent: false,
-    },
-    {
-      id: 'a4', time: '10:15:30', level: 'med', code: '2330', name: '台積電',
-      text: '成交量突破均量 1.8x',
-      kind: 'note', resolved: true, source: 'monitor_agent', telegram_sent: false,
-    },
-    {
-      id: 'a5', time: '09:45:12', level: 'high', code: '3008', name: '大立光',
-      text: '停損觸發，已執行平倉',
-      kind: 'stop_loss', resolved: true, source: 'executor', telegram_sent: true,
-    },
-    {
-      id: 'a6', time: '09:30:00', level: 'low', code: 'SYSTEM', name: '系統',
-      text: '開盤監控啟動，5 檔策略執行緒上線',
-      kind: 'note', resolved: true, source: 'system', telegram_sent: false,
-    },
-  ],
-  threads: [
-    {
-      code: '2330', name: '台積電', state: 'monitoring',
-      last_tick_at: '10:41:58', age_seconds: 5218,
-      target_price: 1010, stop_loss_price: 940,
-      distance_label: 'TP +3.59% / SL -3.59%',
-      poll_count: 312, alert_count: 2,
-    },
-    {
-      code: '2454', name: '聯發科', state: 'monitoring',
-      last_tick_at: '10:41:58', age_seconds: 4178,
-      target_price: 1260, stop_loss_price: 1170,
-      distance_label: 'TP +6.06% / SL -1.52%',
-      poll_count: 250, alert_count: 1,
-    },
-    {
-      code: '6505', name: '台塑化', state: 'monitoring',
-      last_tick_at: '10:41:58', age_seconds: 2218,
-      target_price: 87, stop_loss_price: 79,
-      distance_label: 'TP +2.96% / SL -6.51%',
-      poll_count: 132, alert_count: 0,
-    },
-    {
-      code: '3008', name: '大立光', state: 'closed_sl',
-      last_tick_at: '09:45:00', age_seconds: 2700,
-      target_price: 2800, stop_loss_price: 2680,
-      distance_label: '已停損出場',
-      poll_count: 178, alert_count: 3,
-    },
-    {
-      code: '2317', name: '鴻海', state: 'closed_tp',
-      last_tick_at: '09:55:00', age_seconds: 1500,
-      target_price: 185, stop_loss_price: 176,
-      distance_label: '已達停利出場',
-      poll_count: 90, alert_count: 1,
-    },
-  ],
-  risk: {
-    budget: 1200000, used: 836500, free: 363500,
-    utilization: 0.697,
-    intraday_pnl: 12340, intraday_pnl_pct: 0.0148,
-    daily_max_dd_limit: -60000,
-    sector_allocation: [
-      { name: '半導體', ratio: 0.58, limit: 0.50, value: 484850 },
-      { name: '石化',   ratio: 0.18, limit: 0.40, value: 150570 },
-      { name: '電子',   ratio: 0.14, limit: 0.40, value: 117110 },
-      { name: '金融',   ratio: 0.10, limit: 0.30, value: 83650  },
-    ],
-    blacklist: ['3231', '2498', '6669'],
-    single_max: { value: 484850, ratio: 0.58, limit: 0.50, ok: false },
-  },
-  next_poll_in_seconds: 8,
-};
 
 // ── Number formatters ───────────────────────────────────────────
 function fmtPrice(n: number) {
@@ -312,7 +182,7 @@ function PositionTable({
 // ── Main ────────────────────────────────────────────────────────
 export default function Cockpit() {
   const navigate = useNavigate();
-  const [liveData, setLiveData] = useState<DaytradeLive>(MOCK);
+  const [liveData, setLiveData] = useState<DaytradeLive | null>(null);
   const [showCloseAllModal, setShowCloseAllModal] = useState(false);
   const [closingAll, setClosingAll] = useState(false);
 
@@ -326,7 +196,7 @@ export default function Cockpit() {
 
   // Fetch initial data
   useEffect(() => {
-    api.getDaytradeLive().then(setLiveData).catch(() => {/* use mock */});
+    api.getDaytradeLive().then(setLiveData).catch(() => {});
   }, []);
 
   const handleCloseAll = useCallback(async () => {
@@ -340,6 +210,52 @@ export default function Cockpit() {
       setClosingAll(false);
     }
   }, []);
+
+  if (!liveData) {
+    return (
+      <AppChrome title="AI 當沖 · 駕駛艙" eyebrow="04.1">
+        {/* Sub-tabs */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          height: 38,
+          borderBottom: '1px solid var(--hair)',
+          background: 'var(--surface)',
+          padding: '0 14px',
+          gap: 0,
+          flexShrink: 0,
+        }}>
+          {SUBTABS.map((tab) => {
+            const active = tab.id === 'cockpit';
+            return (
+              <button
+                key={tab.id}
+                onClick={() => navigate(tab.path)}
+                style={{
+                  height: 38,
+                  padding: '0 14px',
+                  fontSize: 12,
+                  fontWeight: active ? 500 : 400,
+                  color: active ? 'var(--ink)' : 'var(--muted)',
+                  background: 'transparent',
+                  border: 'none',
+                  borderBottom: active ? '2px solid var(--ink)' : '2px solid transparent',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+          <div style={{ flex: 1 }} />
+        </div>
+
+        <EmptyHint text="尚無當沖即時資料，開盤時段才會有監控中的持倉" />
+      </AppChrome>
+    );
+  }
 
   const { countdown_seconds, monitoring_count, closed_count } = liveData;
   const slTriggered = liveData.alerts.filter((a) => a.kind === 'stop_loss').length;
