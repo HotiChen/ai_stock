@@ -4,6 +4,10 @@ import json
 import tempfile
 from datetime import date, datetime
 from pathlib import Path
+
+#: 專案根目錄。測試在臨時工作目錄執行（見 conftest._isolate_data_dir），
+#: 所以讀取 repo 內的檔案必須用絕對路徑，不能依賴 cwd。
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -455,6 +459,6 @@ class TestRequestsVerifyTrue:
     def test_no_verify_false_in_source(self):
         """靜態檢查：原始碼中不應出現 verify=False。"""
         from pathlib import Path
-        src = Path("morning_briefing.py").read_text(encoding="utf-8")
+        src = (_REPO_ROOT / "morning_briefing.py").read_text(encoding="utf-8")
         assert "verify=False" not in src, \
             "morning_briefing.py 仍含有 verify=False，請改為 verify=True"

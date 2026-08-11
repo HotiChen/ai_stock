@@ -81,6 +81,29 @@ sys.modules.setdefault("feedparser", MagicMock())
 
 
 @pytest.fixture(autouse=True)
+def _isolate_data_dir(tmp_path, monkeypatch):
+    """每個測試在自己的臨時工作目錄執行，避免寫進正式 data/。
+
+    十一個模組的預設路徑都是相對路徑（daytrading_db 的
+    ``_DEFAULT_PATH = "data/daytrading_review.db"``、main 的
+    ``DB_PATH``、adaptive_scorer 的 ``_REVIEW_DB_PATH`` 等）。測試若沒有顯式
+    覆寫，開檔時會以 repo 根目錄為基準解析，直接命中正式資料。
+
+    實際發生過兩次（2026-08-10）：
+      - data/research.db 的 daily_trades 11 筆全是測試 fixture，無一真實交易
+      - 跑完整套件後 data/daytrading_review.db 被自動套用了 schema 遷移
+
+    改變 cwd 而不是逐一 monkeypatch 那十一個常數，是因為前者對「之後新增的
+    模組」自動生效，不會有人忘記登記。相對路徑天然落在 tmp 內。
+
+    需要 repo 內檔案的測試請用絕對路徑（``Path(__file__).parent``），
+    不要依賴 cwd。
+    """
+    (tmp_path / "data").mkdir(exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_planset(monkeypatch):
     """預設讓 load_pending_planset 回傳 None，
     讓測試不依賴本機 data/pending_planset.json 檔案。

@@ -4,6 +4,10 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+
+#: 專案根目錄。測試在臨時工作目錄執行（見 conftest._isolate_data_dir），
+#: 所以讀取 repo 內的檔案必須用絕對路徑，不能依賴 cwd。
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -226,13 +230,13 @@ class TestBuildCandidates:
 class TestAppPyNoDuplicate:
     def test_app_py_uses_candidate_builder(self):
         """app.py 應 import candidate_builder，而不是自己實作完整 pipeline。"""
-        src = Path("app.py").read_text(encoding="utf-8")
+        src = (_REPO_ROOT / "app.py").read_text(encoding="utf-8")
         assert "candidate_builder" in src, \
             "app.py 未 import candidate_builder（_build_candidates 重複邏輯未移除）"
 
     def test_app_py_no_duplicated_chip_score_logic(self):
         """app.py 不應再自己含完整 chip_score 計算邏輯（已移到 candidate_builder）。"""
-        src = Path("app.py").read_text(encoding="utf-8")
+        src = (_REPO_ROOT / "app.py").read_text(encoding="utf-8")
         # candidate_builder.py 有一處 chip_score = 0.0，app.py 應只剩 0 或 1 處
         count = src.count("chip_score = 0")
         assert count == 0, \

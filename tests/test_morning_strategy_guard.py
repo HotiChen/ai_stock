@@ -33,7 +33,9 @@ def goal_dir(tmp_path, monkeypatch):
     """
     from strategy_tracker import StrategyGoal, save_goal
 
-    (tmp_path / "data").mkdir()
+    # conftest 的 _isolate_data_dir 已經建過 data/ 並 chdir 過來，
+    # 這裡只需確保存在即可。
+    (tmp_path / "data").mkdir(exist_ok=True)
     save_goal(
         StrategyGoal(
             target_multiplier=2.0,
