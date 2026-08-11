@@ -9,102 +9,12 @@ import Sparkline from '../components/Sparkline';
 import ConfidenceTick from '../components/ConfidenceTick';
 import AlertRow from '../components/AlertRow';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { api } from '../api';
-import type { DaytradeLive, TopNRun, Alert, Pick } from '../types';
+import { api, isMockData } from '../api';
+import type { DaytradeLive, TopNRun, Alert, Pick, PortfolioSummary } from '../types';
 
-// ─── Mock data ────────────────────────────────────────────────────────────────
-
-const MOCK_SPARK_PNL = [320, 580, 410, 760, 840, 720, 950, 1100, 1080, 1234];
-
-const MOCK_CHART_TAIEX: number[] = [
-  21050, 21080, 21120, 21090, 21140, 21180, 21220, 21200,
-  21235, 21210, 21240, 21230, 21250, 21235, 21240,
-];
-const MOCK_CHART_PORTFOLIO: number[] = [
-  100000, 100420, 100820, 100640, 101100, 101440, 101820, 101580,
-  102100, 101900, 102400, 102200, 102500, 102340, 102480,
-];
-
-const MOCK_PICKS: Pick[] = [
-  {
-    code: '2330', name: '台積電', sector: '半導體',
-    signal: 'buy', confidence: 0.86,
-    target_price: 1185, stop_loss_price: 1050, last_price: 1135, change_pct: 1.34,
-    spark: [1090, 1105, 1098, 1115, 1120, 1110, 1128, 1135],
-    reason: 'AI 訊號強力看多，外資連買三日', tags: ['黃金交叉', '量比 1.8x'],
-    action: 'approved', budget: 113500, budget_ratio: 0.15,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-  {
-    code: '2454', name: '聯發科', sector: '半導體',
-    signal: 'buy', confidence: 0.81,
-    target_price: 1350, stop_loss_price: 1200, last_price: 1270, change_pct: 0.95,
-    spark: [1240, 1248, 1255, 1250, 1260, 1265, 1268, 1270],
-    reason: 'KD 黃金交叉，MACD 翻正，外資買超', tags: ['KD 交叉', 'MACD 翻正'],
-    action: 'approved', budget: 101600, budget_ratio: 0.13,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-  {
-    code: '2382', name: '廣達', sector: 'AI 伺服器',
-    signal: 'buy', confidence: 0.78,
-    target_price: 320, stop_loss_price: 270, last_price: 295, change_pct: 2.07,
-    spark: [275, 280, 285, 278, 290, 288, 292, 295],
-    reason: 'AI 伺服器需求強勁，上升通道完整', tags: ['上升通道', 'AI 概念'],
-    action: 'pending', budget: 59000, budget_ratio: 0.08,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-  {
-    code: '2317', name: '鴻海', sector: '電子製造',
-    signal: 'buy', confidence: 0.72,
-    target_price: 230, stop_loss_price: 195, last_price: 210, change_pct: -0.47,
-    spark: [212, 210, 208, 211, 210, 209, 210, 210],
-    reason: '跌深反彈訊號，殖利率支撐', tags: ['殖利率支撐', 'RSI 超賣'],
-    action: 'observe', budget: 42000, budget_ratio: 0.06,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-  {
-    code: '2308', name: '台達電', sector: '電源管理',
-    signal: 'buy', confidence: 0.76,
-    target_price: 390, stop_loss_price: 340, last_price: 362, change_pct: 0.83,
-    spark: [355, 358, 356, 360, 362, 359, 361, 362],
-    reason: '電動車 + AI 電源雙驅動，量增有撐', tags: ['電動車', '量比 1.4x'],
-    action: 'approved', budget: 72400, budget_ratio: 0.10,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-];
-
-const MOCK_ALERTS: Alert[] = [
-  {
-    id: 'a1', time: '10:41:55', level: 'high',
-    code: '2330', name: '台積電', text: '接近目標價 1185，建議觀察出場時機',
-    kind: 'target_hit', resolved: false, source: 'monitor', telegram_sent: true,
-  },
-  {
-    id: 'a2', time: '10:38:12', level: 'med',
-    code: '2454', name: '聯發科', text: '成交量異常放大 2.1x，確認趨勢強度',
-    kind: 'note', resolved: false, source: 'monitor', telegram_sent: false,
-  },
-  {
-    id: 'a3', time: '10:25:30', level: 'high',
-    code: '2382', name: '廣達', text: '突破前高 292，AI 訊號轉強',
-    kind: 'stop_warn', resolved: false, source: 'ai', telegram_sent: true,
-  },
-  {
-    id: 'a4', time: '10:15:44', level: 'low',
-    code: '2317', name: '鴻海', text: 'RSI 回至 50，中性訊號，觀察',
-    kind: 'note', resolved: true, source: 'monitor', telegram_sent: false,
-  },
-  {
-    id: 'a5', time: '09:55:08', level: 'med',
-    code: '2308', name: '台達電', text: '跳空開盤，確認缺口支撐有效',
-    kind: 'note', resolved: false, source: 'ai', telegram_sent: false,
-  },
-  {
-    id: 'a6', time: '09:32:20', level: 'high',
-    code: '2330', name: '台積電', text: '開盤強勢突破，AI 信心升至 0.88',
-    kind: 'tp', resolved: true, source: 'ai', telegram_sent: true,
-  },
-];
+// 本頁一律使用真實 API 資料。先前這裡有一整組 MOCK_* 常數，會在沒有資料時
+// 靜默頂替，導致畫面出現看似真實的假推薦與假資金曲線——已全部移除。
+// 沒有資料時請顯示空狀態（見 EmptyHint），不要編造。
 
 // ─── ChartData types ──────────────────────────────────────────────────────────
 
@@ -358,6 +268,7 @@ export default function Dashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1D');
   const [topN, setTopN] = useState<TopNRun | null>(null);
   const [topNLoading, setTopNLoading] = useState(true);
+  const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null);
   const [blinkArmed, setBlinkArmed] = useState(true);
   const [now, setNow] = useState(new Date());
 
@@ -385,43 +296,61 @@ export default function Dashboard() {
       .finally(() => setTopNLoading(false));
   }, []);
 
-  const picks: Pick[] = topN?.picks?.slice(0, 5) ?? MOCK_PICKS;
-  const alerts: Alert[] = liveData?.alerts?.slice(0, 6) ?? MOCK_ALERTS;
+  // 投組彙總：提供資金曲線、近日損益 sparkline，以及盤後的 KPI 來源
+  useEffect(() => {
+    api.getPortfolio()
+      .then(setPortfolio)
+      .catch(() => setPortfolio(null));
+  }, []);
 
-  // KPI data from live or mock
-  const pnl = liveData?.net_pnl ?? 12340;
-  const pnlPct = liveData
-    ? liveData.net_pnl / (liveData.risk?.budget ?? 1200000) * 100
-    : 0.74;
-  const freeCash = liveData?.risk?.free ?? 363600;
-  const budget = liveData?.risk?.budget ?? 1200000;
-  const cashRatioPct = (freeCash / budget * 100).toFixed(1);
-  const tradeCount = liveData ? liveData.positions.length + liveData.closed_count : 8;
-  const buySide = liveData?.positions?.filter(p => p.side === 'buy').length ?? 6;
-  const sellSide = liveData?.positions?.filter(p => p.side === 'sell').length ?? 2;
+  // 一律以真實資料為準；沒有資料就呈現空狀態。
+  //
+  // 這裡**刻意不**退回 MOCK_PICKS／MOCK_ALERTS。這是一個下單系統，畫面上出現
+  // 「2330 台積電 買進 信心 0.82」而實際上沒有任何預測，比顯示一片空白危險得多
+  // ——使用者可能照著假訊號操作。同理，下方 KPI 的預設值一律用 0 而不是
+  // 12340／363600／1200000 這類看起來像真的的數字。
+  // 後端查不到真實資料時會回示範資料（X-Data-Source: mock）。那批推薦是寫死的
+  // 2330／2454／2382，但會被 Shioaji 的真實報價填充，看起來與真訊號無異。
+  // 一律當成「沒有資料」處理。
+  const topNIsMock = isMockData(topN);
+  const picks: Pick[] = topNIsMock ? [] : (topN?.picks?.slice(0, 5) ?? []);
+  const alerts: Alert[] = liveData?.alerts?.slice(0, 6) ?? [];
+  const hasPicks = picks.length > 0;
 
-  const avgConfidence = picks.length > 0
+  // KPI：優先用 daytrade/live（盤中即時），退而求其次用 portfolio（收盤後彙總）
+  const pnl = liveData?.net_pnl ?? portfolio?.net_pnl ?? 0;
+  const budget = liveData?.risk?.budget ?? portfolio?.budget ?? 0;
+  const pnlPct = budget > 0 ? (pnl / budget) * 100 : 0;
+  const freeCash = liveData?.risk?.free ?? portfolio?.free_cash ?? 0;
+  const cashRatioPct = budget > 0 ? ((freeCash / budget) * 100).toFixed(1) : '0.0';
+  const tradeCount = liveData
+    ? liveData.positions.length + liveData.closed_count
+    : (portfolio ? portfolio.position_count + portfolio.closed_today : 0);
+  const buySide = liveData?.positions?.filter(p => p.side === 'buy').length ?? 0;
+  const sellSide = liveData?.positions?.filter(p => p.side === 'sell').length ?? 0;
+
+  // 沒有 picks 就沒有信心均值可言——回 null，由 UI 顯示「—」而不是編一個 0.74
+  const avgConfidence = hasPicks
     ? picks.reduce((acc, p) => acc + p.confidence, 0) / picks.length
-    : 0.74;
+    : null;
   const highConfCount = picks.filter(p => p.confidence >= 0.75).length;
 
   const countdownSec = liveData?.countdown_seconds ?? getSecondsToForceClose(now);
   const countdownStr = formatCountdownHMS(countdownSec);
   const isArmed = countdownSec > 0 && countdownSec < 7200; // within 2 hours
 
-  // Chart data
+  // 圖表：portfolio.cumulative_vs_index 是後端算好的「投組淨值 vs 大盤」序列
+  const cumulative = portfolio?.cumulative_vs_index;
+  const hasChart = !!cumulative && cumulative.dates.length > 0;
   const chartData: ChartData = {
-    taiex: MOCK_CHART_TAIEX,
-    portfolio: MOCK_CHART_PORTFOLIO,
-    labels: generateMockLabels(timeRange),
-    markers: [
-      { index: 2, kind: 'B' },
-      { index: 8, kind: 'TP' },
-    ],
+    taiex: cumulative?.index ?? [],
+    portfolio: cumulative?.me ?? [],
+    labels: cumulative?.dates ?? [],
+    markers: [],
   };
 
-  // KPI sparkline
-  const kpiSpark = MOCK_SPARK_PNL;
+  // KPI sparkline：近幾日損益
+  const kpiSpark = portfolio?.recent_pnl_days?.map(d => d.pnl) ?? [];
 
   return (
     <AppChrome title="Dashboard 總覽" eyebrow="02">
@@ -492,10 +421,10 @@ export default function Dashboard() {
               label="AI 信心均值"
               value={
                 <span style={{ fontFamily: 'var(--font-mono)', fontFeatureSettings: '"tnum" 1' }}>
-                  {avgConfidence.toFixed(2)}
+                  {avgConfidence === null ? '—' : avgConfidence.toFixed(2)}
                 </span>
               }
-              sub={`≥ 0.75 共 ${highConfCount} 檔`}
+              sub={hasPicks ? `≥ 0.75 共 ${highConfCount} 檔` : '今日尚無預測'}
             />
           </div>
 
@@ -600,7 +529,9 @@ export default function Dashboard() {
               padding: '12px 8px 8px',
               overflow: 'hidden',
             }}>
-              <DashChart data={chartData} />
+              {hasChart
+                ? <DashChart data={chartData} />
+                : <EmptyHint text="尚無淨值資料，累積交易後顯示" />}
             </div>
           </div>
 
@@ -659,6 +590,10 @@ export default function Dashboard() {
                 ? Array.from({ length: 5 }).map((_, i) => (
                     <SkeletonRow key={i} />
                   ))
+                : !hasPicks
+                ? <EmptyHint text={topNIsMock
+                    ? '後端回傳示範資料，已隱藏。資料庫尚無今日預測'
+                    : '今日尚無預測，08:30 盤前分析後產生'} />
                 : picks.map((pick, idx) => (
                     <PickRow
                       key={pick.code}
@@ -830,6 +765,33 @@ function SkeletonRow() {
           }}
         />
       ))}
+    </div>
+  );
+}
+
+/**
+ * 空狀態提示。
+ *
+ * 存在的理由：這是一個下單系統。先前 picks/alerts 在沒有資料時會靜默退回
+ * MOCK 常數，畫面照樣列出「2330 台積電 信心 0.82」，但那是寫死的示範資料，
+ * 不是任何一次真實預測。使用者無從分辨，可能照著假訊號操作。
+ * 寧可明確顯示「今日尚無預測」，也不要用看起來合理的假資料填滿版面。
+ */
+function EmptyHint({ text }: { text: string }) {
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      height: '100%',
+      minHeight: 80,
+      padding: '20px 12px',
+      color: 'var(--ink-3, #888)',
+      fontSize: 12,
+      letterSpacing: '0.02em',
+      textAlign: 'center',
+    }}>
+      {text}
     </div>
   );
 }

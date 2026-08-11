@@ -16,6 +16,7 @@ import type {
   BacktestParams,
   WeeklyReport,
   MarketScan,
+  MarketSnapshot,
 } from '../types';
 
 const BASE = '/api';
@@ -37,7 +38,22 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
     throw new Error('Unauthorized');
   }
   if (!res.ok) throw new Error(await res.text());
-  return res.json() as Promise<T>;
+
+  // 後端在資料庫查不到真實資料時，會回傳寫死的示範資料並標記
+  // X-Data-Source: mock（見 backend/app/routers/predict.py、dashboard.py）。
+  // 這在下單系統裡必須讓使用者看得見——否則畫面會出現「2330 台積電 信心 0.86」
+  // 這種完全捏造、卻又被 Shioaji 真實報價填充過的推薦，無從分辨真假。
+  // 把標記掛在回傳物件上（不可列舉，不影響既有欄位與 JSON 序列化）。
+  const data = await res.json();
+  if (res.headers.get('X-Data-Source') === 'mock' && data && typeof data === 'object') {
+    Object.defineProperty(data, '__isMock', { value: true, enumerable: false });
+  }
+  return data as T;
+}
+
+/** 這份資料是後端的示範資料，不是真實紀錄。 */
+export function isMockData(data: unknown): boolean {
+  return !!data && typeof data === 'object' && (data as { __isMock?: boolean }).__isMock === true;
 }
 
 export const api = {
@@ -114,6 +130,9 @@ export const api = {
 
   // Portfolio
   getPortfolio: () => apiFetch<PortfolioSummary>('/portfolio'),
+
+  // Market — 大盤 / 櫃買 / 匯率即時快照（Dashboard 底部狀態列與圖表基準線）
+  getMarketSnapshot: () => apiFetch<MarketSnapshot>('/market/snapshot'),
 
   // Journal
   getJournal: () => apiFetch<JournalEntry[]>('/journal'),
