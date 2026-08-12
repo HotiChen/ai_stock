@@ -72,16 +72,30 @@ def _fetch_chip_data(today_str: str) -> dict:
 
 
 def _fetch_market() -> dict:
-    """抓大盤漲跌幅 + 台指期溢貼水，失敗各自回 0.0。"""
-    result: dict = {"index_change_pct": 0.0, "futures_premium_pct": 0.0}
+    """抓大盤漲跌幅 + 台指期溢貼水。
+
+    ``index_change_pct`` 取不到時為 ``None``（不是 0.0），並以
+    ``index_available=False`` 標示。呼叫端與 prompt 必須把「不知道大盤怎麼走」
+    和「大盤收平盤」分開處理：2026-08-12 就是因為 yfinance 失敗回 0.0，
+    AI 讀成「大盤零漲跌、無氣氛」而把當日 8 檔候選全部放棄，
+    當天大盤其實漲 0.63%。
+    """
+    result: dict = {
+        "index_change_pct": None,
+        "futures_premium_pct": 0.0,
+        "index_available": False,
+    }
     try:
-        from market_index import fetch_market_index_change
-        pct = fetch_market_index_change()
-        if pct == 0.0:
-            log.warning("fetch_market_index_change returned 0.0，大盤方向加權暫停")
-        result["index_change_pct"] = pct
+        from market_index import fetch_market_index_pct
+        pct = fetch_market_index_pct()
+        if pct is None:
+            log.warning("大盤指數取不到（Shioaji 與 yfinance 皆失敗）——"
+                        "將明確標示為『資料不可用』，不以 0%% 代替")
+        else:
+            result["index_change_pct"] = pct
+            result["index_available"] = True
     except Exception as e:
-        log.warning("fetch_market_index_change failed: %s", e)
+        log.warning("fetch_market_index_pct failed: %s", e)
     try:
         from futures_premium import fetch_futures_premium
         fp = fetch_futures_premium()
@@ -92,7 +106,11 @@ def _fetch_market() -> dict:
     return result
 
 
-def _market_label(pct: float) -> str:
+def _market_label(pct: float | None) -> str:
+    # None = 取不到資料。不可顯示成「平盤」——推播上看到「📊 +0.00%（平盤）」
+    # 會讓人以為今天大盤真的沒動。
+    if pct is None:
+        return "⚠️ 資料無法取得"
     if pct <= -1.0:
         return f"📉 {pct:.2f}%（大跌，慎！）"
     if pct <= -0.3:

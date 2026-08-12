@@ -81,11 +81,14 @@ def build_daytrading_prompt(
         chip_text = "籌碼資料無法取得"
 
     # ── 大盤 ──
-    if market:
-        idx_pct = market.get("index_change_pct", 0.0)
-        market_text = f"大盤漲跌 {idx_pct:+.2f}%"
+    # index_change_pct 可能是 None（取不到資料），這與「大盤收平盤」必須分開講。
+    # 對 LLM 說「大盤漲跌 +0.00%」，它會推論成「今天沒方向、不要進場」；
+    # 說「取不到」，它才知道這是缺資料而不是盤勢訊號。
+    idx_pct = market.get("index_change_pct") if market else None
+    if idx_pct is None:
+        market_text = "大盤資料無法取得（請勿把這當成大盤持平或無方向）"
     else:
-        market_text = "大盤資料無法取得"
+        market_text = f"大盤漲跌 {idx_pct:+.2f}%"
 
     try:
         from super_trader import get_persona
@@ -323,8 +326,17 @@ def build_opening_reconfirm_prompt(
     volume: int,
     market: dict,
 ) -> str:
-    idx_pct = market.get("index_change_pct", 0.0)
+    idx_pct = market.get("index_change_pct")
     fp_pct  = market.get("futures_premium_pct", 0.0)
+
+    # 取不到大盤時明講。9:05 這支 prompt 的任務就是「結合大盤氣氛判斷是否進場」，
+    # 餵 +0.00% 進去等於告訴 AI「大盤毫無動靜」，它會據此放棄所有候選——
+    # 2026-08-12 當天 8 檔全滅就是這樣來的。
+    index_line = (
+        "加權指數 資料無法取得（不代表平盤，請改以個股本身的量價表現判斷）"
+        if idx_pct is None
+        else f"加權指數 {idx_pct:+.2f}%"
+    )
 
     entry_str  = f"{entry_low:,.1f}–{entry_high:,.1f}" if entry_low and entry_high else "未設定"
     target_str = f"{target_price:,.1f}" if target_price else "未設定"
@@ -352,7 +364,7 @@ AI 結論：{ai_summary or "無"}
 開盤漲跌 {change_price:+.2f} 元　成交量 {volume} 張
 
 【大盤氣氛】
-加權指數 {idx_pct:+.2f}%　台指期溢貼水 {fp_pct:+.2f}%
+{index_line}　台指期溢貼水 {fp_pct:+.2f}%
 
 請綜合判斷：
 1. 現價是否仍在合理進場位置

@@ -55,7 +55,11 @@ print("【大盤 / 台指期資料】")
 def _market():
     from daytrading_report import _fetch_market
     m = _fetch_market()
-    return f"指數 {m.get('index_change_pct', 'N/A'):+.2f}%  期溢貼水 {m.get('futures_premium_pct', 'N/A'):+.2f}%"
+    _i = m.get("index_change_pct")
+    _f = m.get("futures_premium_pct")
+    _is = "資料無法取得" if _i is None else f"{_i:+.2f}%"
+    _fs = "N/A" if _f is None else f"{_f:+.2f}%"
+    return f"指數 {_is}  期溢貼水 {_fs}"
 check("fetch_market", _market)
 
 # 5. DT positions 狀態

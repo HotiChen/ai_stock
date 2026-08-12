@@ -249,8 +249,9 @@ def _assess_day_trading(
             score -= 1
 
     # ── 大盤方向加權 ─────────────────────────────────────────────
-    if market is not None:
-        index_pct = market.get("index_change_pct", 0.0)
+    # 取不到大盤時完全不做方向加權（而不是當成 0% 走「平盤」那條路）
+    index_pct = market.get("index_change_pct") if market is not None else None
+    if index_pct is not None:
         if index_pct <= -1.0:
             reasons_bad.append(f"大盤大跌 {index_pct:.2f}%，當沖風險高")
             score -= 2

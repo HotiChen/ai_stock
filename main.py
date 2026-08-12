@@ -1070,10 +1070,12 @@ def _opening_confirm_dt_positions(
     # 大盤氣氛（一次抓，所有股票共用）
     from daytrading_report import _fetch_market
     market = _fetch_market()
+    # index 可能是 None（取不到）——不可印成 +0.00%，那會讓人以為大盤真的平盤
+    _idx = market.get("index_change_pct")
     log.info(
-        "DT 9:05 大盤：index=%+.2f%% futures=%+.2f%%",
-        market.get("index_change_pct", 0),
-        market.get("futures_premium_pct", 0),
+        "DT 9:05 大盤：index=%s futures=%+.2f%%",
+        "資料無法取得" if _idx is None else f"{_idx:+.2f}%",
+        market.get("futures_premium_pct", 0) or 0,
     )
 
     confirmed: list = []
@@ -1174,9 +1176,10 @@ def _opening_confirm_dt_positions(
 
     try:
         from telegram_bot import send_text
-        idx_pct = market.get("index_change_pct", 0.0)
-        fp_pct  = market.get("futures_premium_pct", 0.0)
-        idx_arrow = "📈" if idx_pct > 0 else ("📉" if idx_pct < 0 else "📊")
+        idx_pct = market.get("index_change_pct")
+        fp_pct  = market.get("futures_premium_pct", 0.0) or 0.0
+        idx_arrow = "⚠️" if idx_pct is None else (
+            "📈" if idx_pct > 0 else ("📉" if idx_pct < 0 else "📊"))
 
         lines = [
             "⚡ <b>當沖開盤確認 09:05</b>",
