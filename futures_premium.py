@@ -78,15 +78,34 @@ def fetch_spot_index(api=None) -> Optional[float]:
     return None
 
 
+def _near_month_txf(api):
+    """取台指期近月合約物件。
+
+    ``api.Contracts.Futures.TXF`` 是**合約集合**（StreamMultiContract），底下才是
+    TXFR1／TXFR2／TXF202608… 等真正的合約。原本直接把集合丟進 ``snapshots()``，
+    永遠取不到報價，於是溢貼水一路是 None，最後在 _fetch_market 被寫成 0.0。
+
+    優先 ``TXFR1``（近月連續，不必自己算轉倉）；模擬環境偶爾沒有這個別名，
+    退而取代碼最小的月份合約（即最近到期的那個）。
+    """
+    txf = api.Contracts.Futures.TXF
+    r1 = getattr(txf, "TXFR1", None)
+    if r1 is not None:
+        return r1
+    months = sorted(c for c in dir(txf) if c.startswith("TXF2"))
+    return getattr(txf, months[0]) if months else None
+
+
 def fetch_futures_price(api=None) -> Optional[float]:
     """取台指期近月成交價：Shioaji → TWSE MIS API → None。"""
     # 1. Shioaji TXF 快照
     if api is not None:
         try:
-            contract = api.Contracts.Futures.TXF
-            snaps = api.snapshots([contract])
-            if snaps:
-                return round(float(snaps[0].close), 2)
+            contract = _near_month_txf(api)
+            if contract is not None:
+                snaps = api.snapshots([contract])
+                if snaps:
+                    return round(float(snaps[0].close), 2)
         except Exception as e:
             log.debug("Shioaji futures price failed: %s", e)
 

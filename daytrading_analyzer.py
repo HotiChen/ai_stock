@@ -327,15 +327,20 @@ def build_opening_reconfirm_prompt(
     market: dict,
 ) -> str:
     idx_pct = market.get("index_change_pct")
-    fp_pct  = market.get("futures_premium_pct", 0.0)
+    fp_pct  = market.get("futures_premium_pct")
 
     # 取不到大盤時明講。9:05 這支 prompt 的任務就是「結合大盤氣氛判斷是否進場」，
     # 餵 +0.00% 進去等於告訴 AI「大盤毫無動靜」，它會據此放棄所有候選——
-    # 2026-08-12 當天 8 檔全滅就是這樣來的。
+    # 2026-08-12 當天 8 檔全滅就是這樣來的。期貨溢貼水同理。
     index_line = (
         "加權指數 資料無法取得（不代表平盤，請改以個股本身的量價表現判斷）"
         if idx_pct is None
         else f"加權指數 {idx_pct:+.2f}%"
+    )
+    futures_line = (
+        "台指期溢貼水 資料無法取得"
+        if fp_pct is None
+        else f"台指期溢貼水 {fp_pct:+.2f}%"
     )
 
     entry_str  = f"{entry_low:,.1f}–{entry_high:,.1f}" if entry_low and entry_high else "未設定"
@@ -364,7 +369,7 @@ AI 結論：{ai_summary or "無"}
 開盤漲跌 {change_price:+.2f} 元　成交量 {volume} 張
 
 【大盤氣氛】
-{index_line}　台指期溢貼水 {fp_pct:+.2f}%
+{index_line}　{futures_line}
 
 請綜合判斷：
 1. 現價是否仍在合理進場位置

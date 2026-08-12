@@ -284,9 +284,19 @@ class TestFetchMarketIncludesFutures:
             result = _fetch_market()
         assert result["futures_premium_pct"] == pytest.approx(0.25)
 
-    def test_futures_failure_defaults_to_zero(self):
+    def test_futures_failure_is_reported_as_unavailable(self):
+        """取不到期貨時要回 None 並標示不可用，不再退回 0.0。
+
+        原本這個測試斷言 ``== 0.0``，把「資料取不到」與「溢貼水剛好是平水」
+        壓成同一個值。2026-08-12 證實這種表示法會誤導 LLM：當天大盤與期貨
+        都因為抓不到而顯示 +0.00%，AI 判定「大盤零漲跌無氣氛」，把 8 檔當沖
+        候選全部放棄，而當天大盤實際上漲 0.63%。
+
+        契約已刻意變更，斷言隨之更新——不是為了讓測試通過而放寬。
+        """
         from daytrading_report import _fetch_market
-        with patch("market_index.fetch_market_index_change", return_value=0.3), \
+        with patch("market_index.fetch_market_index_pct", return_value=0.3), \
              patch("futures_premium.fetch_futures_premium", return_value=None):
             result = _fetch_market()
-        assert result["futures_premium_pct"] == 0.0
+        assert result["futures_premium_pct"] is None
+        assert result["futures_available"] is False

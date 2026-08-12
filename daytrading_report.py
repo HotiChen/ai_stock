@@ -82,8 +82,9 @@ def _fetch_market() -> dict:
     """
     result: dict = {
         "index_change_pct": None,
-        "futures_premium_pct": 0.0,
+        "futures_premium_pct": None,
         "index_available": False,
+        "futures_available": False,
     }
     try:
         from market_index import fetch_market_index_pct
@@ -99,8 +100,11 @@ def _fetch_market() -> dict:
     try:
         from futures_premium import fetch_futures_premium
         fp = fetch_futures_premium()
-        if fp is not None:
+        if fp is None:
+            log.warning("台指期溢貼水取不到——標示為『資料不可用』，不以 0%% 代替")
+        else:
             result["futures_premium_pct"] = fp.premium_pct
+            result["futures_available"] = True
     except Exception as e:
         log.debug("fetch_futures_premium failed: %s", e)
     return result

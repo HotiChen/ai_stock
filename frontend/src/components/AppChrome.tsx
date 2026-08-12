@@ -402,31 +402,22 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
         color: 'var(--muted)',
         overflow: 'hidden',
       }}>
-        {taiex ? (
-          <StatusBarItem
-            label="加權"
-            value={fmtIdx(taiex.value, taiex.change_pct)}
-            color={taiex.change_pct >= 0 ? 'var(--up)' : 'var(--down)'}
-          />
-        ) : (
-          <StatusBarItem label="加權" value="21,234.5 +0.42%" />
-        )}
+        {/* 取不到報價時顯示「—」。先前這裡在無資料時填死值（加權 21,234.5、
+            OTC 312.4、USD/TWD 31.85），與真實指數差了一倍以上而且從不更新，
+            看起來卻像即時報價。狀態列一律：有資料才顯示數字。 */}
+        <StatusBarItem
+          label="加權"
+          value={taiex ? fmtIdx(taiex.value, taiex.change_pct) : '—'}
+          color={taiex ? (taiex.change_pct >= 0 ? 'var(--up)' : 'var(--down)') : undefined}
+        />
         <StatusBarSep />
-        {otc ? (
-          <StatusBarItem
-            label="OTC"
-            value={fmtIdx(otc.value, otc.change_pct)}
-            color={otc.change_pct >= 0 ? 'var(--up)' : 'var(--down)'}
-          />
-        ) : (
-          <StatusBarItem label="OTC" value="312.4 -0.12%" color="var(--down)" />
-        )}
+        <StatusBarItem
+          label="OTC"
+          value={otc ? fmtIdx(otc.value, otc.change_pct) : '—'}
+          color={otc ? (otc.change_pct >= 0 ? 'var(--up)' : 'var(--down)') : undefined}
+        />
         <StatusBarSep />
-        {usd ? (
-          <StatusBarItem label="USD/TWD" value={usd.value.toFixed(2)} />
-        ) : (
-          <StatusBarItem label="USD/TWD" value="31.85" />
-        )}
+        <StatusBarItem label="USD/TWD" value={usd ? usd.value.toFixed(2) : '—'} />
         <div style={{ flex: 1 }} />
         <StatusBarItem
           label="API"
