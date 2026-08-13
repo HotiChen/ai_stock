@@ -263,13 +263,18 @@ def _assess_day_trading(
             score += 1
 
         # ── 台指期溢貼水 ─────────────────────────────────────────
-        futures_pct = market.get("futures_premium_pct", 0.0)
-        if futures_pct >= 0.3:
-            reasons_good.append(f"台指期溢價 +{futures_pct:.2f}%，期市偏多")
-            score += 1
-        elif futures_pct <= -0.3:
-            reasons_bad.append(f"台指期貼水 {futures_pct:.2f}%，期市偏空")
-            score -= 1
+        # 注意：dict.get(key, default) 的 default 只在 key 不存在時生效。
+        # futures_premium_pct 現在會以 None 表示「取不到」，key 是存在的，
+        # 所以 .get(..., 0.0) 拿到的是 None——2026-08-13 當沖報告就是在這裡
+        # 以 None >= 0.3 炸掉，整天沒有推播也沒有候選。
+        futures_pct = market.get("futures_premium_pct")
+        if futures_pct is not None:
+            if futures_pct >= 0.3:
+                reasons_good.append(f"台指期溢價 +{futures_pct:.2f}%，期市偏多")
+                score += 1
+            elif futures_pct <= -0.3:
+                reasons_bad.append(f"台指期貼水 {futures_pct:.2f}%，期市偏空")
+                score -= 1
 
     # ── 硬性否決條件 ─────────────────────────────────────────────
     # 量比嚴重不足時，直接否決（不論其他指標）
