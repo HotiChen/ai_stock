@@ -3,10 +3,24 @@ tests/conftest.py — 測試基礎設施（全域 fixtures）
 """
 import os
 import sys
+import tempfile
 import types
 from unittest.mock import MagicMock
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# 日誌隔離：必須在**任何專案模組被 import 之前**設定。
+# logger.get_logger() 會在 logger 已有 handler 時直接回傳既有實例，而多數模組
+# 在 import 當下就建立 logger——等到 autouse fixture 執行才設環境變數已經太遲，
+# handler 早就綁在正式的 logs/ai_stock.log 上。
+# 不隔離的後果：測試把 fixture 的例外訊息（"boom" 等）寫進正式 log，其中
+# 「PostMarketJob 失敗」這類字樣會讓 health_check 誤判系統故障並發出假告警。
+# ---------------------------------------------------------------------------
+os.environ.setdefault(
+    "AI_STOCK_LOG_DIR",
+    os.path.join(tempfile.gettempdir(), "ai_stock_test_logs"),
+)
 
 # ---------------------------------------------------------------------------
 # 測試隔離：中和外部服務憑證，讓測試在「有 .env 的開發機」上也不會連到真實的
@@ -101,6 +115,12 @@ def _isolate_data_dir(tmp_path, monkeypatch):
     """
     (tmp_path / "data").mkdir(exist_ok=True)
     monkeypatch.chdir(tmp_path)
+
+    # logger 的 _LOG_DIR 是以 __file__ 為基準的絕對路徑，chdir 導不走。
+    # 不隔離的話測試會把 fixture 例外訊息（"boom" 等）寫進正式的
+    # logs/ai_stock.log，而那個檔案是 health_check 判斷系統健康的依據——
+    # 假的「PostMarketJob 失敗」會直接變成誤報告警。
+    monkeypatch.setenv("AI_STOCK_LOG_DIR", str(tmp_path / "logs"))
 
 
 @pytest.fixture(autouse=True)
