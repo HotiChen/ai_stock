@@ -61,14 +61,57 @@ _MAX_CHIP_PICKS = 10   # 查連續買超天數的上限，避免 TWSE rate limit
 _MIN_DT_SCORE   = 4    # 進入 qualified 的最低技術評分門檻
 
 
+#: 籌碼資料最多往前找幾個日曆日。涵蓋連假（最長約 4 天）即可；
+#: 再舊的法人動向對當沖沒有參考價值，硬湊比誠實回空更糟。
+_CHIP_LOOKBACK_DAYS = 5
+
+
 def _fetch_chip_data(today_str: str) -> dict:
-    """抓今日全市場三大法人資料，失敗回空 dict。"""
+    """抓全市場三大法人資料；當日沒有就退回最近一個有資料的交易日。
+
+    證交所的買賣超是**收盤後**才發布，所以 08:30 盤前抓當日必然是空的——
+    這是資料的本質，不是故障。先前只抓當日、抓不到就回空 dict，導致每一檔的
+    chip 都是 None，AI 讀到「籌碼資料無法取得」便觸發鐵律而保守跳過：
+
+        盤前已明確指出籌碼盲區無法確認主力意圖
+        盤前明確指出缺少法人籌碼資料不敢進場
+
+    盤前唯一可得且確實有參考價值的，就是前一交易日的法人動向；「外資連買
+    幾日」這類訊號本來就是看歷史。退回昨日遠勝於告訴 AI「什麼都沒有」。
+
+    週末與連假不需特別處理：非交易日本來就查無資料，往前找自然會跳過。
+    """
+    from datetime import datetime, timedelta
+
     try:
         from chip_data import fetch_institutional_investors
-        return fetch_institutional_investors(today_str)
     except Exception as e:
-        log.warning("fetch_institutional_investors failed: %s", e)
+        log.warning("chip_data 匯入失敗：%s", e)
         return {}
+
+    try:
+        cursor = datetime.strptime(today_str, "%Y%m%d")
+    except ValueError:
+        log.warning("_fetch_chip_data: 日期格式無法解析 %s", today_str)
+        return {}
+
+    for offset in range(_CHIP_LOOKBACK_DAYS + 1):
+        day = (cursor - timedelta(days=offset)).strftime("%Y%m%d")
+        try:
+            data = fetch_institutional_investors(day)
+        except Exception as e:
+            log.warning("fetch_institutional_investors(%s) failed: %s", day, e)
+            return {}
+        if data:
+            if offset:
+                # 記下實際採用的日期：事後要判斷 AI 當時看到什麼，這是唯一線索
+                log.info("籌碼資料採用 %s（當日 %s 尚未發布，回溯 %d 天）",
+                         day, today_str, offset)
+            return data
+
+    log.warning("籌碼資料回溯 %d 天仍無資料（起點 %s）",
+                _CHIP_LOOKBACK_DAYS, today_str)
+    return {}
 
 
 def _fetch_market() -> dict:
