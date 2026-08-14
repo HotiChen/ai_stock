@@ -9,14 +9,14 @@ daytrading_report.py — 今日當沖預測報告
 """
 from __future__ import annotations
 
-import logging
 from datetime import date, datetime
 from typing import Optional
 
 import dt_rules
 from daytrading_analyzer import DayTradingAnalysis, _calc_prices_from_atr, run_daytrading_analysis
 
-log = logging.getLogger(__name__)
+from logger import get_logger  # 訊息需寫進 logs/ai_stock.log
+log = get_logger("daytrading_report")
 
 DB_PATH = "data/learning.db"
 

@@ -9,13 +9,17 @@
 """
 from __future__ import annotations
 
-import logging
 import os
 from typing import Optional
 
 import yfinance as yf
 
-log = logging.getLogger(__name__)
+from logger import get_logger
+
+# 用專案 logger 而非 logging.getLogger：後者不會寫進 logs/ai_stock.log，
+# 2026-08-14 排查「大盤為何取不到」時，昨天特地加的診斷訊息完全找不到，
+# 只能靠猜。診斷訊息看不到，等於沒有加。
+log = get_logger("market_index")
 
 _TWII = "^TWII"
 
@@ -23,33 +27,42 @@ _TWII = "^TWII"
 _TSE_INDEX_CODE = "001"
 
 _index_api = None
-_index_api_tried = False
+
+
+def _build_index_api():
+    """實際建立一條 Shioaji 連線。抽出來是為了可測試地注入失敗。"""
+    import shioaji as sj
+
+    api = sj.Shioaji(
+        simulation=os.getenv("SHIOAJI_SIMULATION", "true").lower() == "true"
+    )
+    api.login(
+        os.getenv("SHIOAJI_API_KEY", ""),
+        os.getenv("SHIOAJI_SECRET_KEY", ""),
+    )
+    return api
 
 
 def _get_index_api():
     """取得（或建立）供查指數用的 Shioaji 連線。
 
     自己維護 singleton 而不是共用 telegram_bot 的那個，是因為 telegram_bot
-    已經 import 本模組，反向 import 會造成循環相依。登入失敗只記一次
-    warning 就放棄，之後直接回 None，不重試——盤中每分鐘重登會拖慢流程。
-    """
-    global _index_api, _index_api_tried
-    if _index_api is not None or _index_api_tried:
-        return _index_api
-    _index_api_tried = True
-    try:
-        import shioaji as sj
+    已經 import 本模組，反向 import 會造成循環相依。
 
-        api = sj.Shioaji(
-            simulation=os.getenv("SHIOAJI_SIMULATION", "true").lower() == "true"
-        )
-        api.login(
-            os.getenv("SHIOAJI_API_KEY", ""),
-            os.getenv("SHIOAJI_SECRET_KEY", ""),
-        )
-        _index_api = api
+    **失敗不快取。** 先前用一個 _index_api_tried 旗標做「試一次就永久放棄」，
+    理由是怕盤中反覆重登拖慢流程。代價是：main.py 從 08:25 就常駐，只要開盤前
+    某一次登入撞上 Shioaji 尚未就緒（多個 session 同時登入時很常見），
+    這個 process 接下來**整天**都拿不到大盤——2026-08-14 全部 25 檔
+    action=skip、AI 理由寫「大盤方向未知」，就是這樣來的。
+    成功後才快取連線，失敗則下次呼叫再試。
+    """
+    global _index_api
+    if _index_api is not None:
+        return _index_api
+    try:
+        _index_api = _build_index_api()
     except Exception as e:
-        log.warning("指數用 Shioaji 連線建立失敗，改用 yfinance：%s", e)
+        log.warning("指數用 Shioaji 連線建立失敗（下次呼叫會重試），改用 yfinance：%s", e)
         _index_api = None
     return _index_api
 

@@ -7,10 +7,10 @@ stock_query.py — Telegram 查股功能主模組
 from __future__ import annotations
 
 import re
-import logging
 from typing import Optional
 
-log = logging.getLogger(__name__)
+from logger import get_logger  # 訊息需寫進 logs/ai_stock.log
+log = get_logger("stock_query")
 
 
 # ---------------------------------------------------------------------------

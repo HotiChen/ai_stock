@@ -8,14 +8,14 @@ daytrading_analyzer.py — 當沖專屬 AI 分析器
 from __future__ import annotations
 
 import json
-import logging
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 
 from ai_client import call_haiku
 
-log = logging.getLogger(__name__)
+from logger import get_logger  # 訊息需寫進 logs/ai_stock.log
+log = get_logger("daytrading_analyzer")
 
 _MIN_DT_SCORE = 4  # 低於此分數直接 skip，不呼叫 AI
 

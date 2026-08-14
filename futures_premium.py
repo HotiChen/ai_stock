@@ -10,11 +10,11 @@ futures_premium.py — 台指期貨溢價/貼水
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Optional
 
-log = logging.getLogger(__name__)
+from logger import get_logger  # 訊息需寫進 logs/ai_stock.log
+log = get_logger("futures_premium")
 
 _REQUEST_TIMEOUT  = 8
 _FLAT_THRESHOLD   = 0.05   # ±0.05% 以內視為平水
