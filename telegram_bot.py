@@ -150,7 +150,10 @@ def handle_status(chat_id: str) -> None:
     now = datetime.now()
     positions = load_sim_positions()
     record    = load_day_record(date.today())
-    trades    = load_daily_trades()
+    # load_daily_trades(trade_date, path) 兩個參數都是必填。先前空呼叫，
+    # 使用者一按「今日狀態」就在 polling 迴圈拋 TypeError，整輪 update
+    # 處理隨之中止——同一批的當沖買入確認也會一起沒被處理。
+    trades    = load_daily_trades(date.today(), DB_PATH)
 
     plan_zh   = {"aggressive": "🚀 衝刺版", "balanced": "⚖️ 均衡版", "conservative": "🛡️ 保守版"}
     plan_str  = plan_zh.get(record.chosen_plan_type, "—") if record else "尚未選擇策略"
@@ -177,7 +180,8 @@ def handle_status(chat_id: str) -> None:
 
 
 def handle_holdings(chat_id: str) -> None:
-    trades = load_daily_trades()
+    # 同 handle_status：兩個參數必填，見該處說明。
+    trades = load_daily_trades(date.today(), DB_PATH)
 
     if not trades:
         send_text(chat_id, "💼 今日尚無交易紀錄。\n\n請先選擇今日策略（等 08:30 推播或點「選股計劃」）。")
