@@ -199,12 +199,7 @@ class AlertWorker:
         self._telegram_chat_id = telegram_chat_id
         self._auto_execute     = auto_execute
         self._api              = api
-        # 修正六：過濾沒有 code 的 pick，避免 None 當 key
-        self._watchlist        = {
-            p["code"]: p
-            for p in (watchlist or [])
-            if p.get("code")
-        }
+        self._watchlist        = _normalise_watchlist(watchlist)
 
     def run(self) -> None:
         """Process alerts until poison pill (None) is received."""
@@ -367,6 +362,25 @@ class AlertWorker:
         return t
 
 
+def _normalise_watchlist(watchlist) -> dict:
+    """把 watchlist 正規化成 ``{code: pick}``，list 與 dict 兩種形狀都收。
+
+    MonitorAgent.set_watchlist() 收到的是原始 list，但它把結果存成 dict，
+    再於 start() 時把**已經是 dict** 的 self._watchlist 傳給 AlertWorker。
+    先前兩處各自寫了一份一模一樣的轉換，AlertWorker 便把 dict 當 list 迭代——
+    迭代 dict 得到的是 key（字串），對字串呼叫 .get() 直接拋
+    AttributeError。2026-08-17 09:10 因此讓當日唯一一筆確認進場的 tick 監控
+    沒起來：移動停損、目標價、即時停損全部失去監控，只剩 13:15 強平兜底。
+
+    抽成單一函式而不是在呼叫端多包一層，是為了讓兩條路徑不可能再分岔。
+    沒有 code 的 pick 一律丟棄（原修正六的意圖），避免 None／空字串當 key。
+    """
+    if not watchlist:
+        return {}
+    picks = watchlist.values() if isinstance(watchlist, dict) else watchlist
+    return {p["code"]: p for p in picks if isinstance(p, dict) and p.get("code")}
+
+
 # ── MonitorAgent ──────────────────────────────────────────────────────────────
 
 class MonitorAgent:
@@ -416,12 +430,7 @@ class MonitorAgent:
         init_db(db_path)
 
     def set_watchlist(self, picks: list[dict]) -> None:
-        # 修正六：過濾沒有 code 的 pick，避免 None 當 key
-        self._watchlist = {
-            p["code"]: p
-            for p in (picks or [])
-            if p.get("code")
-        }
+        self._watchlist = _normalise_watchlist(picks)
         self._seed_peaks_from_sidecar()
 
     # ── 移動停損最高點持久化（GAP 2）────────────────────────────────────────
