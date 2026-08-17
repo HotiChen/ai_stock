@@ -1070,12 +1070,15 @@ def _opening_confirm_dt_positions(
     # 大盤氣氛（一次抓，所有股票共用）
     from daytrading_report import _fetch_market
     market = _fetch_market()
-    # index 可能是 None（取不到）——不可印成 +0.00%，那會讓人以為大盤真的平盤
-    _idx = market.get("index_change_pct")
+    # index 與 futures 都可能是 None（取不到）——不可印成 +0.00%，
+    # 那會讓人以為大盤真的平盤。排查當沖為何不進場時，人看的就是這行。
+    def _pct(value) -> str:
+        return "資料無法取得" if value is None else f"{value:+.2f}%"
+
     log.info(
-        "DT 9:05 大盤：index=%s futures=%+.2f%%",
-        "資料無法取得" if _idx is None else f"{_idx:+.2f}%",
-        market.get("futures_premium_pct", 0) or 0,
+        "DT 9:05 大盤：index=%s futures=%s",
+        _pct(market.get("index_change_pct")),
+        _pct(market.get("futures_premium_pct")),
     )
 
     confirmed: list = []
