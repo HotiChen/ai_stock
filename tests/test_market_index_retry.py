@@ -71,13 +71,30 @@ def test_login_failure_does_not_disable_the_session_permanently():
             raise RuntimeError("Shioaji 尚未就緒")
         return good_api
 
-    with patch.object(market_index, "_build_index_api", side_effect=_login):
+    # 這裡要驗的是 Shioaji 的重試，不是 yfinance 通不通。把退路關掉，
+    # 否則測試結果取決於當下網路——本測試 08-14 寫成時 yfinance 取不到台股
+    # 而回 None，08-17 它偶然取到了，同一段實作就被判成失敗。
+    with patch.object(market_index, "_build_index_api", side_effect=_login), \
+         patch.object(market_index, "_from_yfinance", return_value=None):
         first = market_index.fetch_market_index_pct()
         second = market_index.fetch_market_index_pct()
 
     assert first is None, "第一次失敗，回 None 是對的"
     assert second == pytest.approx(1.1), "第二次必須重試並成功，不可沿用失敗狀態"
     assert attempts["n"] == 2
+
+
+def test_yfinance_covers_for_shioaji_when_it_can():
+    """Shioaji 掛掉但 yfinance 拿得到時，要回 yfinance 的值而不是 None。
+
+    退路存在就是為了這種時候。上面那個測試把它關掉是為了隔離重試邏輯，
+    不是說這條路不該有值。
+    """
+    import market_index
+
+    with patch.object(market_index, "_build_index_api", side_effect=RuntimeError("boom")), \
+         patch.object(market_index, "_from_yfinance", return_value=0.8):
+        assert market_index.fetch_market_index_pct() == pytest.approx(0.8)
 
 
 def test_successful_session_is_reused():
