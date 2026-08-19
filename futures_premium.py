@@ -23,6 +23,8 @@ _SCORE_THRESHOLD  = 0.3    # ±0.3% 以上才影響評分（供外部使用）
 # TWSE MIS API — 台指期近月合約（B5 = 近月，月份代碼每月更新）
 _TWSE_MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 _TX_EX_CH     = "tse_TXFB5.tw"
+#: 加權指數在 Shioaji 的合約代碼（api.Contracts.Indexs.TSE），同 market_index。
+_TSE_INDEX_CODE = "001"
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -60,7 +62,12 @@ def fetch_spot_index(api=None) -> Optional[float]:
     # 1. Shioaji 指數快照
     if api is not None:
         try:
-            snap = api.snapshots([api.Contracts.Indices["TAIEX"]])
+            # Shioaji 的拼法是 Indexs（不是 Indices），加權指數是
+            # Indexs.TSE["001"]（不是 ["TAIEX"]）。寫錯的話這裡每次都拋
+            # AttributeError，現貨永遠掉到 yfinance——而 yfinance 在這台
+            # 機器上長期取不到台股（見 market_index 的說明）。溢貼水是
+            # 期貨價減現貨價，兩個值來自不同來源時差值還會被時間差污染。
+            snap = api.snapshots([api.Contracts.Indexs.TSE[_TSE_INDEX_CODE]])
             if snap:
                 return round(float(snap[0].close), 2)
         except Exception as e:
