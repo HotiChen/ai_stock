@@ -142,7 +142,12 @@ def _fetch_market() -> dict:
         log.warning("fetch_market_index_pct failed: %s", e)
     try:
         from futures_premium import fetch_futures_premium
-        fp = fetch_futures_premium()
+        from market_index import get_session
+        # 一定要把 session 傳進去。不傳的話 fetch_futures_price 會跳過
+        # Shioaji 那段，落到 TWSE MIS——而 MIS 是股票報價服務，不供期貨，
+        # 四種 ex_ch 寫法實測全部回 z='-'。這就是 08-12 起溢貼水一直
+        # 取不到的原因，跟先前修的 TXFR1 無關（那條路根本沒被走到）。
+        fp = fetch_futures_premium(get_session())
         if fp is None:
             log.warning("台指期溢貼水取不到——標示為『資料不可用』，不以 0%% 代替")
         else:

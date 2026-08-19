@@ -67,6 +67,20 @@ def _get_index_api():
     return _index_api
 
 
+def get_session():
+    """對外的共用 Shioaji session。
+
+    大盤指數與台指期溢貼水都要一條 Shioaji 連線，且應該共用同一條。
+    先前 daytrading_report 只有指數走這裡，期貨那邊呼叫
+    ``fetch_futures_premium()`` 沒帶 api，於是落到 TWSE MIS 退路——
+    而 MIS 不供期貨報價（tse_/otc_ 各種寫法都回 z='-'），
+    溢貼水因此從 2026-08-12 起一直是「資料不可用」。
+
+    回傳 ``None`` 代表連不上；呼叫端要照常標示為資料不可用，不可代成 0。
+    """
+    return _get_index_api()
+
+
 def _from_shioaji() -> Optional[float]:
     api = _get_index_api()
     if api is None:
