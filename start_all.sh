@@ -39,6 +39,28 @@ else
   echo "[$(date '+%H:%M:%S')] ✅ main.py 已啟動 (PID: $!)"
 fi
 
+# ── 1b. 防閒置睡眠 ───────────────────────────────────────
+# 2026-08-18：main.py 正常啟動，但 Mac 在 08:35 進入閒置睡眠，整個 process
+# 被凍結到 11:44。當沖預測、開盤確認、盤中監控全部沒跑，策略推播遲到三小時。
+# 五個服務都在背景跑、沒人碰鍵盤，macOS 不知道這台機器正在做事——要明講。
+# -i 只擋系統閒置睡眠（螢幕照常關）；-w 綁 main.py 的 PID，main.py 一停
+# caffeinate 自己就結束，不會留下讓 Mac 永遠不睡的孤兒。
+if pgrep -x caffeinate > /dev/null 2>&1; then
+  echo "[$(date '+%H:%M:%S')] 防睡眠已在執行，略過"
+else
+  # 腳本開頭是 set -euo pipefail：pgrep 查無程序時回 1，加上 pipefail 會讓
+  # 這行賦值的結束碼變成 1，整個 start_all 就此中止，後端與前端都不會啟動。
+  MAIN_PID="$(pgrep -f "[Pp]ython[0-9.]* main\.py" | head -1 || true)"
+  if [ -n "$MAIN_PID" ]; then
+    nohup caffeinate -i -w "$MAIN_PID" >/dev/null 2>&1 &
+    echo "[$(date '+%H:%M:%S')] ✅ 防閒置睡眠已啟用（綁 main.py PID $MAIN_PID）"
+  else
+    # 拿不到 main.py 的 PID 就退成時限模式，撐到 14:30 收工之後。
+    nohup caffeinate -i -t 21600 >/dev/null 2>&1 &
+    echo "[$(date '+%H:%M:%S')] ⚠️ 取不到 main.py PID，防睡眠改用 6 小時時限"
+  fi
+fi
+
 # ── 2. Telegram Bot ──────────────────────────────────────
 if pgrep -f "[Pp]ython[0-9.]* telegram_bot" > /dev/null 2>&1; then
   echo "[$(date '+%H:%M:%S')] telegram_bot.py 已在執行，略過"

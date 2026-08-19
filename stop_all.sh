@@ -19,4 +19,8 @@ kill $(lsof -ti :1234) 2>/dev/null && echo "[$(date '+%H:%M:%S')] ✅ 後端 :12
 # 關閉前端
 kill $(lsof -ti :9439) 2>/dev/null && echo "[$(date '+%H:%M:%S')] ✅ 前端 :9439 已停止" || echo "[$(date '+%H:%M:%S')] 前端未在執行"
 
+# 解除防睡眠。caffeinate -w 綁著 main.py，上面 pkill 之後它本來就會自己收掉，
+# 這裡再補一刀處理時限模式的那條路，避免收工後 Mac 還被撐著不睡。
+pkill -x caffeinate 2>/dev/null && echo "[$(date '+%H:%M:%S')] ✅ 防睡眠已解除" || echo "[$(date '+%H:%M:%S')] 防睡眠未在執行"
+
 echo "[$(date '+%H:%M:%S')] ── 全部關閉完成 ──"
