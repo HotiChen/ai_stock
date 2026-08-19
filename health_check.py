@@ -35,7 +35,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time as _time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -48,6 +48,10 @@ class StageResult:
     label: str
     ok: bool
     detail: str
+    #: 這個階段的時段還沒結束——現在沒紀錄是正常的，不是故障。
+    #: 少了這個狀態，早上跑 --summary 會把「收盤複盤」報成 ❌，
+    #: 誤報會讓真告警失去可信度。
+    pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -108,10 +112,24 @@ def _today_lines(lines: Iterable[str], today: str,
     return [ln for ln in todays if _in_window(ln, window)]
 
 
-def check_stage(stage: str, lines: Iterable[str], today: Optional[str] = None) -> StageResult:
-    """依 log 判定某階段是否正常結束。"""
+def _window_has_passed(window: tuple[str, str], now: _time) -> bool:
+    h, m = (int(x) for x in window[1].split(":"))
+    return now >= _time(h, m)
+
+
+def check_stage(
+    stage: str,
+    lines: Iterable[str],
+    today: Optional[str] = None,
+    now: Optional[_time] = None,
+) -> StageResult:
+    """依 log 判定某階段是否正常結束。
+
+    ``now`` 用來分辨「時段還沒到」與「時段過了卻沒紀錄」。不傳就用現在時間。
+    """
     spec = STAGES[stage]
     today = today or date.today().isoformat()
+    now = now if now is not None else datetime.now().time()
     todays = _today_lines(lines, today, spec.window)
 
     for marker in spec.failure_markers:
@@ -123,6 +141,13 @@ def check_stage(stage: str, lines: Iterable[str], today: Optional[str] = None) -
 
     if any(m in ln for ln in todays for m in spec.success_markers):
         return StageResult(stage, spec.label, True, "")
+
+    if not _window_has_passed(spec.window, now):
+        return StageResult(
+            stage, spec.label, False,
+            f"尚未到時間（{spec.window[0]}–{spec.window[1]}）",
+            pending=True,
+        )
 
     return StageResult(
         stage, spec.label, False,
@@ -147,12 +172,13 @@ def build_alert(result: StageResult, today: Optional[str] = None) -> str:
 
 def build_summary(results: list[StageResult], today: Optional[str] = None) -> str:
     today = today or date.today().isoformat()
-    all_ok = all(r.ok for r in results)
-    head = "✅ <b>今日系統正常</b>" if all_ok else "⚠️ <b>今日有階段未完成</b>"
+    # pending 是「時段還沒到」，不算未完成——早上跑總結時不該長得像故障。
+    failed = [r for r in results if not r.ok and not r.pending]
+    head = "⚠️ <b>今日有階段未完成</b>" if failed else "✅ <b>今日系統正常</b>"
 
     lines = [head, "━━━━━━━━━━━━━━━━", f"日期：{today}", ""]
     for r in results:
-        icon = "✅" if r.ok else "❌"
+        icon = "✅" if r.ok else ("⏳" if r.pending else "❌")
         lines.append(f"{icon} {r.label}")
         if not r.ok:
             lines.append(f"    <code>{r.detail}</code>")
@@ -171,8 +197,8 @@ def maybe_alert(
     today: Optional[str] = None,
     send: Callable[[str], None] = _send_telegram,
 ) -> None:
-    """只在故障時送出告警。正常時保持安靜。"""
-    if not result.ok:
+    """只在故障時送出告警。正常或時段未到時保持安靜。"""
+    if not result.ok and not result.pending:
         send(build_alert(result, today=today))
 
 
@@ -206,8 +232,11 @@ def main() -> int:
     if args.stage:
         result = check_stage(args.stage, lines, today)
         maybe_alert(result, today)
-        print(f"  {'✅' if result.ok else '❌'} {result.label}  {result.detail}")
-        return 0 if result.ok else 1
+        icon = "✅" if result.ok else ("⏳" if result.pending else "❌")
+        print(f"  {icon} {result.label}  {result.detail}")
+        # pending 不是故障，回 0——否則 launchctl list 會把「還沒到時間」
+        # 顯示成跟真故障一樣的非零結束碼。
+        return 0 if (result.ok or result.pending) else 1
 
     parser.error("需指定 --stage 或 --summary")
     return 2
