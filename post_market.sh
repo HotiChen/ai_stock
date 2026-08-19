@@ -19,8 +19,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # 載入 .env（若存在）
+# grep -v '^#' 只濾整行註解。.env 裡有 18 行是 `KEY=value  # 中文說明`，
+# 那些中文會被 xargs 拆成獨立的詞，export 收到就報 not a valid identifier；
+# 本檔第 16 行是 set -euo pipefail，於是腳本死在這裡，後面三個盤後任務
+# 一個都沒跑到（2026-08-19 之前每天都是這樣，launchctl 一直顯示 exit=1）。
+# 這裡改用 start_all.sh 早就在用的三層過濾：只留有 = 的行、砍掉行尾註解。
 if [ -f .env ]; then
-  export $(grep -v '^#' .env | xargs)
+  export $(grep -v '^#' .env | grep '=' | sed 's/[[:space:]]*#.*//' | xargs)
 fi
 
 echo "[$(date '+%H:%M:%S')] ── 開始收盤後學習任務 ──"
