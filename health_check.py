@@ -61,6 +61,11 @@ class _Stage:
     success_markers: tuple[str, ...]
     #: 出現任一個就判定故障，即使成功標記也在
     failure_markers: tuple[str, ...]
+    #: 什麼時候才該做出判定（HH:MM）。早於它一律 pending。
+    #: 與 window 分開是必要的：window 決定哪些 log 算數（保持寬鬆），
+    #: deadline 決定何時判定。2026-08-19 08:35 的檢查比 08:36:13 的紀錄
+    #: 早了 73 秒，就推了一則假的「盤前失敗」給在工地的人。
+    deadline: str
     #: 只採計這個時段（HH:MM）內的紀錄。
     #: 沒有時間窗的話，凌晨殘留的紀錄會被當成當天正式執行——2026-08-14 00:38
     #: 就有一筆殘留的 "Premarket: 1 approved"，讓什麼都還沒跑的凌晨回報一切正常。
@@ -73,6 +78,7 @@ STAGES: dict[str, _Stage] = {
         success_markers=("Premarket:", "今日當沖預測"),
         failure_markers=("DayTrading report push failed",),
         window=("08:25", "09:00"),
+        deadline="08:45",
     ),
     "entry": _Stage(
         label="開盤確認",
@@ -81,12 +87,14 @@ STAGES: dict[str, _Stage] = {
         success_markers=("DT 9:05 確認",),
         failure_markers=("DT 9:05 確認通知失敗", "DT 9:10 下單失敗"),
         window=("09:00", "09:30"),
+        deadline="09:15",
     ),
     "settlement": _Stage(
         label="收盤複盤",
         success_markers=("PostMarket:",),
         failure_markers=("PostMarketJob 失敗",),
         window=("13:30", "14:05"),
+        deadline="13:50",
     ),
 }
 
@@ -112,8 +120,8 @@ def _today_lines(lines: Iterable[str], today: str,
     return [ln for ln in todays if _in_window(ln, window)]
 
 
-def _window_has_passed(window: tuple[str, str], now: _time) -> bool:
-    h, m = (int(x) for x in window[1].split(":"))
+def _deadline_has_passed(deadline: str, now: _time) -> bool:
+    h, m = (int(x) for x in deadline.split(":"))
     return now >= _time(h, m)
 
 
@@ -142,10 +150,10 @@ def check_stage(
     if any(m in ln for ln in todays for m in spec.success_markers):
         return StageResult(stage, spec.label, True, "")
 
-    if not _window_has_passed(spec.window, now):
+    if not _deadline_has_passed(spec.deadline, now):
         return StageResult(
             stage, spec.label, False,
-            f"尚未到時間（{spec.window[0]}–{spec.window[1]}）",
+            f"尚未到判定時間（{spec.deadline}）",
             pending=True,
         )
 
