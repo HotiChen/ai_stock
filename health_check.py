@@ -164,6 +164,58 @@ def check_stage(
     )
 
 
+# ── 程序存活 ─────────────────────────────────────────────────────────────────
+
+#: main.py 應該在線的時段。08:25 由 start_all 拉起，14:00 由 stop_all 收掉。
+_MAIN_ALIVE_FROM = _time(8, 25)
+_MAIN_ALIVE_UNTIL = _time(14, 0)
+
+#: macOS 上 python3 的程序名會解析成 ".../Python.app/.../Python main.py"，
+#: 所以要用 "[Pp]ython... main.py" 匹配（同 start_all.sh 的註解）。
+_MAIN_PATTERN = r"[Pp]ython[0-9.]* main\.py"
+
+
+def _process_running(pattern: str) -> bool:
+    """問作業系統這個程序在不在。"""
+    import subprocess
+    try:
+        return subprocess.run(
+            ["pgrep", "-f", pattern], capture_output=True, timeout=10,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+def check_process(
+    now: Optional[_time] = None,
+    is_alive: Optional[Callable[[], bool]] = None,
+) -> StageResult:
+    """main.py 在不在。
+
+    「log 裡沒有紀錄」有兩種意思——程序活著但沒事做，或是程序已經不在。
+    2026-08-19 就是後者：08:39 停掉，35 分鐘沒有任何人察覺，09:05 的開盤
+    確認因此永久錯過。程序死活是能直接問的事實，不必從 log 推。
+    """
+    now = now if now is not None else datetime.now().time()
+    label = "主程式 main.py"
+
+    if not (_MAIN_ALIVE_FROM <= now < _MAIN_ALIVE_UNTIL):
+        return StageResult(
+            "process", label, False,
+            f"不在交易時段（{_MAIN_ALIVE_FROM:%H:%M}–{_MAIN_ALIVE_UNTIL:%H:%M}）",
+            pending=True,
+        )
+
+    probe = is_alive or (lambda: _process_running(_MAIN_PATTERN))
+    if probe():
+        return StageResult("process", label, True, "")
+
+    return StageResult(
+        "process", label, False,
+        "main.py 不在執行中——盤中排程（開盤確認、進場、強平）都不會觸發",
+    )
+
+
 # ── 訊息 ─────────────────────────────────────────────────────────────────────
 
 def build_alert(result: StageResult, today: Optional[str] = None) -> str:
@@ -222,6 +274,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="交易日階段健康檢查")
     parser.add_argument("--stage", choices=sorted(STAGES), help="檢查單一階段")
     parser.add_argument("--summary", action="store_true", help="送出當日總結")
+    parser.add_argument("--process", action="store_true", help="檢查 main.py 是否在執行")
     args = parser.parse_args()
 
     from dotenv import load_dotenv
@@ -230,8 +283,16 @@ def main() -> int:
     lines = _read_log()
     today = date.today().isoformat()
 
+    if args.process:
+        result = check_process()
+        maybe_alert(result, today)
+        icon = "✅" if result.ok else ("⏳" if result.pending else "❌")
+        print(f"  {icon} {result.label}  {result.detail}")
+        return 0 if (result.ok or result.pending) else 1
+
     if args.summary:
         results = [check_stage(s, lines, today) for s in ("premarket", "entry", "settlement")]
+        results.append(check_process())
         _send_telegram(build_summary(results, today))
         for r in results:
             print(f"  {'✅' if r.ok else '❌'} {r.label}  {r.detail}")
@@ -246,7 +307,7 @@ def main() -> int:
         # 顯示成跟真故障一樣的非零結束碼。
         return 0 if (result.ok or result.pending) else 1
 
-    parser.error("需指定 --stage 或 --summary")
+    parser.error("需指定 --stage、--summary 或 --process")
     return 2
 
 
