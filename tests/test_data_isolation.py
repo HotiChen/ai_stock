@@ -48,26 +48,32 @@ def test_opening_default_db_does_not_touch_production():
     這是最貼近真實污染情境的一條：測試通常不是故意去寫正式 DB，
     而是呼叫了某個「預設參數就是正式路徑」的建構子。
     """
-    from daytrading_db import DaytradingDB
+    from daytrading_db import DaytradingDB, DEFAULT_DB_PATH
 
-    production = REPO_ROOT / "data" / "daytrading_review.db"
+    # 檔名改引用常數（原本寫死 "data/daytrading_review.db"）。這條測試要驗的
+    # 是隔離——預設路徑必須是相對的、檔案要落在 tmp、正式檔不可被動到——
+    # 不是那個檔名本身。而預設檔名正好是 2026-08-19 修掉的缺陷：寫入端走
+    # DB_PATH（research.db）、讀取端寫死 daytrading_review.db，兩邊分裂。
+    production = REPO_ROOT / DEFAULT_DB_PATH
     before = production.stat().st_mtime_ns if production.exists() else None
 
-    DaytradingDB()  # 不傳 path，走 _DEFAULT_PATH
+    DaytradingDB()  # 不傳 path，走 DEFAULT_DB_PATH
 
     after = production.stat().st_mtime_ns if production.exists() else None
     assert before == after, "以預設路徑開啟資料庫時動到了正式檔案"
 
     # 而且應該在臨時目錄裡真的建出檔案（確認它確實有寫東西，只是寫對地方）
-    assert Path("data/daytrading_review.db").exists()
+    assert Path(DEFAULT_DB_PATH).exists()
 
 
 def test_writing_a_trade_stays_in_tmp(tmp_path):
     """寫入操作同樣要被關在臨時目錄內。"""
-    from daytrading_db import DaytradingDB
+    from daytrading_db import DaytradingDB, DEFAULT_DB_PATH
 
     db = DaytradingDB()
-    created = Path("data/daytrading_review.db").resolve()
+    created = Path(DEFAULT_DB_PATH).resolve()
 
     assert REPO_ROOT not in created.parents
-    assert db.path == "data/daytrading_review.db", "預設路徑本身不該被改寫"
+    assert db.path == DEFAULT_DB_PATH, "預設路徑本身不該被改寫"
+    assert not Path(DEFAULT_DB_PATH).is_absolute(), \
+        "預設路徑必須是相對的，chdir 隔離才擋得住"

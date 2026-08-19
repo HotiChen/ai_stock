@@ -32,7 +32,11 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-_REVIEW_DB_PATH = "data/daytrading_review.db"
+# 預測資料庫的位置由 daytrading_db 定義（表的擁有者）。
+# 這裡曾經硬寫 data/daytrading_review.db，而寫入端走 DB_PATH，
+# 兩邊指向不同檔案，複盤與學習因此永遠讀到 0 筆。
+from daytrading_db import DEFAULT_DB_PATH as _PREDICTION_DB
+_REVIEW_DB_PATH = _PREDICTION_DB
 _OUTPUT_PATH    = "data/adaptive_config.json"
 
 # 評分分桶邊界

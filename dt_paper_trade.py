@@ -25,7 +25,11 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 _DB_PATH       = "data/paper_trading.db"
-_REVIEW_DB     = "data/daytrading_review.db"
+# 預測資料庫的位置由 daytrading_db 定義（表的擁有者）。
+# 這裡曾經硬寫 data/daytrading_review.db，而寫入端走 DB_PATH，
+# 兩邊指向不同檔案，複盤與學習因此永遠讀到 0 筆。
+from daytrading_db import DEFAULT_DB_PATH as _PREDICTION_DB
+_REVIEW_DB = _PREDICTION_DB
 _INIT_CAPITAL  = 30_000.0   # 初始本金（元）
 _COMMISSION    = 0.001425   # 手續費（單邊）
 _TAX_INTRADAY  = 0.0015     # 當沖交易稅（賣方，正常 0.003 減半）

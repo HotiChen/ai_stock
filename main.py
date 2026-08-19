@@ -1838,7 +1838,10 @@ def main() -> None:
             # 當沖預測複盤：回填今日 OHLC + 判斷是否預測正確
             try:
                 from daytrading_review import run_daytrading_review
-                review_msg = run_daytrading_review()
+                # 一定要傳 DB_PATH：預測是用 DB_PATH 存的（見上方
+                # build_daytrading_report），不傳的話複盤會去翻另一個
+                # 資料庫，85 筆預測就是這樣四天沒被檢討過。
+                review_msg = run_daytrading_review(db_path=DB_PATH)
                 if review_msg and TELEGRAM_CHAT_ID:
                     from telegram_bot import send_text
                     send_text(TELEGRAM_CHAT_ID, review_msg)

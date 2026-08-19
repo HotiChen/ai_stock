@@ -12,6 +12,8 @@ daytrading_db.py — 當沖預測記錄 + 收盤檢討資料庫
 """
 from __future__ import annotations
 
+import os
+
 import hashlib
 import json
 import logging
@@ -23,7 +25,16 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_PATH = "data/daytrading_review.db"
+#: dt_prediction_log 這張表在哪。由本模組（表的擁有者）單一定義，
+#: 其餘讀取端一律引用，不可各自寫死。
+#:
+#: 先前寫入端由呼叫端傳 DB_PATH（main.py:1692 → research.db），五個讀取端
+#: 各自硬寫 "data/daytrading_review.db"。結果是 research.db 累積了 85 筆預測、
+#: 一筆都沒被檢討，而 adaptive_scorer 每天讀那個空檔案後印「資料不足」。
+DEFAULT_DB_PATH = os.getenv("DB_PATH", "data/research.db")
+
+#: 舊名保留給既有呼叫端。
+_DEFAULT_PATH = DEFAULT_DB_PATH
 
 
 def _hash_prompt(prompt: Optional[str]) -> Optional[str]:
