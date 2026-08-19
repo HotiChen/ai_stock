@@ -25,6 +25,12 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
+#: 「AI 沒有分析到這檔」——與「AI 看過後判斷不做」（"skip"）必須分得開。
+#: 報告只對前 analysis_count 檔做 AI 分析，卻把 display_count 檔全部落庫，
+#: 先前沒被分析到的一律寫成 "skip"，於是每天有六成的列看起來像 AI 的判斷，
+#: 實際上 AI 從未看過（ai_summary 是空字串就是證據）。
+ACTION_NOT_ANALYZED = "not_analyzed"
+
 #: dt_prediction_log 這張表在哪。由本模組（表的擁有者）單一定義，
 #: 其餘讀取端一律引用，不可各自寫死。
 #:

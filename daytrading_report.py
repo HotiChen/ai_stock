@@ -298,6 +298,18 @@ def _advisor_analysis(
     )
 
 
+def _prediction_action(ai) -> str:
+    """這一列的 action 該記什麼。
+
+    ``ai`` 是 None 代表這檔沒被送去做 AI 分析（只有前 analysis_count 檔會），
+    不代表 AI 看過後決定不做。先前兩者都寫成 "skip"，落庫後完全無法區分——
+    有 AI 說明的那些是真判斷，空白的那些是從沒被看過，每天約占六成。
+    """
+    from daytrading_db import ACTION_NOT_ANALYZED
+
+    return ai.action if ai is not None else ACTION_NOT_ANALYZED
+
+
 def build_daytrading_report(
     api=None,
     db_path: str = DB_PATH,
@@ -507,7 +519,7 @@ def build_daytrading_report(
                 date=date.today().isoformat(),
                 code=r["code"], name=r["name"],
                 dt_score=r["dt_score"],
-                action=ai.action if ai else "skip",
+                action=_prediction_action(ai),
                 entry_low=ai.entry_low if ai else None,
                 entry_high=ai.entry_high if ai else None,
                 target_price=ai.target_price if ai else None,
