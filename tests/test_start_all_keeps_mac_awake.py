@@ -20,6 +20,7 @@ start_all.sh 啟動了五個服務卻沒有向系統宣告「這段時間別睡�
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -139,4 +140,47 @@ def test_start_all_does_not_stack_a_second_assertion(tmp_path):
     assert "pgrep" in block, (
         "caffeinate 前後找不到 pgrep 守衛，重跑 start_all 會堆疊出多個 caffeinate：\n"
         + block
+    )
+
+# ── 沙箱不可外洩 ──────────────────────────────────────────────────────────────
+
+# 會影響沙箱外部的指令。腳本裡出現這些之中的任何一個，就必須有對應的 stub，
+# 否則測試會對整台機器動手。
+_DESTRUCTIVE = {"pkill", "kill", "killall", "rm", "shutdown", "launchctl", "open", "npm", "caffeinate"}
+
+
+def test_every_destructive_command_in_the_scripts_is_stubbed():
+    """腳本裡每個會動到外部狀態的指令，都必須在 _STUBBED 裡。
+
+    這條測試是有代價才寫的。第一版 _STUBBED 漏了 pkill，跑 stop_all.sh 的
+    測試就對整台機器執行了真的 `pkill -f "...main\.py"`，把當時正在盤前
+    運作的 main.py 殺掉。它被當成正常關機訊號收下，做完手上的工作後在
+    08:39 結束；09:05 的開盤確認因此完全沒跑，8 檔候選卡在 watching。
+
+    往後只要有人在腳本裡加一個沒 stub 的破壞性指令，這裡就會先擋下來，
+    而不是等它去殺掉正式交易程序。
+    """
+    missing = {}
+    for name in ("start_all.sh", "stop_all.sh"):
+        src = (_REPO / name).read_text(encoding="utf-8")
+        # 只看實際指令，跳過註解行
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        for cmd in _DESTRUCTIVE:
+            if re.search(rf"(^|[|;&\s(]){re.escape(cmd)}\s", code, re.M) and cmd not in _STUBBED:
+                missing.setdefault(name, []).append(cmd)
+
+    assert not missing, (
+        f"腳本用了未 stub 的破壞性指令，測試會打到沙箱外面：{missing}\n"
+        f"把它們加進 _STUBBED。"
+    )
+
+
+def test_stub_dir_precedes_the_real_path(sandbox):
+    """stub 目錄必須排在 PATH 最前面，否則會叫到真的執行檔。"""
+    run, calls = sandbox
+    out = run("stop_all.sh")
+
+    assert "pkill" in out, (
+        "stop_all.sh 的 pkill 沒有被 stub 攔截到——代表跑的是系統的真 pkill。\n"
+        f"實際紀錄：\n{out}"
     )
