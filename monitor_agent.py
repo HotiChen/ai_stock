@@ -14,6 +14,7 @@ Flow:
 
 import queue
 import threading
+import time
 from datetime import date, datetime
 from typing import Optional
 
@@ -175,6 +176,53 @@ def get_snapshot(api: sj.Shioaji, code: str) -> Optional[dict]:
         except Exception:
             pass
         return None
+
+
+def wait_for_market_data(
+    api,
+    probe_code: str = "2330",
+    max_attempts: int = 20,
+    interval: float = 3.0,
+    sleep_fn=time.sleep,
+) -> bool:
+    """探測 Shioaji 行情是否就緒（登入成功 ≠ 報價 session 就緒）。
+
+    ensure_connected 的 login(fetch_contract=True) 回傳只代表「登入成功」；
+    底層 solace 報價 session 仍在非同步暖機中，過早呼叫 snapshots 會得到
+    'Not ready'。8:30 全市場選股（daytrading_report._get_stock_universe →
+    batch_fetch_snapshots）在真實模式**沒有 yfinance 備援**，報價未就緒就會
+    抓到空清單 → 零候選 → dt_prediction_log 空。
+
+    本函數以一檔高流動性股票（預設台積電 2330）反覆探測 get_snapshot，直到
+    取得有效報價（close > 0）或用盡 max_attempts。
+
+    參數
+    ----
+    probe_code   : 探測用股票代號（需高流動性、盤前即有前收價）
+    max_attempts : 最多探測次數（預設 20）
+    interval     : 每次探測間隔秒數（預設 3；20×3 = 最多等 ~60 秒）
+    sleep_fn     : 等待函數（測試可注入 mock，避免真的 sleep）
+
+    回傳
+    ----
+    True  = 行情就緒，呼叫端可安心選股。
+    False = 逾時未就緒或 api 不存在；呼叫端應以降級資料繼續（行為與現況相同，
+            不比修復前更糟），並可對外告警。
+    """
+    if api is None:
+        return False
+    for attempt in range(1, max_attempts + 1):
+        snap = get_snapshot(api, probe_code)
+        if snap and snap.get("close") and snap["close"] > 0:
+            log.info("Shioaji 行情就緒（第 %d 次探測，probe=%s）", attempt, probe_code)
+            return True
+        if attempt < max_attempts:
+            sleep_fn(interval)
+    log.warning(
+        "Shioaji 行情探測 %d 次仍未就緒（約 %.0f 秒）— 選股將以降級資料執行",
+        max_attempts, max_attempts * interval,
+    )
+    return False
 
 
 # ── AlertWorker ───────────────────────────────────────────────────────────────

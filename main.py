@@ -1669,6 +1669,28 @@ def main() -> None:
 
         # 08:30 pre-market：波段選股 + 當沖預測報告（同時推播 Telegram）
         if t.hour == 8 and t.minute == 30 and f"{today_prefix}-0830" not in _fired_today:
+            # 先確認 Shioaji 行情就緒再選股。login 成功 ≠ 報價 session 就緒，
+            # 8:30 常剛登入沒暖機；真實模式全市場掃描（batch_fetch_snapshots）
+            # 無 yfinance 備援，報價未就緒就抓到空清單 → 零候選。就緒探測失敗
+            # 不阻擋執行（降級續跑，行為不比修復前差），但對外告警。
+            if api is not None:
+                try:
+                    from monitor_agent import wait_for_market_data
+                    if not wait_for_market_data(api):
+                        log.warning("8:30 選股：Shioaji 行情未就緒，仍嘗試執行（候選可能偏少）")
+                        if TELEGRAM_CHAT_ID:
+                            try:
+                                from telegram_bot import send_text
+                                send_text(
+                                    TELEGRAM_CHAT_ID,
+                                    "⚠️ 8:30 選股：Shioaji 行情未就緒（報價暖機逾時），"
+                                    "今日候選可能偏少，請留意。",
+                                )
+                            except Exception:
+                                pass
+                except Exception as e:
+                    log.warning("行情就緒探測失敗（忽略，續跑）: %s", e)
+
             # 波段選股（原有邏輯）
             job = PremarketJob(
                 candidates=None,
