@@ -196,14 +196,24 @@ class DaytradingDB:
                 WHERE date = ? ORDER BY dt_score DESC
             """, (target_date,)).fetchall()
 
-    def get_unreviewed(self, target_date: str) -> list[sqlite3.Row]:
-        """取今日尚未回填 OHLC 的預測（action='long'）。"""
+    def get_unreviewed(self, target_date: str,
+                       include_skipped: bool = False) -> list[sqlite3.Row]:
+        """取今日尚未回填 OHLC 的預測。
+
+        include_skipped=False（預設）：只取 action='long'（原行為，向下相容）。
+        include_skipped=True：連 action='skip' 一併取出。
+
+        為什麼需要 include_skipped：超過 analysis_count 的候選根本沒經過 AI
+        （自動 skip），而 AI 本身也常判 skip —— 只複盤 long 的話，很多天會
+        一筆都複盤不到，準確率永遠算不出來；skip 列也因為沒有 OHLC，讓
+        dt_counterfactual 無法比較「AI 過濾到底有沒有加分」。
+        """
+        sql = "SELECT * FROM dt_prediction_log WHERE date = ? AND outcome IS NULL"
+        if not include_skipped:
+            sql += " AND action = 'long'"
+        sql += " ORDER BY dt_score DESC"
         with self._conn() as conn:
-            return conn.execute("""
-                SELECT * FROM dt_prediction_log
-                WHERE date = ? AND action = 'long' AND outcome IS NULL
-                ORDER BY dt_score DESC
-            """, (target_date,)).fetchall()
+            return conn.execute(sql, (target_date,)).fetchall()
 
     def win_rate_summary(self, days: int = 30) -> dict:
         """近 N 日 long 預測勝率統計（只計 outcome 已填入者）。"""

@@ -126,18 +126,36 @@ def _determine_outcome(
     return "neutral", None
 
 
+_MISSED_GAIN_PCT = 3.0   # 觀望股當日最高漲幅逾此值，視為「可能錯過」
+
+
+def _day_gain_pct(ohlc: dict) -> float:
+    """當日開盤到最高的漲幅（%），代表當沖可及的最大機會。"""
+    o = ohlc.get("open") or 0.0
+    if o <= 0:
+        return 0.0
+    return (ohlc["high"] - o) / o * 100.0
+
+
 def run_daytrading_review(
     db_path: str = _DEFAULT_DB,
     today:   Optional[str] = None,
+    include_skipped: bool = True,
 ) -> str:
-    """複盤今日當沖預測，回傳 Telegram HTML 摘要。"""
+    """複盤今日當沖預測，回傳 Telegram HTML 摘要。
+
+    include_skipped=True（預設）：連 AI 判 skip 的候選也一併補 OHLC。
+    long 照舊算 outcome/was_correct（準確率）；skip 沒有目標價可判對錯，
+    was_correct 維持 None（不污染 long 勝率），但補齊的 OHLC 讓我們能看出
+    「AI 說不要、結果它大漲」的機會成本，也供 dt_counterfactual 做反事實比較。
+    """
     from daytrading_db import DaytradingDB, DTReview
 
     if today is None:
         today = date.today().isoformat()
 
     db    = DaytradingDB(db_path)
-    rows  = db.get_unreviewed(today)
+    rows  = db.get_unreviewed(today, include_skipped=include_skipped)
 
     if not rows:
         return (
@@ -169,19 +187,24 @@ def run_daytrading_review(
                         "outcome": outcome, "was_correct": was_correct})
 
     # ── 組合摘要 ──────────────────────────────────────────────────
-    wins    = sum(1 for r in results if r["was_correct"] == 1)
-    losses  = sum(1 for r in results if r["was_correct"] == 0)
-    neutral = sum(1 for r in results if r["was_correct"] is None)
+    # long（實際建議做多）才計入準確率；skip 只補 OHLC 供機會成本檢視。
+    longs = [r for r in results if r["row"]["action"] == "long"]
+    skips = [r for r in results if r["row"]["action"] != "long"]
+
+    wins    = sum(1 for r in longs if r["was_correct"] == 1)
+    losses  = sum(1 for r in longs if r["was_correct"] == 0)
+    neutral = sum(1 for r in longs if r["was_correct"] is None)
 
     lines = [
         "📋 <b>當沖預測複盤</b>",
         "━━━━━━━━━━━━━━━━",
-        f"日期：{today}　共複盤 {len(results)} 支",
+        f"日期：{today}　做多預測 {len(longs)} 支"
+        + (f"　觀望 {len(skips)} 支" if skips else ""),
         f"✅ 達標 {wins}　❌ 停損 {losses}　⬜ 未觸發 {neutral}",
         "",
     ]
 
-    for r in results:
+    for r in longs:
         row    = r["row"]
         ohlc   = r["ohlc"]
         # 用 .get 而非 [] ——新增 outcome 值時不該讓整份複盤摘要炸掉
@@ -199,6 +222,24 @@ def run_daytrading_review(
             f"　→ 最高 {ohlc['high']:.1f}　最低 {ohlc['low']:.1f}"
         )
         lines.append(f"   {label}　收盤 {ohlc['close']:.1f}")
+        lines.append("")
+
+    # ── 觀望檢視：AI 說不要，結果它漲了嗎？（機會成本 / 過濾是否過嚴）──
+    if skips:
+        missed = [r for r in skips if _day_gain_pct(r["ohlc"]) >= _MISSED_GAIN_PCT]
+        lines.append(f"👁 <b>觀望檢視</b>（AI 判斷不做的 {len(skips)} 支）")
+        if missed:
+            lines.append(f"   其中 {len(missed)} 支當日最高漲逾 {_MISSED_GAIN_PCT:.0f}%：")
+            for r in sorted(missed, key=lambda x: -_day_gain_pct(x["ohlc"]))[:5]:
+                row, ohlc = r["row"], r["ohlc"]
+                lines.append(
+                    f"   · <b>{row['code']} {row['name']}</b>"
+                    f"　開 {ohlc['open']:.1f} → 高 {ohlc['high']:.1f}"
+                    f"（+{_day_gain_pct(ohlc):.1f}%）"
+                )
+            lines.append("   <i>機會成本參考：連續多日錯失代表過濾可能過嚴</i>")
+        else:
+            lines.append("   <i>無明顯錯失，過濾判斷合理</i>")
         lines.append("")
 
     # 近 30 日累計勝率
