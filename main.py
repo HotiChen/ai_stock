@@ -1710,7 +1710,22 @@ def main() -> None:
                     from telegram_bot import send_text
                     send_text(TELEGRAM_CHAT_ID, report)
             except Exception as e:
-                log.warning("DayTrading report push failed: %s", e)
+                # 這裡原本只 log.warning，導致 build_daytrading_report 的
+                # TypeError（None >= float）靜默失敗數週：當沖預測一筆都沒
+                # 產生、dt_prediction_log 全空，但沒有任何人知道。
+                # 當沖預測失敗＝當日整套當沖停擺，必須立刻讓人看見。
+                log.error("當沖預測產生失敗（今日無候選）: %s", e, exc_info=True)
+                if TELEGRAM_CHAT_ID:
+                    try:
+                        from telegram_bot import send_text
+                        send_text(
+                            TELEGRAM_CHAT_ID,
+                            f"🚨 <b>當沖預測產生失敗</b>\n"
+                            f"今日不會有任何當沖候選，請檢查 logs/main.log。\n"
+                            f"錯誤：{e}",
+                        )
+                    except Exception:
+                        pass
 
             _fired_today.add(f"{today_prefix}-0830")
             time.sleep(60)

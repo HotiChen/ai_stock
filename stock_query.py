@@ -106,6 +106,18 @@ def _fetch_annual_trend(code: str, api=None) -> dict:
 # _assess_day_trading
 # ---------------------------------------------------------------------------
 
+def _num(val, default: float):
+    """取數值，把 None 當成「沒有這個值」而回傳 default。
+
+    為什麼需要這個：dict.get(key, default) 的 default **只在 key 不存在時**
+    生效。技術指標／籌碼／大盤資料算不出來時，key 往往是存在的、值為 None
+    （例如資料筆數不足以算 RSI）。直接 .get 會取到 None，後續與門檻比較就
+    炸成 TypeError（'>=' not supported between NoneType and float），整個
+    build_daytrading_report 被上層 try/except 吞掉 → 當日零候選、預測不落庫。
+    """
+    return default if val is None else val
+
+
 def _assess_day_trading(
     indicators: Optional[dict],
     chip: Optional[dict] = None,
@@ -144,14 +156,15 @@ def _assess_day_trading(
             reasons_bad=["技術指標資料不可用"],
         )
 
-    volume_ratio = indicators.get("volume_ratio", 1.0)
-    rsi          = indicators.get("RSI", 50.0)
-    atr          = indicators.get("ATR", 0.0)
-    current_price= indicators.get("current_price", 0.0)
-    bullish      = indicators.get("bullish_alignment", False)
-    bearish      = indicators.get("bearish_alignment", False)
-    kd_k         = indicators.get("KD_K", 50.0)
-    kd_d         = indicators.get("KD_D", 50.0)
+    # 一律經 _num()：值可能存在但為 None（指標算不出來），不能直接比較
+    volume_ratio = _num(indicators.get("volume_ratio"), 1.0)
+    rsi          = _num(indicators.get("RSI"), 50.0)
+    atr          = _num(indicators.get("ATR"), 0.0)
+    current_price= _num(indicators.get("current_price"), 0.0)
+    bullish      = bool(indicators.get("bullish_alignment") or False)
+    bearish      = bool(indicators.get("bearish_alignment") or False)
+    kd_k         = _num(indicators.get("KD_K"), 50.0)
+    kd_d         = _num(indicators.get("KD_D"), 50.0)
 
     # ── 量比評估 ────────────────────────────────────────────────
     if volume_ratio >= 2.0:
@@ -202,7 +215,7 @@ def _assess_day_trading(
         score -= 1
 
     # ── VWAP 評估 ────────────────────────────────────────────────
-    vwap = indicators.get("VWAP", 0.0)
+    vwap = _num(indicators.get("VWAP"), 0.0)
     if vwap and vwap > 0 and current_price > 0:
         ratio = current_price / vwap
         if ratio > 1.005:
@@ -214,10 +227,10 @@ def _assess_day_trading(
 
     # ── 法人籌碼評分 ─────────────────────────────────────────────
     if chip is not None:
-        foreign_net  = chip.get("foreign_net", 0)
-        trust_net    = chip.get("investment_trust_net", 0)
-        dealer_net   = chip.get("dealer_net", 0)
-        foreign_cont = chip.get("foreign_continuous_buy", 0)
+        foreign_net  = _num(chip.get("foreign_net"), 0)
+        trust_net    = _num(chip.get("investment_trust_net"), 0)
+        dealer_net   = _num(chip.get("dealer_net"), 0)
+        foreign_cont = _num(chip.get("foreign_continuous_buy"), 0)
 
         if foreign_net >= 1000:
             reasons_good.append(f"外資大買 {foreign_net:,.0f} 張，動能強勁")
@@ -250,7 +263,7 @@ def _assess_day_trading(
 
     # ── 大盤方向加權 ─────────────────────────────────────────────
     if market is not None:
-        index_pct = market.get("index_change_pct", 0.0)
+        index_pct = _num(market.get("index_change_pct"), 0.0)
         if index_pct <= -1.0:
             reasons_bad.append(f"大盤大跌 {index_pct:.2f}%，當沖風險高")
             score -= 2
@@ -262,7 +275,7 @@ def _assess_day_trading(
             score += 1
 
         # ── 台指期溢貼水 ─────────────────────────────────────────
-        futures_pct = market.get("futures_premium_pct", 0.0)
+        futures_pct = _num(market.get("futures_premium_pct"), 0.0)
         if futures_pct >= 0.3:
             reasons_good.append(f"台指期溢價 +{futures_pct:.2f}%，期市偏多")
             score += 1
