@@ -228,11 +228,32 @@ def _advisor_analysis(
     )
 
 
+def _open_review_db(db_cls, review_db_path: str | None):
+    """開啟「當沖複盤資料庫」(data/daytrading_review.db)。
+
+    為什麼要獨立這個 helper：預測（dt_prediction_log）與 AI 決策
+    （ai_decision_log）屬於**複盤資料庫**，和本模組參數 db_path 指的
+    research / learning 資料庫是兩個不同的檔案，絕不可混用。
+
+    歷史 bug：這兩處曾寫成 DaytradingDB(db_path)，於是預測全部落進
+    research.db / learning.db；而三個讀取端（daytrading_review、
+    dt_paper_trade、adaptive_scorer）都讀 data/daytrading_review.db
+    → 複盤永遠「無待複盤記錄」、每日 #1 Pick 永遠 no_pick、
+    adaptive_scorer 學不到東西，且 log 還會顯示 "saved N predictions"
+    讓人以為有存到。
+
+    review_db_path=None 時使用 DaytradingDB 自己的預設路徑（正式環境）；
+    測試可傳入 tmp 路徑以免污染正式複盤庫。
+    """
+    return db_cls(review_db_path) if review_db_path else db_cls()
+
+
 def build_daytrading_report(
     api=None,
     db_path: str = DB_PATH,
     analysis_count: int | None = None,
     display_count: int | None = None,
+    review_db_path: str | None = None,
 ) -> str:
     """建立今日當沖預測報告，回傳 Telegram HTML 字串。
 
@@ -383,7 +404,7 @@ def build_daytrading_report(
             from daytrading_db import DaytradingDB
             ai = ai_map.get(r["code"])
             now = datetime.now()
-            DaytradingDB(db_path).log_ai_decision(
+            _open_review_db(DaytradingDB, review_db_path).log_ai_decision(
                 date=date.today().isoformat(),
                 time=now.strftime("%H:%M"),
                 code=r["code"],
@@ -445,8 +466,9 @@ def build_daytrading_report(
                 ai_summary=ai.summary if ai else "",
             ))
         if predictions:
-            n = DaytradingDB(db_path).save_predictions(predictions)
-            log.info("daytrading_db: saved %d predictions", n)
+            n = _open_review_db(DaytradingDB, review_db_path).save_predictions(predictions)
+            log.info("daytrading_db: saved %d predictions → %s",
+                     n, review_db_path or "data/daytrading_review.db")
     except Exception as e:
         log.warning("save_predictions failed: %s", e)
 
