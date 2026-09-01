@@ -37,6 +37,25 @@ def _isolate_external_credentials() -> None:
 
 _isolate_external_credentials()
 
+
+# ---------------------------------------------------------------------------
+# 測試絕不嘗試登入 Shioaji。
+# 行情資料改走 Shioaji 之後，十幾個模組會在沒有 api 時呼叫
+# shioaji_session.get_api()；即使憑證已被清空，login() 仍會打網路並等到
+# timeout——tests/test_stock_query.py 因此從 <1 秒變成 20 秒，並偶發失敗。
+# 這裡把實際登入換成「永遠失敗」，模組會走既有的「無連線」降級路徑，
+# 那正是我們要測的行為。需要 api 的測試自行傳入假物件或 patch。
+# ---------------------------------------------------------------------------
+def _disable_shioaji_login() -> None:
+    try:
+        import shioaji_session
+        shioaji_session._connect = lambda *a, **k: None
+    except Exception:
+        pass
+
+
+_disable_shioaji_login()
+
 # ---------------------------------------------------------------------------
 # 在任何 import 之前，把 google.genai 注入為 stub，
 # 避免 ci 環境缺少套件或 cryptography ABI 不相容造成 collection error。
