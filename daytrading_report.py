@@ -35,24 +35,39 @@ def _fetch_historical_win_rate(db_path: str) -> Optional[float]:
 
 
 def _get_indicators(code: str, api=None) -> Optional[dict]:
-    """嘗試取技術指標：Shioaji → yfinance fallback → None。"""
-    if api is not None:
-        try:
-            from technical_indicators import fetch_indicators
-            result = fetch_indicators(api, code)
-            if result is not None:
-                return result
-        except Exception as e:
-            log.debug("fetch_indicators(%s) failed: %s", code, e)
+    """取技術指標：Shioaji 即時 kbars → Shioaji 歷史日線 → None。
+
+    原本第二段是 yfinance，已移除。兩段都走 Shioaji：第一段用
+    fetch_indicators（即時合約路徑），失敗再用歷史日線重算，兩者資料來源
+    一致，8:30 算出的指標才會和盤中看到的價格對得起來。
+    """
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api()
+    if api is None:
+        log.warning("_get_indicators(%s)：無 Shioaji 連線", code)
+        return None
 
     try:
-        import yfinance as yf
-        from technical_indicators import calculate_indicators
-        df = yf.Ticker(f"{code}.TW").history(period="6mo")
-        if df is not None and not df.empty and len(df) >= 80:
+        from technical_indicators import fetch_indicators
+        result = fetch_indicators(api, code)
+        if result is not None:
+            return result
+    except Exception as e:
+        log.debug("fetch_indicators(%s) failed: %s", code, e)
+
+    try:
+        from datetime import timedelta
+
+        import shioaji_history as sh
+        from technical_indicators import INDICATOR_HISTORY_DAYS, calculate_indicators
+        end = date.today()
+        df = sh.fetch_daily(api, code, end - timedelta(days=INDICATOR_HISTORY_DAYS),
+                            end, chunk_days=INDICATOR_HISTORY_DAYS)
+        if df is not None and len(df) >= 80:
             return calculate_indicators(df)
     except Exception as e:
-        log.debug("yfinance indicators(%s) failed: %s", code, e)
+        log.debug("Shioaji 歷史指標(%s) failed: %s", code, e)
 
     return None
 
@@ -102,28 +117,27 @@ def _market_label(pct: float) -> str:
     return f"📊 {pct:+.2f}%（平盤）"
 
 
-def _resolve_name(code: str, name: str) -> str:
-    """若 name 與 code 相同（代表未成功取到名稱），嘗試用 yfinance 補查。"""
+def _resolve_name(code: str, name: str, api=None) -> str:
+    """若 name 與 code 相同（代表未成功取到名稱），用 Shioaji contract.name 補查。
+
+    原本走 yfinance fast_info，已移除：它常回英文名或 "2330.TW" 這種無意義
+    字串（原程式碼還得特別過濾），而 Shioaji 的 contract.name 本來就是中文股名。
+    """
     if name and name != code:
         return name
-    try:
-        import yfinance as yf
-        info = yf.Ticker(f"{code}.TW").fast_info
-        short = getattr(info, "shortName", None) or getattr(info, "longName", None)
-        if short:
-            # yfinance 有時回傳 "2330.TW" 格式，略過
-            if short != f"{code}.TW" and not short.endswith(".TW"):
-                return short
-    except Exception:
-        pass
-    return name or code
+    import shioaji_quotes
+
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api(connect=False)
+    return shioaji_quotes.stock_name(api, code) or name or code
 
 
 def _get_stock_universe(api, top_n: int = 50) -> list[dict]:
     """取得全市場候選池（掃描所有股票），固定回傳 code+name 的列表。
 
     Real mode : Shioaji snapshots → 取量/漲跌排前 top_n
-    Sim mode  : TWSE → yfinance → 保底清單
+    Sim mode  : TWSE → Shioaji → 保底清單
     """
     try:
         from market_scanner import (
@@ -147,7 +161,7 @@ def _get_stock_universe(api, top_n: int = 50) -> list[dict]:
         except Exception as e:
             log.warning("_get_stock_universe (shioaji) failed: %s", e)
 
-    # 模擬模式：TWSE → yfinance → 保底
+    # 模擬模式：TWSE → Shioaji → 保底
     rows = fetch_twse_sim_candidates(ScanCriteria(
         min_volume=0, min_price=0.0, max_price=999999.0, top_n=top_n,
     ))

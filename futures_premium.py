@@ -5,7 +5,7 @@ futures_premium.py — 台指期貨溢價/貼水
 供盤前當沖分析使用。
 
 資料來源優先順序：
-  現貨：Shioaji 指數快照 → yfinance ^TWII
+  現貨：Shioaji 指數快照（yfinance ^TWII 備援已移除）
   期貨：Shioaji TXF 快照 → TWSE MIS API
 """
 from __future__ import annotations
@@ -56,26 +56,18 @@ def calc_premium(spot: float, futures: float) -> dict:
 # ── Data fetchers ─────────────────────────────────────────────────────────────
 
 def fetch_spot_index(api=None) -> Optional[float]:
-    """取加權指數現值：Shioaji → yfinance → None。"""
-    # 1. Shioaji 指數快照
-    if api is not None:
-        try:
-            snap = api.snapshots([api.Contracts.Indices["TAIEX"]])
-            if snap:
-                return round(float(snap[0].close), 2)
-        except Exception as e:
-            log.debug("Shioaji spot index failed: %s", e)
+    """取加權指數現值（Shioaji）。取不到回 None。
 
-    # 2. yfinance ^TWII
-    try:
-        import yfinance as yf
-        df = yf.Ticker("^TWII").history(period="1d")
-        if df is not None and not df.empty:
-            return round(float(df["Close"].iloc[-1]), 2)
-    except Exception as e:
-        log.debug("yfinance spot index failed: %s", e)
+    原本有 yfinance ^TWII 備援，已移除。合約解析改用
+    shioaji_quotes（同時支援 Contracts.Indexs.TSE["001"] 與舊版
+    Contracts.Indices["TAIEX"] 兩種路徑）。
+    """
+    import shioaji_quotes
 
-    return None
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api(connect=False)
+    return shioaji_quotes.index_price(api)
 
 
 def fetch_futures_price(api=None) -> Optional[float]:

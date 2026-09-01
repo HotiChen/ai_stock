@@ -18,30 +18,18 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _fetch_stock_name(code: str, api=None) -> str:
-    """查股票名稱。
-    優先用 Shioaji contract，失敗則用 yfinance，再失敗就回傳 code。
+    """查股票名稱（Shioaji contract.name），查不到回傳 code。
+
+    原本有 yfinance 備援（ticker.info），已移除：那個呼叫很慢（要抓整份
+    公司資訊）、常回英文名或 "2330.TW" 這種無意義字串，而 Shioaji 的
+    contract.name 本來就是中文股名。
     """
-    # 1. Shioaji
-    if api is not None:
-        try:
-            contract = api.Contracts.Stocks.get(code)
-            if contract and getattr(contract, "name", None):
-                return contract.name
-        except Exception as e:
-            log.debug("Shioaji name lookup failed for %s: %s", code, e)
+    import shioaji_quotes
 
-    # 2. yfinance fallback
-    try:
-        import yfinance as yf  # type: ignore
-        ticker = yf.Ticker(f"{code}.TW")
-        info = ticker.info
-        name = info.get("longName") or info.get("shortName") or ""
-        if name:
-            return name
-    except Exception as e:
-        log.debug("yfinance name lookup failed for %s: %s", code, e)
-
-    return code
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api(connect=False)
+    return shioaji_quotes.stock_name(api, code)
 
 
 # ---------------------------------------------------------------------------
@@ -49,13 +37,15 @@ def _fetch_stock_name(code: str, api=None) -> str:
 # ---------------------------------------------------------------------------
 
 def _fetch_annual_trend(code: str, api=None) -> dict:
-    """用 yfinance 取近一年走勢。
+    """取近一年走勢（Shioaji 日線）。
 
     Returns:
         dict with keys:
             start_price, end_price, high_52w, low_52w,
             change_pct, monthly_closes, error
     """
+    from datetime import date as _date, timedelta as _timedelta
+
     _empty = dict(
         start_price=None,
         end_price=None,
@@ -65,14 +55,23 @@ def _fetch_annual_trend(code: str, api=None) -> dict:
         monthly_closes=[],
         error="",
     )
+
+    import shioaji_history as sh
+
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api()
+    if api is None:
+        return {**_empty, "error": "無 Shioaji 連線"}
+
     try:
-        import yfinance as yf  # type: ignore
-
-        ticker = yf.Ticker(f"{code}.TW")
-        df = ticker.history(period="1y")
-
-        if df is None or df.empty:
-            return {**_empty, "error": "yfinance 無資料"}
+        end_d = _date.today()
+        start_d = end_d - _timedelta(days=365)
+        # 一次抓完整區間：分小段會變成十幾次 kbars 呼叫，查股是互動式操作，
+        # 使用者在等，不能慢。
+        df = sh.fetch_daily(api, code, start_d, end_d, chunk_days=365)
+        if df is None or len(df) == 0:
+            return {**_empty, "error": "Shioaji 無資料"}
 
         closes = df["Close"].dropna()
         if len(closes) < 2:
@@ -84,9 +83,8 @@ def _fetch_annual_trend(code: str, api=None) -> dict:
         low_52w     = float(df["Low"].min())
         change_pct  = (end_price - start_price) / start_price * 100 if start_price else 0.0
 
-        # 取每月最後一個收盤價
         monthly = closes.resample("ME").last()
-        monthly_closes = [round(float(v), 2) for v in monthly.values]
+        monthly_closes = [round(float(v), 2) for v in monthly.dropna().values]
 
         return dict(
             start_price=round(start_price, 2),
@@ -95,10 +93,10 @@ def _fetch_annual_trend(code: str, api=None) -> dict:
             low_52w=round(low_52w, 2),
             change_pct=round(change_pct, 2),
             monthly_closes=monthly_closes,
-            error=None,
+            error="",
         )
     except Exception as e:
-        log.warning("_fetch_annual_trend failed for %s: %s", code, e)
+        log.warning("_fetch_annual_trend(%s) 失敗: %s", code, e)
         return {**_empty, "error": str(e)}
 
 
@@ -404,7 +402,7 @@ def format_query_report(
             lines.append(f"  {i}. {item}")
 
     lines.append("")
-    lines.append(f"<i>資料來源：yfinance / Shioaji</i>")
+    lines.append(f"<i>資料來源：Shioaji</i>")
 
     return "\n".join(lines)
 
@@ -541,7 +539,7 @@ def query_stock(code: str, api=None) -> str:
             log.warning("_fetch_stock_name error: %s", e)
             name = code
 
-        # 2. 技術指標：Shioaji → yfinance fallback
+        # 2. 技術指標：Shioaji kbars（即時合約 → 歷史日線）
         indicators = None
         if api is not None:
             try:
@@ -551,15 +549,27 @@ def query_stock(code: str, api=None) -> str:
                 log.warning("fetch_indicators error for %s: %s", code, e)
 
         if indicators is None:
-            # yfinance fallback（Shioaji 無資料或 api=None 時）
+            # 原本是 yfinance fallback，改走 Shioaji 歷史日線
             try:
-                import yfinance as yf  # type: ignore
-                from technical_indicators import calculate_indicators  # type: ignore
-                df = yf.Ticker(f"{code}.TW").history(period="6mo")
-                if df is not None and not df.empty and len(df) >= 80:
-                    indicators = calculate_indicators(df)
+                from datetime import date as _d, timedelta as _td
+
+                import shioaji_history as sh
+                from technical_indicators import (  # type: ignore
+                    INDICATOR_HISTORY_DAYS, calculate_indicators,
+                )
+                _api = api
+                if _api is None:
+                    import shioaji_session
+                    _api = shioaji_session.get_api()
+                if _api is not None:
+                    _end = _d.today()
+                    df = sh.fetch_daily(_api, code,
+                                        _end - _td(days=INDICATOR_HISTORY_DAYS), _end,
+                                        chunk_days=INDICATOR_HISTORY_DAYS)
+                    if df is not None and len(df) >= 80:
+                        indicators = calculate_indicators(df)
             except Exception as e:
-                log.debug("yfinance indicators calc failed: %s", e)
+                log.debug("Shioaji indicators calc failed: %s", e)
 
         # 3. 年度走勢
         try:

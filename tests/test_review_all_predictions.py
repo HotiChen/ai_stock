@@ -61,7 +61,9 @@ class TestReviewCoversSkipped:
     def _run(self, db_path, bars_by_code):
         from daytrading_review import run_daytrading_review
 
-        def _fake_bars(code):
+        def _fake_bars(code, day=None, api=None):
+            # 簽名要跟著 _fetch_intraday_bars 走：改抓 Shioaji 之後多了
+            # day / api 兩個參數（day 讓回填的歷史預測也複盤得了）。
             return bars_by_code.get(code)
 
         with patch("daytrading_review._fetch_intraday_bars", side_effect=_fake_bars):

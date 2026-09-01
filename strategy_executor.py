@@ -60,17 +60,18 @@ class CycleResult:
 
 # ── Price helper ──────────────────────────────────────────────────────────────
 
-def get_current_price(code: str) -> Optional[float]:
-    """Get latest close price via yfinance (simulation mode)."""
-    try:
-        import yfinance as yf
-        df = yf.download(f"{code}.TW", period="2d", interval="1d",
-                         progress=False, auto_adjust=True)
-        if df is not None and len(df) >= 1:
-            return float(df["Close"].dropna().values[-1])
-    except Exception:
-        pass
-    return None
+def get_current_price(code: str, api=None) -> Optional[float]:
+    """最新成交價（Shioaji）。取不到回 None。
+
+    原本走 yfinance download，已移除。改走 snapshot，並由
+    shioaji_quotes.latest_price 過濾 close == 0（報價 session 未暖機的情況）。
+    """
+    import shioaji_quotes
+
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api(connect=False)
+    return shioaji_quotes.latest_price(api, code)
 
 
 # ── Core logic ────────────────────────────────────────────────────────────────

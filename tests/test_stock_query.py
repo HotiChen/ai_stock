@@ -135,48 +135,58 @@ class TestFetchAnnualTrend:
         from stock_query import _fetch_annual_trend
         return _fetch_annual_trend
 
-    def test_yfinance_success_calculates_correctly(self):
-        """Test 5: yfinance returns data → change_pct correct, monthly_closes non-empty"""
+    def test_shioaji_success_calculates_correctly(self):
+        """資料來源改為 Shioaji 日線 → change_pct 正確、monthly_closes 非空。"""
         _fetch_annual_trend = self._import()
 
-        import pandas as pd
         import numpy as np
+        import pandas as pd
 
-        # Build a fake 252-row OHLCV DataFrame
         dates = pd.date_range("2025-01-01", periods=252, freq="B")
         closes = np.linspace(100.0, 120.0, 252)
         df = pd.DataFrame({
+            "Open": closes - 0.5,
             "Close": closes,
             "High": closes + 2,
             "Low": closes - 2,
             "Volume": np.ones(252) * 1_000_000,
         }, index=dates)
 
-        mock_ticker = MagicMock()
-        mock_ticker.history.return_value = df
+        with patch("shioaji_history.fetch_daily", return_value=df):
+            result = _fetch_annual_trend("2330", api=MagicMock())
 
-        with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = _fetch_annual_trend("2330")
-
-        assert result.get("error") is None or result.get("error") == ""
-        assert result["monthly_closes"] is not None and len(result["monthly_closes"]) > 0
-        # change_pct should be positive (120 > 100)
+        assert result.get("error") in (None, "")
+        assert result["monthly_closes"] and len(result["monthly_closes"]) > 0
         assert result["change_pct"] > 0
 
-    def test_yfinance_failure_returns_error_field(self):
-        """Test 6: yfinance raises → error field non-empty, no exception raised"""
+    def test_no_connection_reports_error_not_exception(self):
+        """★ 無 Shioaji 連線時要回 error 欄位，不得拋出——查股是互動式操作，
+        炸掉會讓 Telegram 沒有任何回應。"""
         _fetch_annual_trend = self._import()
+        with patch("shioaji_session.get_api", return_value=None):
+            result = _fetch_annual_trend("2330")
+        assert result["error"]
+        assert result["monthly_closes"] == []
 
-        with patch("yfinance.Ticker", side_effect=Exception("network error")):
-            result = _fetch_annual_trend("9999")
+    def test_single_kbars_call(self):
+        """一次抓完整年：分小段會變成十幾次呼叫，使用者在等。"""
+        _fetch_annual_trend = self._import()
+        import numpy as np, pandas as pd
+        dates = pd.date_range("2025-01-01", periods=252, freq="B")
+        closes = np.linspace(100.0, 120.0, 252)
+        df = pd.DataFrame({"Open": closes, "Close": closes, "High": closes + 1,
+                           "Low": closes - 1, "Volume": np.ones(252)}, index=dates)
+        with patch("shioaji_history.fetch_daily", return_value=df) as fd:
+            _fetch_annual_trend("2330", api=MagicMock())
+        assert fd.call_count == 1
 
-        assert isinstance(result, dict)
-        assert result.get("error")  # non-empty error
+    def test_fetch_failure_returns_error_field(self):
+        """抓取失敗 → error 欄位非空，不得拋出。"""
+        _fetch_annual_trend = self._import()
+        with patch("shioaji_history.fetch_daily", side_effect=Exception("kbars error")):
+            result = _fetch_annual_trend("9999", api=MagicMock())
+        assert result["error"]
 
-
-# ===========================================================================
-# Tests for format_query_report()
-# ===========================================================================
 
 class TestFormatQueryReport:
     """Tests 7-10: format_query_report(...) -> str"""

@@ -57,6 +57,20 @@ class TestCalcPremium:
 # ── fetch_spot_index ──────────────────────────────────────────────────────────
 
 class TestFetchSpotIndex:
+    """yfinance ^TWII 備援已移除，只走 Shioaji 指數合約。"""
+
+    def test_returns_none_when_no_connection(self):
+        from futures_premium import fetch_spot_index
+        with patch("shioaji_session.get_api", return_value=None):
+            assert fetch_spot_index() is None
+
+    def test_returns_none_when_snapshot_raises(self):
+        from futures_premium import fetch_spot_index
+        api = MagicMock()
+        api.Contracts.Indexs.TSE = {"001": object()}
+        api.snapshots.side_effect = Exception("quote session down")
+        assert fetch_spot_index(api=api) is None
+
     def _mock_yf(self, close=20000.0):
         import pandas as pd, numpy as np
         mock_yf = MagicMock()
@@ -64,13 +78,6 @@ class TestFetchSpotIndex:
         mock_yf.Ticker.return_value.history.return_value = df
         return mock_yf
 
-    def test_yfinance_success_returns_float(self):
-        from futures_premium import fetch_spot_index
-        import sys
-        with patch.dict(sys.modules, {"yfinance": self._mock_yf(20000.0)}):
-            result = fetch_spot_index()
-        assert isinstance(result, float)
-        assert result == pytest.approx(20000.0)
 
     def test_yfinance_empty_returns_none(self):
         from futures_premium import fetch_spot_index
@@ -99,17 +106,6 @@ class TestFetchSpotIndex:
         result = fetch_spot_index(api=api)
         assert result == pytest.approx(21000.0)
 
-    def test_shioaji_failure_falls_back_to_yfinance(self):
-        from futures_premium import fetch_spot_index
-        import sys
-        api = MagicMock()
-        api.snapshots.side_effect = Exception("api error")
-        with patch.dict(sys.modules, {"yfinance": self._mock_yf(20500.0)}):
-            result = fetch_spot_index(api=api)
-        assert result == pytest.approx(20500.0)
-
-
-# ── fetch_futures_price ───────────────────────────────────────────────────────
 
 class TestFetchFuturesPrice:
     def test_shioaji_success_returns_float(self):

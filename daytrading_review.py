@@ -3,7 +3,7 @@ daytrading_review.py — 收盤後當沖預測複盤
 
 流程：
   1. 取今日 dt_prediction_log 中 action='long' 且未複盤的記錄
-  2. 用 yfinance 抓當日 OHLC
+  2. 用 Shioaji 抓當日分鐘 K（聚合出 OHLC）
   3. 判斷 outcome：hit_target / hit_stop / neutral
   4. 回寫 DB
   5. 回傳 Telegram HTML 摘要
@@ -25,45 +25,34 @@ _DEFAULT_DB = "data/daytrading_review.db"
 _MIN_TESTABLE_RANGE_PCT = 0.5
 
 
-def _fetch_intraday_bars(code: str) -> Optional[list[dict]]:
-    """抓今日分鐘 K 線，回傳 list of {open, high, low, close} 或 None。
+def _fetch_intraday_bars(code: str, day=None, api=None) -> Optional[list[dict]]:
+    """抓指定日期的分鐘 K，回傳 [{open, high, low, close}, ...] 或 None。
 
-    優先使用 yfinance 1m interval 取今日盤中資料。
-    若失敗（非今日或資料不足），fallback 回日 K 邏輯。
+    資料來源為 Shioaji kbars。原本走 yfinance，已移除——yfinance 的 1 分鐘
+    資料只保留最近 7 天，複盤回填的歷史預測（dt_backfill 產生的 60 個交易日）
+    根本抓不到；而且沒有分鐘 K 就無法判斷「當日先觸停利還是先觸停損」，
+    只能保守假設停損先觸發，會系統性低估績效。
+
+    day=None 代表今日。api=None 時向 shioaji_session 取共用連線。
     """
-    try:
-        import yfinance as yf
-        df = yf.Ticker(f"{code}.TW").history(period="1d", interval="1m")
-        if df is not None and not df.empty and len(df) >= 5:
-            bars = [
-                {
-                    "open":  float(r["Open"]),
-                    "high":  float(r["High"]),
-                    "low":   float(r["Low"]),
-                    "close": float(r["Close"]),
-                }
-                for _, r in df.iterrows()
-            ]
-            return bars
-    except Exception as e:
-        log.debug("_fetch_intraday_bars(%s) 1m failed: %s", code, e)
+    from datetime import date as _date
 
-    # Fallback：日 K 線（period="2d"，取最後一根）
-    try:
-        import yfinance as yf
-        df = yf.Ticker(f"{code}.TW").history(period="2d")
-        if df is not None and not df.empty:
-            row = df.iloc[-1]
-            return [{
-                "open":  float(row["Open"]),
-                "high":  float(row["High"]),
-                "low":   float(row["Low"]),
-                "close": float(row["Close"]),
-            }]
-    except Exception as e:
-        log.debug("_fetch_intraday_bars(%s) daily fallback failed: %s", code, e)
+    import shioaji_history as sh
 
-    return None
+    if day is None:
+        day = _date.today()
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api()
+    if api is None:
+        log.warning("複盤：無 Shioaji 連線，無法取得 %s 的分鐘 K", code)
+        return None
+
+    bars = sh.fetch_minute_bars(api, code, day)
+    if not bars:
+        log.debug("_fetch_intraday_bars(%s, %s)：無分鐘 K", code, day)
+        return None
+    return bars
 
 
 def _ohlc_from_bars(bars: list[dict]) -> dict:
@@ -157,6 +146,13 @@ def run_daytrading_review(
     db    = DaytradingDB(db_path)
     rows  = db.get_unreviewed(today, include_skipped=include_skipped)
 
+    # 複盤日期可能不是今天（回填的歷史預測、或補跑前幾天的複盤），
+    # 所以要把日期一併傳給分鐘 K 抓取，不能讓它預設抓今日。
+    try:
+        review_day = date.fromisoformat(today)
+    except ValueError:
+        review_day = None
+
     if not rows:
         return (
             "📋 <b>當沖預測複盤</b>\n"
@@ -167,7 +163,7 @@ def run_daytrading_review(
     results = []
     for row in rows:
         code = row["code"]
-        bars = _fetch_intraday_bars(code)
+        bars = _fetch_intraday_bars(code, day=review_day)
         if bars is None:
             log.warning("review: 無法取得 %s 分鐘 K 線資料，跳過", code)
             continue

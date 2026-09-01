@@ -125,41 +125,34 @@ class TestFetchIntradayVwap:
             index=times,
         )
 
-    def test_api_none_tries_yfinance(self):
-        from technical_indicators import fetch_intraday_vwap
-        df = self._make_intraday_df()
-        mock_yf = MagicMock()
-        mock_yf.Ticker.return_value.history.return_value = df
-        with patch.dict(__import__("sys").modules, {"yfinance": mock_yf}):
-            result = fetch_intraday_vwap("2330", api=None)
-        assert result is not None
-        assert isinstance(result, float)
+    # yfinance 備援已移除（台股分鐘 K 在 yfinance 上延遲且常缺值，算出的
+    # VWAP 與券商端對不起來）。以下改為驗證「只走 Shioaji，取不到就 None」。
 
-    def test_yfinance_success_returns_float(self):
+    def test_api_none_uses_shared_session(self):
+        """未傳 api 時要向 shioaji_session 取共用連線，不可自行 login。"""
         from technical_indicators import fetch_intraday_vwap
-        df = self._make_intraday_df()
-        mock_yf = MagicMock()
-        mock_yf.Ticker.return_value.history.return_value = df
-        with patch.dict(__import__("sys").modules, {"yfinance": mock_yf}):
-            result = fetch_intraday_vwap("2330")
-        assert isinstance(result, float)
-        assert result > 0
+        with patch("shioaji_session.get_api", return_value=None) as g:
+            assert fetch_intraday_vwap("2330", api=None) is None
+        assert g.called
 
-    def test_yfinance_empty_df_returns_none(self):
+    def test_returns_none_when_no_connection(self):
         from technical_indicators import fetch_intraday_vwap
-        mock_yf = MagicMock()
-        mock_yf.Ticker.return_value.history.return_value = pd.DataFrame()
-        with patch.dict(__import__("sys").modules, {"yfinance": mock_yf}):
-            result = fetch_intraday_vwap("2330")
-        assert result is None
+        with patch("shioaji_session.get_api", return_value=None):
+            assert fetch_intraday_vwap("2330") is None
 
-    def test_yfinance_exception_returns_none(self):
+    def test_returns_none_when_kbars_empty(self):
         from technical_indicators import fetch_intraday_vwap
-        mock_yf = MagicMock()
-        mock_yf.Ticker.return_value.history.side_effect = Exception("timeout")
-        with patch.dict(__import__("sys").modules, {"yfinance": mock_yf}):
-            result = fetch_intraday_vwap("2330")
-        assert result is None
+        api = MagicMock()
+        api.Contracts.Stocks.get.return_value = MagicMock()
+        api.kbars.return_value = {"ts": []}
+        assert fetch_intraday_vwap("2330", api=api) is None
+
+    def test_returns_none_when_kbars_raises(self):
+        from technical_indicators import fetch_intraday_vwap
+        api = MagicMock()
+        api.Contracts.Stocks.get.return_value = MagicMock()
+        api.kbars.side_effect = Exception("quote session not ready")
+        assert fetch_intraday_vwap("2330", api=api) is None
 
     def test_shioaji_success_returns_float(self):
         from technical_indicators import fetch_intraday_vwap
@@ -178,16 +171,15 @@ class TestFetchIntradayVwap:
         assert isinstance(result, float)
         assert result > 0
 
-    def test_shioaji_failure_falls_back_to_yfinance(self):
+    def test_shioaji_failure_returns_none_no_fallback(self):
+        """★ 移除 yfinance 備援後，Shioaji 失敗就是 None。
+
+        這條刻意保留原本測試的情境（kbars 拋例外），只是斷言相反——
+        它釘住「不會偷偷從別的來源生一個價格出來」。"""
         from technical_indicators import fetch_intraday_vwap
         api = MagicMock()
         api.kbars.side_effect = Exception("api error")
-        df = self._make_intraday_df()
-        mock_yf = MagicMock()
-        mock_yf.Ticker.return_value.history.return_value = df
-        with patch.dict(__import__("sys").modules, {"yfinance": mock_yf}):
-            result = fetch_intraday_vwap("2330", api=api)
-        assert result is not None
+        assert fetch_intraday_vwap("2330", api=api) is None
 
 
 # ── VWAP scoring in _assess_day_trading ───────────────────────────────────────

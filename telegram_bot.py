@@ -460,17 +460,20 @@ def load_pending_planset(path: str = _PENDING_PLAN_PATH):
 
 # ── Price fetch ────────────────────────────────────────────────────────────────
 
-def _fetch_stock_price(code: str) -> float:
-    """用 yfinance 抓台股現價（code.TW）。失敗回傳 0.0（模擬模式繼續執行）。"""
-    try:
-        import yfinance as yf  # type: ignore
-        ticker = yf.Ticker(f"{code}.TW")
-        hist   = ticker.history(period="2d")
-        if not hist.empty:
-            return round(float(hist["Close"].iloc[-1]), 2)
-    except Exception:
-        pass
-    return 0.0
+def _fetch_stock_price(code: str, api=None) -> float:
+    """抓台股現價（Shioaji）。失敗回傳 0.0（維持原介面，呼叫端以 >0 判斷有效）。
+
+    原本走 yfinance，已移除。回傳型別維持 float 而非 Optional 是為了不動
+    既有呼叫端；但底層用 shioaji_quotes.latest_price，它會把 close == 0
+    視為「沒有報價」，所以 0.0 一律代表「取不到」，不會是真實價格。
+    """
+    import shioaji_quotes
+
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api(connect=False)
+    price = shioaji_quotes.latest_price(api, code)
+    return round(price, 2) if price is not None else 0.0
 
 
 # ── Plan execution ────────────────────────────────────────────────────────────
@@ -910,7 +913,7 @@ def handle_settle_now(chat_id: str) -> None:
     except Exception as e:
         log.warning("Shioaji fetch_closing_prices failed: %s", e)
 
-    # Shioaji 失敗或資料不完整 → yfinance fallback
+    # fetch_closing_prices 未涵蓋的，逐支再用 snapshot 補一次
     missing = [c for c in codes if c not in price_map or price_map[c] == 0]
     if missing:
         for code in missing:
@@ -922,7 +925,7 @@ def handle_settle_now(chat_id: str) -> None:
                 pass
 
     if not price_map:
-        send_text(chat_id, "❌ 無法取得收盤價（Shioaji 與 yfinance 均失敗），請稍後再試。")
+        send_text(chat_id, "❌ 無法取得收盤價（Shioaji 報價不可用），請稍後再試。")
         return
 
     settlement = settle_positions(positions, price_map)

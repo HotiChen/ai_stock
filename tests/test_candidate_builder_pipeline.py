@@ -12,75 +12,45 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from candidate_builder import build_candidates, _fetch_yfinance_prices
+from candidate_builder import build_candidates, _fetch_fallback_prices
 
 
 # ── _fetch_yfinance_prices ─────────────────────────────────────────────────────
 
-class TestFetchYfinancePrices:
-    """yfinance fallback 函數的行為（yf 是函數內 lazy import，需 sys.modules patch）。"""
+class TestFetchFallbackPrices:
+    """批次補價改走 Shioaji snapshot（原本是 yfinance batch download）。
 
-    def _make_yf_mock(self, prices: dict[str, float]):
-        """建立回傳指定價格的 yfinance mock。"""
-        mock_yf = MagicMock()
-        mock_col = MagicMock()
-        mock_col.dropna.return_value.iloc.__getitem__ = MagicMock(return_value=100.0)
+    Shioaji 直接用原始代號，沒有 .TW / .TWO 後綴的概念，所以原本的後綴測試
+    已無對應行為，改為驗證新的關鍵性質。
+    """
 
-        mock_close = MagicMock()
-        mock_close.__contains__ = MagicMock(return_value=True)
-        mock_close.__getitem__ = MagicMock(return_value=mock_col)
-        mock_close.columns = list(prices.keys())
+    def test_returns_prices_from_shioaji(self):
+        with patch("shioaji_quotes.batch_prices",
+                   return_value={"2330": 1050.0}) as bp:
+            assert _fetch_fallback_prices(["2330"], api=MagicMock()) == {"2330": 1050.0}
+        assert bp.called
 
-        mock_data = MagicMock()
-        mock_data.get = MagicMock(return_value=mock_close)
-        mock_yf.download.return_value = mock_data
-        return mock_yf
+    def test_codes_passed_without_suffix(self):
+        """★ 不得再加 .TW / .TWO——Shioaji 合約用的是原始代號，
+        加了後綴會查無合約而全部取不到價。"""
+        with patch("shioaji_quotes.batch_prices", return_value={}) as bp:
+            _fetch_fallback_prices(["2330", "00878B"], api=MagicMock())
+        assert list(bp.call_args[0][1]) == ["2330", "00878B"]
 
-    def test_suffix_pure_digit_gets_tw(self):
-        """4 位純數字代號應加 .TW 後綴。"""
-        mock_yf = self._make_yf_mock({"2330.TW": 850.0})
-        with patch.dict(sys.modules, {"yfinance": mock_yf}):
-            _fetch_yfinance_prices(["2330"])
-        call_args = mock_yf.download.call_args
-        symbols = call_args[0][0] if call_args[0] else call_args[1].get("tickers", [])
-        assert "2330.TW" in str(symbols)
+    def test_no_connection_returns_empty(self):
+        with patch("shioaji_session.get_api", return_value=None):
+            assert _fetch_fallback_prices(["2330"]) == {}
 
-    def test_suffix_alphanumeric_gets_two(self):
-        """含字母的代號（上櫃 ETF 如 00878B）應加 .TWO。"""
-        mock_yf = self._make_yf_mock({"00878B.TWO": 20.0})
-        with patch.dict(sys.modules, {"yfinance": mock_yf}):
-            _fetch_yfinance_prices(["00878B"])
-        call_args = mock_yf.download.call_args
-        assert "00878B.TWO" in str(call_args)
+    def test_missing_codes_omitted_not_zero_filled(self):
+        """★ 取不到的代號不得填 0.0——下游以 close > 0 判斷有效，
+        塞假價格會讓無報價的標的被當成正常標的送去 AI 分析。"""
+        with patch("shioaji_quotes.batch_prices", return_value={"2330": 1050.0}):
+            out = _fetch_fallback_prices(["2330", "9999"], api=MagicMock())
+        assert "9999" not in out
 
-    def test_import_error_returns_empty(self):
-        """yfinance 未安裝時回傳空 dict，不拋例外。"""
-        original = sys.modules.pop("yfinance", None)
-        # 使 import yfinance 失敗
-        sys.modules["yfinance"] = None  # type: ignore
-        try:
-            result = _fetch_yfinance_prices(["2330"])
-            assert result == {}
-        finally:
-            if original is not None:
-                sys.modules["yfinance"] = original
-            else:
-                sys.modules.pop("yfinance", None)
-
-    def test_download_exception_returns_empty(self):
-        """下載失敗時回傳空 dict。"""
-        mock_yf = MagicMock()
-        mock_yf.download.side_effect = Exception("network error")
-        with patch.dict(sys.modules, {"yfinance": mock_yf}):
-            result = _fetch_yfinance_prices(["2330"])
-        assert result == {}
-
-    def test_returns_dict_type(self):
-        """回傳型別為 dict。"""
-        mock_yf = self._make_yf_mock({})
-        with patch.dict(sys.modules, {"yfinance": mock_yf}):
-            result = _fetch_yfinance_prices(["2330"])
-        assert isinstance(result, dict)
+    def test_legacy_alias_points_to_same_function(self):
+        import candidate_builder as cb
+        assert cb._fetch_yfinance_prices is cb._fetch_fallback_prices
 
 
 # ── build_candidates ──────────────────────────────────────────────────────────

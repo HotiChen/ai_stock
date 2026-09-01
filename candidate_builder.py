@@ -46,53 +46,25 @@ def _get_name_map(api) -> dict[str, str]:
     return result
 
 
-def _fetch_yfinance_prices(codes: list[str]) -> dict[str, float]:
-    """用 yfinance 批次取台股前一日收盤價，作為 Shioaji 盤前/模擬模式的 fallback。
+def _fetch_fallback_prices(codes: list[str], api=None) -> dict[str, float]:
+    """批次補價（Shioaji snapshot），供 Shioaji 個別查詢漏掉的標的使用。
 
-    台股代號規則：
-      - 純數字 4 碼 → 加 ".TW"（上市）
-      - 數字開頭含字母（如 00878B）→ 加 ".TWO"（上櫃）
-      - 已含 dot 的跳過
-    失敗時回傳空 dict（不影響主流程）。
+    原本走 yfinance batch download，已移除：台股在其上常缺值，且抓到的
+    是延遲報價，與同一份候選清單裡其他來自 Shioaji 的價格混用會不一致。
+
+    取不到的代號**不會出現在結果裡**（不填 0.0 佔位）——下游以 close > 0
+    判斷有效，塞假價格會讓它把無報價的標的當成正常標的送去分析。
     """
-    try:
-        import yfinance as yf
-    except ImportError:
-        return {}
+    import shioaji_quotes
 
-    def _suffix(code: str) -> str:
-        if "." in code:
-            return code
-        # 零股 ETF 或上櫃標的常有字母結尾（如 00878B）
-        if code.isdigit():
-            return f"{code}.TW"
-        return f"{code}.TWO"
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api(connect=False)
+    return shioaji_quotes.batch_prices(api, codes)
 
-    tickers = {code: _suffix(code) for code in codes}
-    symbols = list(tickers.values())
 
-    result: dict[str, float] = {}
-    try:
-        data = yf.download(
-            symbols,
-            period="2d",
-            auto_adjust=True,
-            progress=False,
-            threads=True,
-        )
-        close = data.get("Close", data)  # yfinance >= 0.2 returns MultiIndex
-
-        for code, symbol in tickers.items():
-            try:
-                col = close[symbol] if symbol in close.columns else close
-                last = col.dropna().iloc[-1]
-                if last > 0:
-                    result[code] = float(last)
-            except Exception:
-                pass
-    except Exception as e:
-        log.warning("yfinance batch download failed: %s", e)
-    return result
+#: 舊名稱別名（名字裡的 yfinance 已不符實際來源）
+_fetch_yfinance_prices = _fetch_fallback_prices
 
 
 def _fetch_snapshot(api, code: str) -> dict:
@@ -192,20 +164,20 @@ def build_candidates(api=None) -> list[dict]:
             c["close"]       = snap.get("close",       0.0)
             c["change_rate"] = snap.get("change_rate", 0.0)
 
-    # ── 3b. yfinance 補價（Shioaji 盤前/模擬模式拿不到即時價格時的 fallback）──
+    # ── 3b. 批次補價（Shioaji 個別查詢漏掉的標的，改用批次 snapshot）──
     zero_codes = [c["code"] for c in deduped if c.get("close", 0.0) == 0.0]
     if zero_codes:
-        yf_prices = _fetch_yfinance_prices(zero_codes)
+        yf_prices = _fetch_fallback_prices(zero_codes)
         for c in deduped:
             if c.get("close", 0.0) == 0.0 and c["code"] in yf_prices:
                 c["close"] = yf_prices[c["code"]]
-                log.debug("yfinance fallback price: %s → %.2f", c["code"], c["close"])
+                log.debug("批次補價: %s → %.2f", c["code"], c["close"])
 
-    # ── 3c. 技術指標（M4：yfinance 批次取 6 個月日線 → MA/RSI/KD/BB/量比）────
+    # ── 3c. 技術指標（Shioaji 批次取 180 天日線 → MA/RSI/KD/BB/量比）────
     try:
-        from technical_indicators import fetch_indicators_yfinance_batch, format_indicators_text
+        from technical_indicators import fetch_indicators_shioaji_batch, format_indicators_text
         all_codes = [c["code"] for c in deduped]
-        ind_map = fetch_indicators_yfinance_batch(all_codes)
+        ind_map = fetch_indicators_shioaji_batch(all_codes)
         for c in deduped:
             ind = ind_map.get(c["code"])
             c["indicators_text"] = format_indicators_text(ind) if ind else ""

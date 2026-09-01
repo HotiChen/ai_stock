@@ -230,25 +230,21 @@ def check_position_alerts(
 # ── Price fetcher ─────────────────────────────────────────────────────────────
 
 def fetch_current_price(code: str, api=None) -> Optional[float]:
-    """取即時股價：Shioaji → yfinance → None。"""
-    if api is not None:
-        try:
-            contract = api.Contracts.Stocks.get(code)
-            snaps = api.snapshots([contract])
-            if snaps:
-                return round(float(snaps[0].close), 2)
-        except Exception as e:
-            log.debug("Shioaji price fetch failed for %s: %s", code, e)
+    """取即時股價（Shioaji）。無報價回 None。
 
-    try:
-        import yfinance as yf
-        df = yf.Ticker(f"{code}.TW").history(period="1d", interval="1m")
-        if df is not None and not df.empty:
-            return round(float(df["Close"].iloc[-1]), 2)
-    except Exception as e:
-        log.debug("yfinance price fetch failed for %s: %s", code, e)
+    原本有 yfinance 備援，已移除。改走 shioaji_quotes.latest_price，
+    它會把 close == 0 視為「沒有報價」而非「股價 0 元」——報價 session
+    未暖機時 snapshot 的 close 就是 0，原本的實作會把它當成真實價格回傳，
+    下游拿去算停損與部位會得到完全錯誤的數字。
+    """
+    import shioaji_quotes
 
-    return None
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api(connect=False)
+
+    price = shioaji_quotes.latest_price(api, code)
+    return round(price, 2) if price is not None else None
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────

@@ -183,18 +183,24 @@ class TestFetchCurrentPrice:
         result = fetch_current_price("2330", api=api)
         assert result == pytest.approx(101.5)
 
-    def test_shioaji_failure_falls_back_to_yfinance(self):
+    def test_shioaji_failure_returns_none(self):
+        """yfinance 備援已移除：Shioaji 取不到就是 None，不再猜價格。"""
         from daytrading_monitor import fetch_current_price
-        import sys, pandas as pd
         api = MagicMock()
-        api.snapshots.side_effect = Exception("error")
-        mock_yf = MagicMock()
-        df = pd.DataFrame({"Close": [100.0]},
-                          index=pd.date_range("2026-05-17", periods=1))
-        mock_yf.Ticker.return_value.history.return_value = df
-        with patch.dict(sys.modules, {"yfinance": mock_yf}):
-            result = fetch_current_price("2330", api=api)
-        assert result == pytest.approx(100.0)
+        api.Contracts.Stocks.get.side_effect = Exception("contracts not ready")
+        assert fetch_current_price("2330", api=api) is None
+
+    def test_zero_close_treated_as_no_quote(self):
+        """★ 報價 session 未暖機時 snapshot.close 是 0——那是「沒有報價」，
+        不是「股價 0 元」。回 0.0 會讓下游算出完全錯誤的停損與部位。"""
+        from daytrading_monitor import fetch_current_price
+        snap = MagicMock()
+        snap.close = 0
+        api = MagicMock()
+        api.Contracts.Stocks.get.return_value = MagicMock()
+        api.snapshots.return_value = [snap]
+        assert fetch_current_price("2330", api=api) is None
+
 
     def test_all_fail_returns_none(self):
         from daytrading_monitor import fetch_current_price

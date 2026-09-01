@@ -149,35 +149,63 @@ def _fetch_twse_institutional(target_date: Optional[date] = None) -> dict:
     return result
 
 
+#: 美股指數與 VIX 是否啟用（環境變數 US_MARKET_DATA=false 可關閉）。
+#: Shioaji 是台股券商，**沒有美股資料**——這幾個代號只能從外部來源取得。
+#: 台股大盤（^TWII）已改走 Shioaji，見 _fetch_twse_index()。
+_US_SYMBOLS = {
+    "sp500":  "^GSPC",
+    "nasdaq": "^IXIC",
+    "sox":    "^SOX",
+    "vix":    "^VIX",
+}
+
+
+def _fetch_twse_index(api=None) -> Optional[float]:
+    """台股加權指數現值（Shioaji）。取不到回 None。"""
+    import shioaji_quotes
+
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api(connect=False)
+    return shioaji_quotes.index_price(api)
+
+
 def _fetch_us_market() -> dict:
-    """美股指數 + VIX + 台股大盤 via yfinance。"""
+    """美股指數 + VIX + 台股大盤。
+
+    台股大盤走 Shioaji；美股指數與 VIX **無法**走 Shioaji（台股券商沒有
+    美股資料），仍使用外部行情來源。晨報中的美股數字只是盤前氣氛參考，
+    不參與任何下單或選股決策——所有交易相關資料都已改為 Shioaji。
+
+    若不想要任何外部行情，設 US_MARKET_DATA=false 即可關閉，晨報會少掉
+    美股欄位但其餘正常。
+    """
+    import os
+
     result: dict = {
         "twse_index": None, "twse_volume": None,
         "sp500": None, "nasdaq": None, "sox": None, "vix": None,
     }
+
+    result["twse_index"] = _fetch_twse_index()
+    if result["twse_index"] is None:
+        log.warning("加權指數取得失敗（Shioaji），晨報大盤欄位留空")
+
+    if os.getenv("US_MARKET_DATA", "true").lower() == "false":
+        log.info("US_MARKET_DATA=false，略過美股指數")
+        return result
+
     try:
         import yfinance as yf  # type: ignore
-        symbols = {
-            "twse_index": "^TWII",   # 台股加權指數
-            "sp500":      "^GSPC",
-            "nasdaq":     "^IXIC",
-            "sox":        "^SOX",
-            "vix":        "^VIX",
-        }
-        for key, symbol in symbols.items():
+        for key, symbol in _US_SYMBOLS.items():
             try:
-                ticker = yf.Ticker(symbol)
-                hist   = ticker.history(period="5d")
+                hist = yf.Ticker(symbol).history(period="5d")
                 if not hist.empty:
                     result[key] = round(float(hist["Close"].iloc[-1]), 2)
-                    # 台股成交量（單位：張）→ 換算為億元（近似）
-                    if key == "twse_index" and "Volume" in hist.columns:
-                        # TWII Volume 是股數，不是金額，先留空由 TWSE API 提供
-                        pass
             except Exception as e:
-                log.warning("yfinance %s failed: %s", symbol, e)
+                log.warning("美股行情 %s 取得失敗: %s", symbol, e)
     except ImportError:
-        log.warning("yfinance not installed, skipping market data")
+        log.warning("外部行情套件未安裝，略過美股指數")
     return result
 
 
@@ -192,7 +220,7 @@ def collect_market_data(target_date: Optional[date] = None) -> MarketData:
 
     return MarketData(
         date=target_date,
-        twse_index=us.get("twse_index"),   # ^TWII via yfinance
+        twse_index=us.get("twse_index"),   # 加權指數 via Shioaji
         twse_volume=us.get("twse_volume"),
         foreign_net=twse.get("foreign_net"),
         trust_net=twse.get("trust_net"),

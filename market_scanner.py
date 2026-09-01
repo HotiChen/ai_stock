@@ -135,7 +135,7 @@ def _fetch_name_map(timeout: int = 10) -> dict[str, str]:
         log.info("_fetch_name_map: 取得 %d 支股票名稱", len(result))
     return result
 
-# 當 TWSE API 與 yfinance 均不可用時的保底股票清單（高流動性台股）
+# 當 TWSE API 與 Shioaji 均不可用時的保底股票清單（高流動性台股）
 _FALLBACK_STOCKS: list[tuple[str, str]] = [
     ("2330", "台積電"),
     ("2317", "鴻海"),
@@ -155,42 +155,48 @@ _FALLBACK_STOCKS: list[tuple[str, str]] = [
 ]
 
 
-def _fetch_yfinance_snapshots(codes_names: list[tuple[str, str]]) -> dict[str, dict]:
-    """用 yfinance 補抓快照；失敗個別略過。"""
+def _fetch_shioaji_snapshots(codes_names: list[tuple[str, str]],
+                             api=None) -> dict[str, dict]:
+    """用 Shioaji 補抓快照；取不到的個別略過。
+
+    原本走 yfinance（fast_info / history），已移除：那是延遲報價，與同一份
+    候選清單裡其他來自 Shioaji 的價格混用會不一致，且台股常缺值。
+    """
     snapshots: dict[str, dict] = {}
-    try:
-        import yfinance as yf
-    except ImportError:
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api()
+    if api is None:
+        log.warning("_fetch_shioaji_snapshots：無 Shioaji 連線")
         return snapshots
-    for code, name in codes_names:
-        try:
-            ticker = yf.Ticker(f"{code}.TW")
-            info = ticker.fast_info
-            close = getattr(info, "last_price", None) or getattr(info, "previous_close", None)
-            if not close:
-                hist = ticker.history(period="2d")
-                if hist is not None and not hist.empty:
-                    close = float(hist["Close"].iloc[-1])
-            if not close:
-                continue
-            vol = getattr(info, "three_month_average_volume", 0) or 0
-            snapshots[code] = {
-                "code":         code,
-                "name":         name,
-                "close":        float(close),
-                "change_rate":  0.0,
-                "total_volume": int(vol // 1000),
-            }
-        except Exception:
-            continue
+
+    from market_scan import batch_fetch_snapshots
+
+    name_map = dict(codes_names)
+    rows = batch_fetch_snapshots(api, [c for c, _ in codes_names])
+    for code, row in (rows or {}).items():
+        close = row.get("close") or 0.0
+        if close <= 0:
+            continue    # 沒有報價，不是「價格 0 元」
+        snapshots[code] = {
+            "code":         code,
+            "name":         row.get("name") or name_map.get(code, code),
+            "close":        float(close),
+            "change_rate":  row.get("change_rate") or 0.0,
+            "total_volume": int((row.get("total_volume") or 0) // 1000),
+        }
     return snapshots
 
 
+#: 舊名稱別名（名字裡的 yfinance 已不符實際來源）
+_fetch_yfinance_snapshots = _fetch_shioaji_snapshots
+
+
 def _fallback_candidates(criteria: ScanCriteria) -> list[dict]:
-    """TWSE 與 yfinance 均失敗時，用保底清單讓流程繼續。"""
-    snaps = _fetch_yfinance_snapshots(_FALLBACK_STOCKS)
+    """TWSE 與 Shioaji 均失敗時，用保底清單讓流程繼續。"""
+    snaps = _fetch_shioaji_snapshots(_FALLBACK_STOCKS)
     if not snaps:
-        # yfinance 也失敗：直接回傳保底清單（close=0，讓 AI 仍能分析）
+        # Shioaji 也失敗：直接回傳保底清單（close=0，讓 AI 仍能分析）
         result = [
             {"code": c, "name": n, "close": 0.0, "change_rate": 0.0, "total_volume": 99999}
             for c, n in _FALLBACK_STOCKS[: criteria.top_n]
@@ -200,7 +206,7 @@ def _fallback_candidates(criteria: ScanCriteria) -> list[dict]:
     candidates = screen_candidates(snaps, ScanCriteria(
         min_volume=0, min_price=0.0, max_price=999999.0, top_n=criteria.top_n
     ))
-    log.warning("fetch_twse_sim_candidates: 使用 yfinance 保底清單 %d 支", len(candidates))
+    log.warning("fetch_twse_sim_candidates: 使用 Shioaji 保底清單 %d 支", len(candidates))
     return candidates
 
 
@@ -211,7 +217,7 @@ def fetch_twse_sim_candidates(
     """模擬模式（api=None）時，從 TWSE OpenAPI 取得當日交易資料並篩選候選股。
 
     回傳格式與 screen_candidates() 相同，可直接交給 PremarketJob 使用。
-    TWSE API 不可用時依序嘗試 yfinance → 保底清單，確保流程不中斷。
+    TWSE API 不可用時依序嘗試 Shioaji → 保底清單，確保流程不中斷。
     """
     criteria = criteria or ScanCriteria()
     try:

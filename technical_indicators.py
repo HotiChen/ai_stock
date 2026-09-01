@@ -325,86 +325,76 @@ def fetch_indicators(api, code: str) -> Optional[dict]:
         return None
 
 
-# ── yfinance batch fetcher（M4：補齊技術指標資料管道）───────────────────────────
+# ── Shioaji batch fetcher（原 yfinance batch，M4：補齊技術指標資料管道）──────
 
-def fetch_indicators_yfinance_batch(codes: list[str]) -> dict[str, dict]:
-    """
-    批次透過 yfinance 抓 6 個月日線，計算所有技術指標。
-    在 Shioaji 無法取得 kbars（simulation / 盤前）時作為主要資料來源。
+#: 抓多少日曆天的歷史來算指標。calculate_indicators 需要 >= 80 根日 K，
+#: 台股一年約 245 個交易日 → 80 根約需 120 個日曆天，取 180 天留餘裕。
+INDICATOR_HISTORY_DAYS = 180
+
+
+def fetch_indicators_shioaji_batch(codes: list[str], api=None) -> dict[str, dict]:
+    """批次計算技術指標，資料來源 Shioaji kbars（分鐘 K 聚合成日線）。
+
+    取代原本的 yfinance 版本：台股在 yfinance 上常缺值、除權息調整與券商端
+    不一致，導致 8:30 算出的指標和實際盤中看到的價格對不起來。
 
     Returns:
         {code: calculate_indicators() dict}，失敗或資料不足的 code 不在 dict 裡。
-    """
-    try:
-        import yfinance as yf
-        import pandas as pd
-    except ImportError:
-        log.warning("yfinance 未安裝，無法取得技術指標")
-        return {}
 
+    效能：每支股票一次 kbars 呼叫（chunk_days 設為整個區間），80 支約 80 次
+    呼叫。若改用小 chunk 會變成數百次呼叫，8:30 跑不完。
+    """
     if not codes:
         return {}
 
-    def _suffix(code: str) -> str:
-        return f"{code}.TW" if code.isdigit() else f"{code}.TWO"
-
-    tickers: dict[str, str] = {code: _suffix(code) for code in codes}
-    symbols = list(tickers.values())
-
-    # ── 批次下載 ─────────────────────────────────────────────────────────────
-    try:
-        raw = yf.download(
-            symbols,
-            period="6mo",
-            auto_adjust=True,
-            progress=False,
-            threads=True,
-        )
-    except Exception as e:
-        log.warning("yfinance batch OHLCV download failed: %s", e)
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api()
+    if api is None:
+        log.warning("技術指標批次：無 Shioaji 連線，回傳空結果")
         return {}
 
-    if raw is None or raw.empty:
-        return {}
+    from datetime import date, timedelta
 
-    # ── 拆分每支股票的 DataFrame ──────────────────────────────────────────────
-    data_map: dict[str, "pd.DataFrame"] = {}
-    is_multi = isinstance(raw.columns, pd.MultiIndex)
+    import shioaji_history as sh
 
-    if is_multi:
-        for sym in symbols:
-            try:
-                df = raw.xs(sym, level=1, axis=1).dropna()
-                if len(df) >= 80:
-                    data_map[sym] = df
-            except KeyError:
-                pass
-    else:
-        # 單支 symbol fallback（symbols 長度為 1 時 yfinance 不返回 MultiIndex）
-        df = raw.dropna()
-        if len(df) >= 80 and symbols:
-            data_map[symbols[0]] = df
+    end = date.today()
+    start = end - timedelta(days=INDICATOR_HISTORY_DAYS)
 
-    # ── 計算指標 ──────────────────────────────────────────────────────────────
     result: dict[str, dict] = {}
-    for code, symbol in tickers.items():
-        df = data_map.get(symbol)
-        if df is None:
+    for code in codes:
+        df = sh.fetch_daily(api, code, start, end,
+                            chunk_days=INDICATOR_HISTORY_DAYS)
+        if df is None or len(df) < 80:
             continue
         try:
             result[code] = calculate_indicators(df)
         except Exception as e:
             log.debug("calc_indicators failed for %s: %s", code, e)
 
-    log.info("技術指標 yfinance batch：%d/%d 支成功", len(result), len(codes))
+    log.info("技術指標 Shioaji batch：%d/%d 支成功", len(result), len(codes))
     return result
+
+
+#: 向後相容別名。舊名字裡的 "yfinance" 已不再反映實際來源，新程式碼請用
+#: fetch_indicators_shioaji_batch。
+fetch_indicators_yfinance_batch = fetch_indicators_shioaji_batch
 
 
 # ── fetch_intraday_vwap ───────────────────────────────────────────────────────
 
 def fetch_intraday_vwap(code: str, api=None) -> Optional[float]:
-    """Today's intraday VWAP: Shioaji 1-min → yfinance 1-min → None."""
-    # 1. Shioaji 1-min kbars
+    """今日盤中 VWAP，資料來源 Shioaji 1 分 K。取不到回 None。
+
+    原本有 yfinance 備援，已移除：台股分鐘 K 在 yfinance 上延遲且常缺值，
+    與實際交易用的報價來源不一致，算出的 VWAP 會和券商端對不起來。
+    api=None 時向 shioaji_session 取共用連線。
+    """
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api(connect=False)
+
+    # Shioaji 1-min kbars
     if api is not None:
         try:
             from datetime import date as _date
@@ -427,18 +417,5 @@ def fetch_intraday_vwap(code: str, api=None) -> Optional[float]:
         except Exception as e:
             log.debug("Shioaji intraday VWAP failed for %s: %s", code, e)
 
-    # 2. yfinance 1-min intraday
-    try:
-        import yfinance as yf
-        df = yf.Ticker(f"{code}.TW").history(period="1d", interval="1m")
-        if df is not None and not df.empty:
-            return round(calc_vwap(
-                df["High"].values.astype(float),
-                df["Low"].values.astype(float),
-                df["Close"].values.astype(float),
-                df["Volume"].values.astype(float),
-            ), 2)
-    except Exception as e:
-        log.debug("yfinance intraday VWAP failed for %s: %s", code, e)
-
+    log.debug("fetch_intraday_vwap(%s)：Shioaji 無分鐘 K，回傳 None", code)
     return None

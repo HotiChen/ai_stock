@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger(__name__)
+
 
 def normalize_snapshot_row(code: str, snap: dict) -> dict:
     """Standardise a snapshot dict into a flat row."""
@@ -64,6 +68,10 @@ def batch_fetch_snapshots(api, codes: list[str], batch_size: int = 100) -> dict[
                     "high":         snap.high,
                     "low":          snap.low,
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            # 原本是靜默 pass：整批報價失敗會回傳空 dict，呼叫端只看到
+            # 「沒有候選」而不知道是報價掛了。yfinance 備援移除後這條路
+            # 成為唯一來源，失敗必須留下痕跡。
+            log.warning("batch_fetch_snapshots: %d 檔取報價失敗: %s",
+                        len(contracts), e)
     return result

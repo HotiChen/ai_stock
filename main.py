@@ -1609,6 +1609,15 @@ def main() -> None:
         simulation=SIMULATION,
     )
 
+    # 把這條連線註冊為全專案共用。yfinance 全面換成 Shioaji 之後，十幾個
+    # 模組都需要 api；不註冊的話它們會各自 login，開出多條 session（券商有
+    # 連線數上限，且每次登入要數秒）。
+    try:
+        import shioaji_session
+        shioaji_session.set_api(api)
+    except Exception as e:
+        log.warning("註冊共用 Shioaji session 失敗（不影響主流程）: %s", e)
+
     dt_config = load_daytrading_config()
     log.info(
         "DT config: budget=%.0f stop_loss=%.1f%% take_profit=%.1f%% "
@@ -1671,7 +1680,7 @@ def main() -> None:
         if t.hour == 8 and t.minute == 30 and f"{today_prefix}-0830" not in _fired_today:
             # 先確認 Shioaji 行情就緒再選股。login 成功 ≠ 報價 session 就緒，
             # 8:30 常剛登入沒暖機；真實模式全市場掃描（batch_fetch_snapshots）
-            # 無 yfinance 備援，報價未就緒就抓到空清單 → 零候選。就緒探測失敗
+            # 無外部備援，報價未就緒就抓到空清單 → 零候選。就緒探測失敗
             # 不阻擋執行（降級續跑，行為不比修復前差），但對外告警。
             if api is not None:
                 try:

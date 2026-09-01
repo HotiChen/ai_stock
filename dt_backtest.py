@@ -255,35 +255,62 @@ def sweep(
 # 歷史資料抓取（CLI 用，測試不呼叫）
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_bars_yf(code: str, days: int = 55, interval: str = "5m") -> Optional[dict]:
-    """用 yfinance 抓 .TW 5 分 K，回傳 {(date, code): [bar, ...]}。
+def fetch_bars(code: str, days: int = 55, api=None) -> Optional[dict]:
+    """抓分鐘 K，回傳 {(date, code): [bar, ...]}。資料來源 Shioaji kbars。
 
-    網路失敗 / 查無資料一律回傳 None（呼叫方需自行處理）。
-    Yahoo 對 5m 級資料僅保留約 60 天，days 超過此範圍會被 yfinance 自動截斷。
+    原本走 yfinance 5 分 K，已移除。兩個理由：
+      1. Yahoo 對 5m 級資料只保留約 60 天，days 超過就被靜默截斷——回測
+         範圍縮水了卻不會有任何提示。
+      2. Shioaji 給的是 1 分 K，粒度更細，判斷「先觸停利還是先觸停損」
+         更準確；而且與正式交易用的是同一份資料。
+
+    查無資料一律回傳 None（呼叫方需自行處理）。
     """
-    try:
-        import yfinance as yf
+    from datetime import date as _date, timedelta as _timedelta
 
-        df = yf.Ticker(f"{code}.TW").history(period=f"{days}d", interval=interval)
-        if df is None or df.empty:
-            return None
+    import shioaji_history as sh
 
-        result: dict = {}
-        for ts, row in df.iterrows():
-            d = ts.strftime("%Y-%m-%d")
-            t = ts.strftime("%H:%M")
-            bar = {
-                "time":  t,
-                "open":  float(row["Open"]),
-                "high":  float(row["High"]),
-                "low":   float(row["Low"]),
-                "close": float(row["Close"]),
-            }
-            result.setdefault((d, code), []).append(bar)
-        return result or None
-    except Exception as e:
-        log.warning("fetch_bars_yf(%s) failed: %s", code, e)
+    if api is None:
+        import shioaji_session
+        api = shioaji_session.get_api()
+    if api is None:
+        log.warning("fetch_bars(%s)：無 Shioaji 連線", code)
         return None
+
+    end = _date.today()
+    start = end - _timedelta(days=days)
+    minute_df = None
+    try:
+        frames = []
+        for c_start, c_end in sh.date_chunks(start, end, chunk_days=30):
+            df = sh.kbars_to_df(sh._fetch_kbars(api, code, c_start, c_end))
+            if df is not None and len(df):
+                frames.append(df)
+        if frames:
+            import pandas as pd
+            minute_df = pd.concat(frames).sort_index()
+    except Exception as e:
+        log.warning("fetch_bars(%s) failed: %s", code, e)
+        return None
+
+    if minute_df is None or len(minute_df) == 0:
+        return None
+
+    result: dict = {}
+    for ts, row in minute_df.iterrows():
+        key = (ts.strftime("%Y-%m-%d"), code)
+        result.setdefault(key, []).append({
+            "time":  ts.strftime("%H:%M"),
+            "open":  float(row["Open"]),
+            "high":  float(row["High"]),
+            "low":   float(row["Low"]),
+            "close": float(row["Close"]),
+        })
+    return result or None
+
+
+#: 舊名稱別名（名字裡的 yf 已不符實際來源）
+fetch_bars_yf = fetch_bars
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -305,7 +332,7 @@ if __name__ == "__main__":
 
     daily_bars_by_stock: dict = {}
     for code in codes:
-        fetched = fetch_bars_yf(code, days=args.days)
+        fetched = fetch_bars(code, days=args.days)
         if fetched:
             daily_bars_by_stock.update(fetched)
         else:
