@@ -16,6 +16,8 @@ dt_backtest.py — 當沖出場規則歷史回測
 """
 from __future__ import annotations
 
+import dt_fees
+
 import dataclasses
 import itertools
 import logging
@@ -39,8 +41,10 @@ class BacktestParams:
     trailing_start_pct:  float
     trailing_gap_pct:    float
     force_close_time:    str   = "13:00"
-    commission:          float = 0.001425   # 單邊手續費（比例）
-    tax:                  float = 0.0015     # 當沖交易稅（賣方，比例）
+    # 費率取自 dt_fees（單一真相來源）——三個模組若各寫一份，算出的損益
+    # 無法互相比較，而「AI 過濾值不值得」正是靠比較損益來回答的。
+    commission:          float = dt_fees.COMMISSION_RATE
+    tax:                  float = dt_fees.TAX_RATE_INTRADAY
     slippage_pct:         float = 0.05       # 出場滑價（%，不利方向）
 
 

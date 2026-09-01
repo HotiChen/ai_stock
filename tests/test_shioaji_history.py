@@ -208,3 +208,22 @@ class TestIndexContract:
 
     def test_returns_none_for_none_api(self):
         assert sh.resolve_index_contract(None) is None
+
+
+class TestBarsForDayCarriesTime:
+    """模擬層要靠時間戳判斷強制平倉（13:15），沒有它只能用收盤價結算。"""
+
+    def _df(self):
+        rows = [
+            (datetime(2026, 6, 30, 9, 0),  106.0, 110.0, 104.0, 108.0, 200),
+            (datetime(2026, 6, 30, 13, 20), 108.0, 112.0, 107.0, 111.0, 300),
+        ]
+        return sh.kbars_to_df(_kbars(rows))
+
+    def test_time_present_and_formatted(self):
+        bars = sh.bars_for_day(self._df(), date(2026, 6, 30))
+        assert [b["time"] for b in bars] == ["09:00", "13:20"]
+
+    def test_ohlc_still_present(self):
+        bars = sh.bars_for_day(self._df(), date(2026, 6, 30))
+        assert set(bars[0]) >= {"open", "high", "low", "close"}

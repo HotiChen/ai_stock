@@ -126,6 +126,60 @@ def _day_gain_pct(ohlc: dict) -> float:
     return (ohlc["high"] - o) / o * 100.0
 
 
+def _fmt_money(v: float) -> str:
+    """帶正負號的千分位金額。損益數字一律顯示正負號，避免誤讀。"""
+    return f"{v:+,.0f}"
+
+
+def _simulation_lines(db, today: str, dt_cfg) -> list[str]:
+    """虛擬損益區塊。沒有任何一筆模擬成功時回傳空清單（不顯示空區塊）。"""
+    s = db.simulation_summary(today)
+    if s["long"]["count"] == 0 and s["skip"]["count"] == 0:
+        return []
+
+    lines = [
+        "💰 <b>虛擬損益</b>"
+        f"（每筆 {dt_cfg.budget_per_stock:,.0f} 元，"
+        f"+{dt_cfg.take_profit_pct:.0f}% 停利 / -{dt_cfg.stop_loss_pct:.0f}% 停損）",
+        "━━━━━━━━━━━━━━━━",
+        # 上方「達標／停損」用的是每筆預測各自的目標價（skip 沒有目標價所以
+        # 算不出來）；這裡一律用固定百分比，long 與 skip 才可比較。兩區塊的
+        # 數字本來就會不同，不講清楚會被當成 bug。
+        "<i>出場依上列固定百分比，與各筆預測自訂的目標價無關</i>",
+    ]
+
+    lo = s["long"]
+    if lo["count"]:
+        wr = f"　勝率 {lo['win_rate'] * 100:.0f}%" if lo["win_rate"] is not None else ""
+        lines.append(f"📈 AI 做多 {lo['count']} 筆　<b>{_fmt_money(lo['total_pnl'])}</b> 元{wr}")
+
+    sk = s["skip"]
+    if sk["count"]:
+        lines.append(f"👁 AI 觀望 {sk['count']} 筆　若全買 {_fmt_money(sk['total_pnl'])} 元")
+        contrib = s["filter_contribution"]
+        if contrib > 0:
+            lines.append(f"   → AI 過濾幫你<b>避開 {contrib:,.0f} 元</b>虧損 ✅")
+        elif contrib < 0:
+            # 報喜不報憂的複盤沒有價值：過濾太嚴也要講
+            lines.append(f"   → AI 過濾讓你<b>錯過 {abs(contrib):,.0f} 元</b>獲利 ⚠️")
+        else:
+            lines.append("   → 過濾影響為零")
+
+    # 跨日累計：單日樣本太少，看不出期望值
+    cum = db.simulation_summary(days=30)
+    if cum["long"]["count"] >= 3:
+        cwr = cum["long"]["win_rate"]
+        lines.append("")
+        lines.append(
+            f"<i>📊 近 30 日累計：做多 {cum['long']['count']} 筆　"
+            f"{_fmt_money(cum['long']['total_pnl'])} 元"
+            + (f"　勝率 {cwr * 100:.1f}%" if cwr is not None else "")
+            + f"　｜ 過濾貢獻 {_fmt_money(cum['filter_contribution'])} 元</i>"
+        )
+    lines.append("")
+    return lines
+
+
 def run_daytrading_review(
     db_path: str = _DEFAULT_DB,
     today:   Optional[str] = None,
@@ -142,6 +196,12 @@ def run_daytrading_review(
 
     if today is None:
         today = date.today().isoformat()
+
+    from daytrading_config import load_daytrading_config
+
+    import dt_simulate
+
+    dt_cfg = load_daytrading_config()
 
     db    = DaytradingDB(db_path)
     rows  = db.get_unreviewed(today, include_skipped=include_skipped)
@@ -172,6 +232,23 @@ def run_daytrading_review(
         outcome, was_correct = _determine_outcome(
             row["target_price"], row["stop_loss"], bars
         )
+        # 虛擬損益：對每一筆預測（long 與 skip 一視同仁）套用同一套買賣計畫。
+        # 參數取自 DaytradingConfig，與真實交易同一份設定——設定不一致的話，
+        # 模擬出來的績效無法拿來調整真實參數。
+        try:
+            sim_result = dt_simulate.simulate(
+                bars,
+                capital=dt_cfg.budget_per_stock,
+                take_profit_pct=dt_cfg.take_profit_pct,
+                stop_loss_pct=dt_cfg.stop_loss_pct,
+                force_close_time=dt_cfg.force_close_time,
+            )
+            if sim_result is not None:
+                db.save_simulation(today, code, sim_result)
+        except Exception as e:
+            # 模擬失敗不得影響複盤主流程（outcome 判定才是核心）
+            log.warning("虛擬損益計算失敗 %s: %s", code, e)
+
         review = DTReview(
             date=today, code=code,
             daily_open=ohlc["open"], daily_high=ohlc["high"],
@@ -237,6 +314,9 @@ def run_daytrading_review(
         else:
             lines.append("   <i>無明顯錯失，過濾判斷合理</i>")
         lines.append("")
+
+    # ── 虛擬損益：每筆固定金額，套用同一套停利／停損 ──────────────────
+    lines.extend(_simulation_lines(db, today, dt_cfg))
 
     # 近 30 日累計勝率
     stats = db.win_rate_summary(days=30)

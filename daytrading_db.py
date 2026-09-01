@@ -78,6 +78,14 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # 既有列一律填 'live'：這不是臆測，本欄位加入前的每一列都確實產生自
     # 每日 8:30 流程（回填功能是在此欄位之後才存在的）。
     ("dt_prediction_log", "source",        "TEXT NOT NULL DEFAULT 'live'"),
+    # 虛擬損益：對每一筆預測（long 與 skip 一視同仁）套用固定買賣計畫後的結果。
+    # 留 NULL 代表「尚未模擬」，與「模擬結果為 0」是兩件事——彙總時必須排除
+    # NULL，把它當成 0 會稀釋統計。
+    ("dt_prediction_log", "sim_entry",       "REAL"),
+    ("dt_prediction_log", "sim_exit",        "REAL"),
+    ("dt_prediction_log", "sim_exit_reason", "TEXT"),
+    ("dt_prediction_log", "sim_pnl",         "REAL"),
+    ("dt_prediction_log", "sim_pnl_pct",     "REAL"),
 )
 
 
@@ -126,6 +134,11 @@ class DaytradingDB:
                     ai_commentary TEXT    NOT NULL DEFAULT '',
                     reviewed_at   TEXT,
                     source        TEXT    NOT NULL DEFAULT 'live',
+                    sim_entry       REAL,
+                    sim_exit        REAL,
+                    sim_exit_reason TEXT,
+                    sim_pnl         REAL,
+                    sim_pnl_pct     REAL,
                     created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
                     UNIQUE(date, code)
                 )
@@ -194,6 +207,80 @@ class DaytradingDB:
                   review.outcome, review.was_correct,
                   review.ai_commentary,
                   review.date, review.code))
+
+    # ── 虛擬損益 ───────────────────────────────────────────────────────
+
+    def save_simulation(self, target_date: str, code: str, result) -> None:
+        """寫入單筆虛擬損益。找不到對應預測時為 no-op（不拋出）——複盤時
+        該股可能已被刪除，不該因此中斷整批。"""
+        with self._conn() as conn:
+            conn.execute("""
+                UPDATE dt_prediction_log
+                SET sim_entry       = ?,
+                    sim_exit        = ?,
+                    sim_exit_reason = ?,
+                    sim_pnl         = ?,
+                    sim_pnl_pct     = ?
+                WHERE date = ? AND code = ?
+            """, (result.entry, result.exit, result.exit_reason,
+                  result.pnl, result.pnl_pct, target_date, code))
+
+    def simulation_summary(self, target_date: Optional[str] = None,
+                           days: Optional[int] = None,
+                           source: Optional[str] = None) -> dict:
+        """虛擬損益彙總，做多與觀望分開統計。
+
+        target_date 指定單日；days 指定近 N 日（兩者擇一，都不給則取全部）。
+        source 可篩 'live' / 'backfill'——回填是規則版（無 LLM），與每日真實
+        資料的統計意義不同，混算沒有意義。
+
+        filter_contribution = -（觀望組總損益）
+            觀望組若為負，代表 AI 幫你避開了虧損 → 貢獻為正。
+            觀望組若為正，代表 AI 讓你錯過了獲利 → 貢獻為負。
+
+        只計 sim_pnl IS NOT NULL 的列：NULL 是「還沒模擬」，當成 0 會稀釋統計。
+        """
+        where = ["sim_pnl IS NOT NULL"]
+        params: list = []
+        if target_date is not None:
+            where.append("date = ?")
+            params.append(target_date)
+        elif days is not None:
+            where.append("date >= date('now', ?, 'localtime')")
+            params.append(f"-{days} days")
+        if source is not None:
+            where.append("source = ?")
+            params.append(source)
+
+        sql = f"""
+            SELECT action,
+                   COUNT(*)                                   AS cnt,
+                   COALESCE(SUM(sim_pnl), 0)                   AS total,
+                   SUM(CASE WHEN sim_pnl > 0 THEN 1 ELSE 0 END) AS wins
+            FROM dt_prediction_log
+            WHERE {' AND '.join(where)}
+            GROUP BY action
+        """
+        with self._conn() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+
+        def _blank() -> dict:
+            return {"count": 0, "total_pnl": 0.0, "wins": 0, "win_rate": None}
+
+        out = {"long": _blank(), "skip": _blank()}
+        for r in rows:
+            bucket = "long" if r["action"] == "long" else "skip"
+            cnt, wins = r["cnt"] or 0, r["wins"] or 0
+            out[bucket]["count"] += cnt
+            out[bucket]["total_pnl"] += float(r["total"] or 0.0)
+            out[bucket]["wins"] += wins
+        for b in ("long", "skip"):
+            c = out[b]["count"]
+            out[b]["win_rate"] = round(out[b]["wins"] / c, 3) if c else None
+
+        out["total_pnl"] = out["long"]["total_pnl"] + out["skip"]["total_pnl"]
+        out["filter_contribution"] = -out["skip"]["total_pnl"]
+        return out
 
     # ── 查詢 ──────────────────────────────────────────────────────────
 

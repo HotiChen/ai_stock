@@ -79,14 +79,19 @@ def bars_for_day(minute_df, day: date) -> list[dict]:
 
     鍵名刻意用小寫，與 daytrading_review._determine_outcome 既有的 bar 格式
     一致，模擬層才能直接沿用那套「逐根掃描找先觸發者」的判斷。
+
+    另附 "time"（HH:MM）供模擬層判斷強制平倉時點——台股 13:30 收盤，但系統
+    設定的強平時間更早（預設 13:15），沒有時間戳就只能用收盤價結算，會高估
+    那些「尾盤才拉回來」的部位。
     """
     if minute_df is None or len(minute_df) == 0:
         return []
     sel = minute_df[[ts.date() == day for ts in minute_df.index]]
     return [
-        {"open": float(r["Open"]), "high": float(r["High"]),
+        {"time": ts.strftime("%H:%M"),
+         "open": float(r["Open"]), "high": float(r["High"]),
          "low": float(r["Low"]), "close": float(r["Close"])}
-        for _, r in sel.iterrows()
+        for ts, r in sel.iterrows()
     ]
 
 

@@ -27,8 +27,9 @@ log = logging.getLogger(__name__)
 _DB_PATH       = "data/paper_trading.db"
 _REVIEW_DB     = "data/daytrading_review.db"
 _INIT_CAPITAL  = 30_000.0   # 初始本金（元）
-_COMMISSION    = 0.001425   # 手續費（單邊）
-_TAX_INTRADAY  = 0.0015     # 當沖交易稅（賣方，正常 0.003 減半）
+# 費率定義已移至 dt_fees.py（單一真相來源）；此處保留別名供既有引用。
+from dt_fees import COMMISSION_RATE as _COMMISSION      # noqa: E402
+from dt_fees import TAX_RATE_INTRADAY as _TAX_INTRADAY  # noqa: E402
 _MIN_CAPITAL   = 1_000.0    # 低於此金額停止交易
 
 
@@ -155,13 +156,10 @@ def _calc_pnl(
     計算扣除手續費後的損益。
     回傳 (pnl, pnl_pct)
     """
-    buy_fee  = capital * _COMMISSION
-    sell_fee = capital * _COMMISSION
-    tax      = capital * _TAX_INTRADAY
-    gross    = capital * (exit_price - entry) / entry
-    net_pnl  = gross - buy_fee - sell_fee - tax
-    net_pct  = net_pnl / capital
-    return round(net_pnl, 0), round(net_pct, 4)
+    # 委派給 dt_fees（單一真相來源）。原本在這裡自行計算，且把賣出手續費
+    # 與證交稅都算在買進金額上——賣方費用實際按賣出金額計收，賺錢時會低估。
+    import dt_fees
+    return dt_fees.net_pnl(capital, entry, exit_price)
 
 
 def _get_top1_pick(today: str, review_db: str) -> Optional[dict]:
