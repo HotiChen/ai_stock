@@ -46,6 +46,9 @@ class DTPrediction:
     target_price: Optional[float]
     stop_loss:    Optional[float]
     ai_summary:   str = ""
+    #: 'live'（每日 8:30 真實產生）或 'backfill'（dt_backfill.py 用歷史資料重建）。
+    #: 兩者統計意義不同——backfill 走規則路徑不含 LLM 判斷——所以要能分開查詢。
+    source:       str = "live"
 
 
 @dataclass
@@ -72,6 +75,9 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("dt_prediction_log", "reviewed_at",   "TEXT"),
     ("dt_prediction_log", "entry_low",     "REAL"),
     ("dt_prediction_log", "entry_high",    "REAL"),
+    # 既有列一律填 'live'：這不是臆測，本欄位加入前的每一列都確實產生自
+    # 每日 8:30 流程（回填功能是在此欄位之後才存在的）。
+    ("dt_prediction_log", "source",        "TEXT NOT NULL DEFAULT 'live'"),
 )
 
 
@@ -119,6 +125,7 @@ class DaytradingDB:
                     was_correct   INTEGER,
                     ai_commentary TEXT    NOT NULL DEFAULT '',
                     reviewed_at   TEXT,
+                    source        TEXT    NOT NULL DEFAULT 'live',
                     created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
                     UNIQUE(date, code)
                 )
@@ -157,11 +164,12 @@ class DaytradingDB:
                 cur = conn.execute("""
                     INSERT OR IGNORE INTO dt_prediction_log
                         (date, code, name, dt_score, action,
-                         entry_low, entry_high, target_price, stop_loss, ai_summary)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         entry_low, entry_high, target_price, stop_loss,
+                         ai_summary, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (p.date, p.code, p.name, p.dt_score, p.action,
                       p.entry_low, p.entry_high, p.target_price, p.stop_loss,
-                      p.ai_summary))
+                      p.ai_summary, p.source))
                 inserted += cur.rowcount
         return inserted
 
@@ -189,12 +197,21 @@ class DaytradingDB:
 
     # ── 查詢 ──────────────────────────────────────────────────────────
 
-    def get_predictions(self, target_date: str) -> list[sqlite3.Row]:
+    def get_predictions(self, target_date: str,
+                        source: Optional[str] = None) -> list[sqlite3.Row]:
+        """取某日預測。source=None 取全部；傳 'live' / 'backfill' 可分開查。
+
+        分開查詢是必要的：backfill 走規則路徑（無 LLM），live 含 LLM 判斷，
+        兩者混在一起算勝率會得到沒有意義的數字。
+        """
+        sql = "SELECT * FROM dt_prediction_log WHERE date = ?"
+        params: tuple = (target_date,)
+        if source is not None:
+            sql += " AND source = ?"
+            params += (source,)
+        sql += " ORDER BY dt_score DESC"
         with self._conn() as conn:
-            return conn.execute("""
-                SELECT * FROM dt_prediction_log
-                WHERE date = ? ORDER BY dt_score DESC
-            """, (target_date,)).fetchall()
+            return conn.execute(sql, params).fetchall()
 
     def get_unreviewed(self, target_date: str,
                        include_skipped: bool = False) -> list[sqlite3.Row]:
