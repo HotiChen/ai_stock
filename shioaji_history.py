@@ -116,6 +116,39 @@ def date_chunks(start: date, end: date, chunk_days: int = 30) -> list[tuple[date
 # 網路 I/O（薄層）
 # ══════════════════════════════════════════════════════════════════════════════
 
+#: _call_with_timeout 逾時的哨兵值（與「呼叫成功但回 None」區分）
+TIMEOUT = object()
+
+#: 單次 kbars 呼叫的逾時秒數。Shioaji 的 C++ 層自己每 30 秒重試一次且不會
+#: 放棄，沒有外層逾時就是永遠卡住——2026-09-02 的回填就是這樣卡死的。
+CALL_TIMEOUT_SEC = 45
+
+
+def _call_with_timeout(fn, timeout: float = CALL_TIMEOUT_SEC):
+    """在背景執行緒呼叫 fn，逾時回傳 TIMEOUT，例外回傳 None。
+
+    底層的 C++ 呼叫無法真的取消，逾時後那條執行緒會繼續卡著；但只要在
+    連續失敗達門檻時中止整批，洩漏的執行緒數量是有限的，遠好過整個程序
+    卡死到只能 Ctrl-C（而且已抓到的資料全部丟掉）。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as _FTimeout
+
+    ex = ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = ex.submit(fn)
+        try:
+            return fut.result(timeout=timeout)
+        except _FTimeout:
+            log.warning("Shioaji 呼叫逾時（%.0f 秒），放棄等待", timeout)
+            return TIMEOUT
+        except Exception as e:
+            log.debug("Shioaji 呼叫失敗: %s", e)
+            return None
+    finally:
+        ex.shutdown(wait=False)
+
+
 def _fetch_kbars(api, code: str, start: date, end: date):
     """單次 kbars 呼叫，失敗回 None（不對外拋出，一支失敗不該中斷整批）。"""
     try:
@@ -123,12 +156,18 @@ def _fetch_kbars(api, code: str, start: date, end: date):
         if not contract:
             log.debug("找不到合約：%s", code)
             return None
-        return api.kbars(contract,
-                         start=start.strftime("%Y-%m-%d"),
-                         end=end.strftime("%Y-%m-%d"))
     except Exception as e:
-        log.debug("kbars(%s, %s~%s) 失敗: %s", code, start, end, e)
+        log.debug("取合約失敗 %s: %s", code, e)
         return None
+
+    out = _call_with_timeout(
+        lambda: api.kbars(contract,
+                          start=start.strftime("%Y-%m-%d"),
+                          end=end.strftime("%Y-%m-%d"))
+    )
+    if out is TIMEOUT:
+        return None
+    return out
 
 
 def fetch_daily(api, code: str, start: date, end: date,
@@ -150,15 +189,58 @@ def fetch_daily(api, code: str, start: date, end: date,
 
 
 def fetch_daily_batch(api, codes: Sequence[str], start: date, end: date,
-                      chunk_days: int = 30) -> dict:
-    """多檔日線。回傳 {code: DataFrame}；抓不到的 code 不在 dict 裡。"""
+                      chunk_days: int = 30,
+                      abort_after_failures: int = 5,
+                      reconnect=None,
+                      on_result=None) -> dict:
+    """多檔日線。回傳 {code: DataFrame}；抓不到的 code 不在 dict 裡。
+
+    韌性設計（2026-09-02 正式環境事故的修補）：
+      * 連續失敗達 abort_after_failures 就**中止並回傳已取得的部分**。
+        原本的行為是一路跑到底，token 過期後每支都卡 45 秒，81 支要卡一小時，
+        而且中止時已抓到的 40 檔全部丟掉。
+      * 中止前先呼叫 reconnect()（若有提供）試一次重新登入——token 過期是
+        可復原的。重連成功則失敗計數歸零繼續。
+      * on_result(code, df) 讓呼叫端可以邊抓邊存，程序中斷也不會全部白做。
+
+    只有**連續**失敗才計數：零星的個股查無資料（下市、暫停交易）不代表連線壞了。
+    """
     out: dict = {}
+    streak = 0
+    reconnected = False
+
     for i, code in enumerate(codes, 1):
         df = fetch_daily(api, code, start, end, chunk_days)
+
         if df is not None and len(df) >= 80:
             out[code] = df
+            streak = 0
+            if on_result is not None:
+                try:
+                    on_result(code, df)
+                except Exception as e:
+                    log.warning("on_result(%s) 失敗（不影響抓取）: %s", code, e)
+        else:
+            streak += 1
+            if streak >= abort_after_failures:
+                if reconnect is not None and not reconnected:
+                    log.warning("連續 %d 次取不到資料，嘗試重新登入…", streak)
+                    new_api = reconnect()
+                    reconnected = True
+                    if new_api is not None:
+                        api = new_api
+                        streak = 0
+                        continue
+                log.error(
+                    "連續 %d 次取不到歷史資料，中止（已取得 %d/%d 檔）。"
+                    "常見原因：Shioaji 歷史資料用量已達上限，或連線異常。",
+                    streak, len(out), len(codes),
+                )
+                break
+
         if i % 10 == 0:
-            log.info("歷史日線進度：%d/%d", i, len(codes))
+            log.info("歷史日線進度：%d/%d（成功 %d）", i, len(codes), len(out))
+
     log.info("歷史日線：%d/%d 支取得成功（Shioaji）", len(out), len(codes))
     return out
 
@@ -221,3 +303,78 @@ def fetch_index_daily(api, start: date, end: date, chunk_days: int = 30):
         if daily is not None and len(daily):
             frames.append(daily)
     return pd.concat(frames).sort_index() if frames else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 用量與快取
+# ══════════════════════════════════════════════════════════════════════════════
+
+def usage_report(api) -> Optional[dict]:
+    """Shioaji 歷史資料用量。取不到回 None（不同 SDK 版本欄位不一）。
+
+    為什麼重要：Shioaji 對歷史資料有每日流量上限。回填 81 檔 × 8 個月的
+    分鐘 K 是數百萬根 K 線，很容易撞上限；撞到之後的徵狀是
+    「Token is expired」加上無止盡的「Not ready」——完全看不出真正原因。
+    抓之前先問一次，把剩餘量印出來，才不會又debug 半天。
+    """
+    if api is None or not hasattr(api, "usage"):
+        return None
+    try:
+        u = api.usage()
+    except Exception as e:
+        log.debug("usage() 失敗: %s", e)
+        return None
+    if u is None:
+        return None
+
+    def _get(name):
+        if isinstance(u, dict):
+            return u.get(name)
+        return getattr(u, name, None)
+
+    used = _get("bytes") or 0
+    limit = _get("limit_bytes") or 0
+    remaining = _get("remaining_bytes")
+    if remaining is None:
+        remaining = max(limit - used, 0)
+    mb = 1024 * 1024
+    return {
+        "connections":   _get("connections"),
+        "used_mb":       round(used / mb, 2),
+        "limit_mb":      round(limit / mb, 2),
+        "remaining_mb":  round(remaining / mb, 2),
+        "remaining_pct": round(remaining / limit * 100, 1) if limit else None,
+    }
+
+
+def _cache_path(cache_dir: str, code: str):
+    from pathlib import Path
+    p = Path(cache_dir)
+    p.mkdir(parents=True, exist_ok=True)
+    return p / f"{code}.pkl"
+
+
+def cache_save(cache_dir: str, code: str, df) -> None:
+    """把抓到的日線存到本機，供下次續跑。
+
+    Shioaji 的歷史資料有流量上限，重抓是有成本的；程序中斷（逾時、
+    Ctrl-C、token 過期）時已抓到的部分必須留下來。
+    """
+    try:
+        df.to_pickle(_cache_path(cache_dir, code))
+    except Exception as e:
+        log.debug("cache_save(%s) 失敗: %s", code, e)
+
+
+def cache_load(cache_dir: str, code: str):
+    """讀取快取的日線，沒有或壞掉回 None（壞掉就重抓，不得讓整批爆掉）。"""
+    import pandas as pd
+
+    path = _cache_path(cache_dir, code)
+    if not path.exists():
+        return None
+    try:
+        return pd.read_pickle(path)
+    except Exception as e:
+        log.warning("快取檔損壞，將重新抓取 %s: %s", code, e)
+        return None

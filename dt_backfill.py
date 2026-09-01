@@ -313,7 +313,14 @@ def default_universe() -> list[tuple[str, str]]:
 # 至少需要 (N + 80) 個交易日 ≈ (N + 80) * 1.45 個日曆日。HISTORY_PAD_DAYS
 # 在此基礎上再留餘裕。
 
-HISTORY_PAD_DAYS = 160
+# 回填 T 日需要 T 之前 80 根日 K。80 個交易日約 112 個日曆天，加上農曆年
+# 等連假的餘裕取 130。原本設 160 會多抓一個月的分鐘 K——Shioaji 歷史資料
+# 有流量上限，多抓的每一天都在消耗它。
+HISTORY_PAD_DAYS = 130
+
+#: 抓到的日線快取目錄。程序中斷（逾時、Ctrl-C、token 過期）時已抓到的
+#: 部分要留下來，續跑才不必重抓——重抓會再吃一次流量上限。
+DEFAULT_CACHE_DIR = "data/history_cache"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -335,6 +342,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--db", default=None, help="複盤資料庫路徑")
     ap.add_argument("--chunk-days", type=int, default=30,
                     help="kbars 分段抓取的天數（預設 30，調小可降低記憶體）")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="只回填前 N 檔（Shioaji 歷史資料有流量上限，"
+                         "檔數多時建議分批）")
+    ap.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR,
+                    help=f"日線快取目錄（預設 {DEFAULT_CACHE_DIR}）")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="忽略快取，全部重新抓取")
     ap.add_argument("--dry-run", action="store_true",
                     help="只顯示將回填的範圍與檔數，不寫入")
     args = ap.parse_args(argv)
@@ -346,6 +360,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     trade_dates = recent_trade_dates(args.days, end=end)
     universe = ([(c.strip(), c.strip()) for c in args.codes.split(",") if c.strip()]
                 if args.codes else default_universe())
+    if args.limit:
+        universe = universe[:args.limit]
 
     print(f"回填範圍：{trade_dates[0]} ~ {trade_dates[-1]}"
           f"（{len(trade_dates)} 個交易日）× {len(universe)} 檔")
@@ -369,14 +385,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               "SHIOAJI_API_KEY / SHIOAJI_SECRET_KEY。")
         return 1
 
+    # Shioaji 歷史資料有每日流量上限。撞到之後的徵狀是「Token is expired」
+    # 加上無止盡的「Not ready」，完全看不出真正原因——所以先問一次。
+    usage = sh.usage_report(api)
+    if usage:
+        print(f"Shioaji 歷史資料用量：已用 {usage['used_mb']:,.0f} MB / "
+              f"上限 {usage['limit_mb']:,.0f} MB"
+              + (f"（剩 {usage['remaining_pct']:.0f}%）"
+                 if usage["remaining_pct"] is not None else ""))
+        if usage["remaining_pct"] is not None and usage["remaining_pct"] < 20:
+            print("⚠️ 剩餘流量不足 20%，建議用 --limit 分批，或明天再跑")
+
     # 多抓 HISTORY_PAD_DAYS 天，確保最舊的那個交易日前面也有 80 根 K
     hist_start = trade_dates[0] - timedelta(days=HISTORY_PAD_DAYS)
     print(f"抓取歷史（Shioaji）：{hist_start} ~ {end}，分段 {args.chunk_days} 天…")
 
-    history = sh.fetch_daily_batch(
-        api, [c for c, _ in universe], hist_start, end,
-        chunk_days=args.chunk_days,
-    )
+    # 先讀快取，只抓缺的——重抓會再吃一次流量上限
+    history: dict = {}
+    todo = []
+    for code, _ in universe:
+        cached = None if args.no_cache else sh.cache_load(args.cache_dir, code)
+        if cached is not None and len(cached) >= 80:
+            history[code] = cached
+        else:
+            todo.append(code)
+    if history:
+        print(f"快取命中 {len(history)} 檔，需抓取 {len(todo)} 檔")
+
+    if todo:
+        import shioaji_session
+        fetched = sh.fetch_daily_batch(
+            api, todo, hist_start, end,
+            chunk_days=args.chunk_days,
+            reconnect=shioaji_session.reconnect,
+            # 邊抓邊存：中斷時已抓到的不會白費
+            on_result=lambda c, df: sh.cache_save(args.cache_dir, c, df),
+        )
+        history.update(fetched)
+
     index_history = sh.fetch_index_daily(api, hist_start, end,
                                          chunk_days=args.chunk_days)
     if index_history is None:
@@ -394,6 +440,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
           f"無歷史 {stats['no_history']}）")
     print("注意：回填為規則版預測（不含 LLM 判斷），且股票池有倖存者偏誤。")
     print(f"資料來源：Shioaji kbars（{len(history)}/{len(universe)} 檔取得成功）")
+    if len(history) < len(universe):
+        print(f"提示：{len(universe) - len(history)} 檔未取得。已抓到的存在 "
+              f"{args.cache_dir}，直接再跑一次會從中斷處續抓。")
+    after = sh.usage_report(api)
+    if after and usage:
+        print(f"本次消耗流量約 {after['used_mb'] - usage['used_mb']:,.0f} MB"
+              + (f"，剩餘 {after['remaining_pct']:.0f}%"
+                 if after["remaining_pct"] is not None else ""))
     return 0
 
 

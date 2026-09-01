@@ -90,6 +90,20 @@ def get_api(connect: bool = True):
         return _api
 
 
+def reconnect():
+    """強制重新登入（清掉快取與冷卻）。
+
+    冷卻期是為了防止「每次查價都重試登入」的風暴，但 token 過期後的主動
+    重連是明確的補救動作，不該被冷卻擋住——所以這裡直接繞過。
+    """
+    global _api, _last_failure_at
+    with _lock:
+        _api = None
+        _last_failure_at = None
+    log.warning("Shioaji 重新登入中（token 過期或連線異常）")
+    return get_api()
+
+
 def reset() -> None:
     """清空快取與冷卻狀態（測試用；正式流程不需要）。"""
     global _api, _last_failure_at
