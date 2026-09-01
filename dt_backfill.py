@@ -300,51 +300,20 @@ def default_universe() -> list[tuple[str, str]]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 資料抓取（網路 I/O，薄層）
+# 資料抓取 — 一律走 Shioaji（見 shioaji_history.py 的說明）
 # ══════════════════════════════════════════════════════════════════════════════
+#
+# 為什麼不用 yfinance：
+#   1. yfinance 的 1 分鐘 K 只保留最近 7 天。回填 60 個交易日、以及模擬層
+#      判斷「當日先觸停利還是先觸停損」，都需要更久以前的分鐘資料。
+#   2. 台股在 yfinance 上常缺值、除權息調整不一致；Shioaji 是券商原始資料，
+#      與實際成交一致，也與正式交易流程用的是同一個來源。
+#
+# 需要多少歷史：回填 T 日需要 T 之前 80 根日 K，所以要回填 N 個交易日，
+# 至少需要 (N + 80) 個交易日 ≈ (N + 80) * 1.45 個日曆日。HISTORY_PAD_DAYS
+# 在此基礎上再留餘裕。
 
-def fetch_history(codes: Sequence[str], period: str = "2y") -> dict:
-    """批次抓日線。回傳 {code: DataFrame}；抓不到的 code 不在 dict 裡。
-
-    period 預設 2y：回填 T 日需要 T 之前 80 根 K 線，所以要回填 60 個交易日
-    就至少需要 140 根；抓 2 年（約 490 根）留足餘裕。
-    """
-    import pandas as pd
-    import yfinance as yf
-
-    symbols = {code: (f"{code}.TW" if code.isdigit() else f"{code}.TWO")
-               for code in codes}
-    try:
-        raw = yf.download(list(symbols.values()), period=period,
-                          auto_adjust=True, progress=False, threads=True)
-    except Exception as e:
-        log.error("fetch_history 下載失敗: %s", e)
-        return {}
-    if raw is None or raw.empty:
-        return {}
-
-    out: dict = {}
-    is_multi = isinstance(raw.columns, pd.MultiIndex)
-    for code, sym in symbols.items():
-        try:
-            df = raw.xs(sym, level=1, axis=1).dropna() if is_multi else raw.dropna()
-        except KeyError:
-            continue
-        if len(df) >= 80:
-            out[code] = df
-    log.info("歷史日線：%d/%d 支取得成功", len(out), len(codes))
-    return out
-
-
-def fetch_index_history(period: str = "2y"):
-    """加權指數（^TWII）日線，供 market_change_as_of 計算歷史大盤漲跌幅。"""
-    try:
-        import yfinance as yf
-        df = yf.Ticker("^TWII").history(period=period)
-        return df if df is not None and not df.empty else None
-    except Exception as e:
-        log.warning("fetch_index_history 失敗: %s", e)
-        return None
+HISTORY_PAD_DAYS = 160
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -364,6 +333,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--codes", default=None,
                     help="指定股票代號，逗號分隔（預設用 config.STOCK_NAMES）")
     ap.add_argument("--db", default=None, help="複盤資料庫路徑")
+    ap.add_argument("--chunk-days", type=int, default=30,
+                    help="kbars 分段抓取的天數（預設 30，調小可降低記憶體）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只顯示將回填的範圍與檔數，不寫入")
     args = ap.parse_args(argv)
@@ -382,8 +353,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("--dry-run：未寫入任何資料")
         return 0
 
-    history = fetch_history([c for c, _ in universe])
-    index_history = fetch_index_history()
+    import os
+    from datetime import timedelta
+
+    import shioaji_history as sh
+    from monitor_agent import ensure_connected
+
+    api = ensure_connected(
+        os.getenv("SHIOAJI_API_KEY", ""),
+        os.getenv("SHIOAJI_SECRET_KEY", ""),
+        simulation=os.getenv("SHIOAJI_SIMULATION", "true").lower() == "true",
+    )
+    if api is None:
+        print("❌ Shioaji 連線失敗，無法取得歷史資料。請確認 .env 的 "
+              "SHIOAJI_API_KEY / SHIOAJI_SECRET_KEY。")
+        return 1
+
+    # 多抓 HISTORY_PAD_DAYS 天，確保最舊的那個交易日前面也有 80 根 K
+    hist_start = trade_dates[0] - timedelta(days=HISTORY_PAD_DAYS)
+    print(f"抓取歷史（Shioaji）：{hist_start} ~ {end}，分段 {args.chunk_days} 天…")
+
+    history = sh.fetch_daily_batch(
+        api, [c for c, _ in universe], hist_start, end,
+        chunk_days=args.chunk_days,
+    )
+    index_history = sh.fetch_index_daily(api, hist_start, end,
+                                         chunk_days=args.chunk_days)
     if index_history is None:
         print("⚠️ 加權指數歷史取得失敗，大盤條件一律視為缺值（規則不擋，僅註記）")
 
@@ -398,6 +393,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
           f"資料不足跳過 {stats['insufficient_data']}，"
           f"無歷史 {stats['no_history']}）")
     print("注意：回填為規則版預測（不含 LLM 判斷），且股票池有倖存者偏誤。")
+    print(f"資料來源：Shioaji kbars（{len(history)}/{len(universe)} 檔取得成功）")
     return 0
 
 
