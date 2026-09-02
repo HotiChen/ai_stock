@@ -378,3 +378,81 @@ def cache_load(cache_dir: str, code: str):
     except Exception as e:
         log.warning("快取檔損壞，將重新抓取 %s: %s", code, e)
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 增量快取：只抓缺的那幾天
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# 為什麼需要：8:30 選股對每支候選呼叫 fetch_indicators，它抓 150 天的分鐘 K
+# 來算日線指標。50 支候選 = 7,500 個股票日的分鐘資料，而且**每天重抓一次**
+# ——其中 149 天昨天就抓過了，只有最後一根是新的。
+#
+# Shioaji 歷史資料每日上限 500 MB。2026-09-02 就是這樣被燒光的，之後 8:30
+# 選股完全拿不到指標。穩態下改成每天每支只抓 1 天，用量降到約 1/150。
+
+def merge_daily(old, new):
+    """合併兩份日線，重疊日期**保留新的那份**。
+
+    保留新的原因：舊快取可能是盤中抓的，當天的收盤價還沒定案。
+    """
+    if old is None:
+        return new
+    if new is None:
+        return old
+    import pandas as pd
+
+    merged = pd.concat([old, new])
+    # keep="last" → 後面的（new）勝出
+    merged = merged[~merged.index.duplicated(keep="last")]
+    return merged.sort_index()
+
+
+def missing_range(cached, start: date, end: date):
+    """回傳還需要抓的 (start, end)，或 None 代表快取已足夠。
+
+    只處理「尾端缺口」這一種情形：快取涵蓋 start 之後、但還沒到 end。
+    若快取起點晚於 start（前面缺一段），回傳完整區間重抓——kbars 無法只
+    抓中間的一段，而缺頭會讓移動平均等指標算錯。
+    """
+    if cached is None or len(cached) == 0:
+        return start, end
+
+    first = cached.index[0].date()
+    last = cached.index[-1].date()
+
+    if first > start:
+        return start, end          # 前面缺一段，只能整段重抓
+    if last >= end:
+        return None                # 已涵蓋
+    # 從快取最後一天開始（含），避免當天資料是盤中抓的而不完整
+    return last, end
+
+
+def fetch_daily_cached(api, code: str, start: date, end: date,
+                       cache_dir: str = "data/history_cache",
+                       chunk_days: int = 30):
+    """帶增量快取的日線抓取。
+
+    流程：讀快取 → 算缺口 → 只抓缺口 → 合併 → 存回。
+
+    抓取失敗時**回傳快取裡的舊資料**而非 None：額度用完或連線異常時，
+    有點舊的指標仍遠好過完全沒有指標（2026-09-02 的 8:30 選股就是因為
+    額度歸零而一支都算不出來）。
+    """
+    cached = cache_load(cache_dir, code)
+    gap = missing_range(cached, start, end)
+
+    if gap is None:
+        return cached
+
+    fetched = fetch_daily(api, code, gap[0], gap[1], chunk_days)
+    if fetched is None:
+        if cached is not None:
+            log.warning("抓取失敗，改用快取的舊日線 %s（最後 %s）",
+                        code, cached.index[-1].date())
+        return cached
+
+    merged = merge_daily(cached, fetched)
+    cache_save(cache_dir, code, merged)
+    return merged

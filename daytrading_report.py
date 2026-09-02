@@ -62,8 +62,11 @@ def _get_indicators(code: str, api=None) -> Optional[dict]:
         import shioaji_history as sh
         from technical_indicators import INDICATOR_HISTORY_DAYS, calculate_indicators
         end = date.today()
-        df = sh.fetch_daily(api, code, end - timedelta(days=INDICATOR_HISTORY_DAYS),
-                            end, chunk_days=INDICATOR_HISTORY_DAYS)
+        # 走增量快取：8:30 每支候選都會進到這裡，每天重抓整段會燒光
+        # Shioaji 的每日歷史額度。
+        df = sh.fetch_daily_cached(api, code,
+                                   end - timedelta(days=INDICATOR_HISTORY_DAYS),
+                                   end, chunk_days=INDICATOR_HISTORY_DAYS)
         if df is not None and len(df) >= 80:
             return calculate_indicators(df)
     except Exception as e:

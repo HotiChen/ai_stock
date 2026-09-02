@@ -563,9 +563,10 @@ def query_stock(code: str, api=None) -> str:
                     _api = shioaji_session.get_api()
                 if _api is not None:
                     _end = _d.today()
-                    df = sh.fetch_daily(_api, code,
-                                        _end - _td(days=INDICATOR_HISTORY_DAYS), _end,
-                                        chunk_days=INDICATOR_HISTORY_DAYS)
+                    df = sh.fetch_daily_cached(
+                        _api, code,
+                        _end - _td(days=INDICATOR_HISTORY_DAYS), _end,
+                        chunk_days=INDICATOR_HISTORY_DAYS)
                     if df is not None and len(df) >= 80:
                         indicators = calculate_indicators(df)
             except Exception as e:

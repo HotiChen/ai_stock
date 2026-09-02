@@ -363,8 +363,11 @@ def fetch_indicators_shioaji_batch(codes: list[str], api=None) -> dict[str, dict
 
     result: dict[str, dict] = {}
     for code in codes:
-        df = sh.fetch_daily(api, code, start, end,
-                            chunk_days=INDICATOR_HISTORY_DAYS)
+        # 增量快取：第一次抓完整區間，之後每天只抓新增的那幾根。
+        # 原本每天重抓 180 天分鐘 K × 每支候選，是 Shioaji 每日 500 MB
+        # 額度被燒光的主因（2026-09-02）。
+        df = sh.fetch_daily_cached(api, code, start, end,
+                                   chunk_days=INDICATOR_HISTORY_DAYS)
         if df is None or len(df) < 80:
             continue
         try:

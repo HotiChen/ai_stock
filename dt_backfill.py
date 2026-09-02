@@ -418,7 +418,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             api, todo, hist_start, end,
             chunk_days=args.chunk_days,
             reconnect=shioaji_session.reconnect,
-            # 邊抓邊存：中斷時已抓到的不會白費
+            # 邊抓邊存：中斷時已抓到的不會白費，續跑也不必重抓
             on_result=lambda c, df: sh.cache_save(args.cache_dir, c, df),
         )
         history.update(fetched)
