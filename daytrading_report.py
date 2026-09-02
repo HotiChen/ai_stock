@@ -35,11 +35,15 @@ def _fetch_historical_win_rate(db_path: str) -> Optional[float]:
 
 
 def _get_indicators(code: str, api=None) -> Optional[dict]:
-    """取技術指標：Shioaji 即時 kbars → Shioaji 歷史日線 → None。
+    """取技術指標（Shioaji）。順序：增量快取日線 → 即時 kbars → None。
 
-    原本第二段是 yfinance，已移除。兩段都走 Shioaji：第一段用
-    fetch_indicators（即時合約路徑），失敗再用歷史日線重算，兩者資料來源
-    一致，8:30 算出的指標才會和盤中看到的價格對得起來。
+    **順序很重要。** fetch_indicators 每次抓 150 天的分鐘 K（每支約 12 MB），
+    8:30 有 50 支候選就是 600 MB，超過 Shioaji 每日 500 MB 上限——2026-09-02
+    的額度就是這樣沒的，之後整天一支候選都產不出來。
+
+    fetch_daily_cached 只補「快取最後一天到今天」的缺口，穩態下每支每天抓
+    1 天，用量降到約 1/150；抓不到時它會回傳快取裡的舊資料，指標略舊仍遠
+    好過完全沒有。
     """
     if api is None:
         import shioaji_session
@@ -48,6 +52,22 @@ def _get_indicators(code: str, api=None) -> Optional[dict]:
         log.warning("_get_indicators(%s)：無 Shioaji 連線", code)
         return None
 
+    # 1. 增量快取的日線（便宜，優先）
+    try:
+        from datetime import timedelta
+
+        import shioaji_history as sh
+        from technical_indicators import INDICATOR_HISTORY_DAYS, calculate_indicators
+        end = date.today()
+        df = sh.fetch_daily_cached(
+            api, code, end - timedelta(days=INDICATOR_HISTORY_DAYS), end,
+        )
+        if df is not None and len(df) >= 80:
+            return calculate_indicators(df)
+    except Exception as e:
+        log.debug("快取日線指標(%s) failed: %s", code, e)
+
+    # 2. 即時 kbars（昂貴，僅在快取路徑失敗時使用）
     try:
         from technical_indicators import fetch_indicators
         result = fetch_indicators(api, code)
@@ -55,22 +75,6 @@ def _get_indicators(code: str, api=None) -> Optional[dict]:
             return result
     except Exception as e:
         log.debug("fetch_indicators(%s) failed: %s", code, e)
-
-    try:
-        from datetime import timedelta
-
-        import shioaji_history as sh
-        from technical_indicators import INDICATOR_HISTORY_DAYS, calculate_indicators
-        end = date.today()
-        # 走增量快取：8:30 每支候選都會進到這裡，每天重抓整段會燒光
-        # Shioaji 的每日歷史額度。
-        df = sh.fetch_daily_cached(api, code,
-                                   end - timedelta(days=INDICATOR_HISTORY_DAYS),
-                                   end, chunk_days=INDICATOR_HISTORY_DAYS)
-        if df is not None and len(df) >= 80:
-            return calculate_indicators(df)
-    except Exception as e:
-        log.debug("Shioaji 歷史指標(%s) failed: %s", code, e)
 
     return None
 

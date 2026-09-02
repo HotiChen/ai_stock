@@ -456,3 +456,75 @@ def fetch_daily_cached(api, code: str, start: date, end: date,
     merged = merge_daily(cached, fetched)
     cache_save(cache_dir, code, merged)
     return merged
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 增量抓取：只補快取缺的那一段
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# 為什麼需要：8:30 選股對 50 支候選各呼叫一次 fetch_indicators，它抓 150 天的
+# 分鐘 K 來算日線指標——每支約 12 MB，50 支就 600 MB，超過 Shioaji 每日
+# 500 MB 上限。而其中 149 天的資料昨天就抓過了，只有最後一根是新的。
+#
+# 2026-09-02 的額度就是這樣被燒光的（一次回填 506/500 MB），之後 8:30 選股
+# 完全拿不到指標。改成增量之後，穩態下每支每天只抓 1 天，用量降到 1/150。
+
+
+def merge_daily(old, new):
+    """合併兩份日線，重疊日期以 new 為準（舊快取可能是盤中抓的，收盤價未定）。"""
+    import pandas as pd
+
+    if old is None:
+        return new
+    if new is None:
+        return old
+    merged = pd.concat([old, new])
+    merged = merged[~merged.index.duplicated(keep="last")]
+    return merged.sort_index()
+
+
+def missing_range(cached, start: date, end: date):
+    """回傳還需要抓的 (start, end)，快取已足夠則回 None。
+
+    只處理「尾端缺一段」這個常見情形。若快取的起點晚於需求起點（前面缺一段），
+    整段重抓——kbars 無法只抓中間，而缺頭會讓 MA/RSI 這類需要暖機期的指標算錯。
+    """
+    if cached is None or len(cached) == 0:
+        return start, end
+
+    idx = [ts.date() if hasattr(ts, "date") else ts for ts in cached.index]
+    first, last = min(idx), max(idx)
+
+    if first > start:
+        return start, end          # 前面缺，整段重抓
+    if last >= end:
+        return None                # 已涵蓋，完全不用抓
+    return last, end               # 只補尾巴（含 last 當天，避免當日資料不完整）
+
+
+def fetch_daily_cached(api, code: str, start: date, end: date,
+                       cache_dir: str = "data/history_cache",
+                       chunk_days: int = 30):
+    """帶增量快取的日線抓取。
+
+    抓取失敗時**回傳快取裡的舊資料**而非 None——額度用完或連線異常時，
+    有點舊的指標仍遠好過完全沒有（2026-09-02 的 8:30 就是因為完全拿不到
+    而一支候選都產不出來）。
+    """
+    cached = cache_load(cache_dir, code)
+    gap = missing_range(cached, start, end)
+
+    if gap is None:
+        return cached
+
+    fresh = fetch_daily(api, code, gap[0], gap[1], chunk_days)
+    if fresh is None:
+        if cached is not None and len(cached):
+            log.warning("%s 增量抓取失敗，改用快取（最後日期 %s）",
+                        code, max(cached.index).date())
+            return cached
+        return None
+
+    merged = merge_daily(cached, fresh)
+    cache_save(cache_dir, code, merged)
+    return merged
