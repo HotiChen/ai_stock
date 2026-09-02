@@ -79,6 +79,12 @@ def _get_indicators(code: str, api=None) -> Optional[dict]:
     return None
 
 
+#: 連續幾支取不到技術指標就中止掃描。
+#: Shioaji 歷史資料額度用完時每支都會失敗，而每次失敗要等 45 秒逾時——
+#: 50 支 × 45 秒 = 37 分鐘，會輾過 9:00 開盤，而且最後仍是零候選。
+#: 失敗要快、要大聲。只計「連續」失敗：個股停牌、查無合約是零星現象。
+MAX_CONSECUTIVE_INDICATOR_FAILURES = 8
+
 _MAX_CHIP_PICKS = 10   # 查連續買超天數的上限，避免 TWSE rate limit
 _MIN_DT_SCORE   = 4    # 進入 qualified 的最低技術評分門檻
 
@@ -298,6 +304,19 @@ def build_daytrading_report(
 
     today_str = date.today().strftime("%Y%m%d")
 
+    # 記錄 Shioaji 歷史資料額度。額度用盡時的徵狀（逾時、Token is expired）
+    # 完全看不出真正原因，事後追查需要這個數字當依據。
+    try:
+        import shioaji_history as _sh
+        _u = _sh.usage_report(api)
+        if _u:
+            log.info("Shioaji 歷史額度：已用 %.0f / %.0f MB（剩 %s%%）",
+                     _u["used_mb"], _u["limit_mb"], _u["remaining_pct"])
+            if _u["remaining_pct"] is not None and _u["remaining_pct"] < 15:
+                log.warning("歷史額度剩餘不足 15%%，今日候選可能偏少")
+    except Exception:
+        pass
+
     # 1. 取全市場候選池（不依賴 research.db）
     picks = _get_stock_universe(api, top_n=50)
 
@@ -331,6 +350,8 @@ def build_daytrading_report(
 
     # 6. 對每支股票計算當沖技術評分
     results = []
+    indicator_failures = 0      # 連續取不到指標的次數
+    data_source_down = False    # 熔斷觸發旗標，供報告說明真正原因
     for i, pick in enumerate(picks):
         code = pick.get("code", "")
         name = pick.get("name", code)
@@ -338,6 +359,19 @@ def build_daytrading_report(
             continue
 
         indicators = _get_indicators(code, api=api)
+
+        if indicators is None:
+            indicator_failures += 1
+            if indicator_failures >= MAX_CONSECUTIVE_INDICATOR_FAILURES:
+                data_source_down = True
+                log.error(
+                    "連續 %d 支取不到技術指標，中止掃描（已處理 %d/%d 支）。"
+                    "常見原因：Shioaji 歷史資料額度用盡，或報價未就緒。",
+                    indicator_failures, i + 1, len(picks),
+                )
+                break
+        else:
+            indicator_failures = 0
 
         # 法人籌碼：今日單日資料 + 連續買超天數（上限 _MAX_CHIP_PICKS 支）
         chip = chip_today.get(code)
@@ -381,6 +415,14 @@ def build_daytrading_report(
             f"大盤：{_market_label(market['index_change_pct'])}\n"
         )
         has_any_data = any(r["data_ok"] for r in results)
+        if data_source_down:
+            # 說出真正原因。寫成「條件不成熟」會讓人以為是市況問題，
+            # 而不是資料管道掛了——這正是 8/21 起數週無人察覺的模式。
+            return header + (
+                "<i>🚨 技術指標資料來源異常，已中止掃描。\n"
+                "常見原因：Shioaji 歷史資料每日額度用盡，或報價未就緒。\n"
+                "今日不會有當沖候選，請檢查 logs/main.log。</i>"
+            )
         if not has_any_data:
             return header + "<i>⚠️ 技術資料不足，無法產生預測。\n請確認市場資料來源是否正常。</i>"
         return header + "<i>今日各股當沖條件不成熟，建議觀望。</i>"

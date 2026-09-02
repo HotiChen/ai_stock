@@ -327,9 +327,12 @@ def fetch_indicators(api, code: str) -> Optional[dict]:
 
 # ── Shioaji batch fetcher（原 yfinance batch，M4：補齊技術指標資料管道）──────
 
-#: 抓多少日曆天的歷史來算指標。calculate_indicators 需要 >= 80 根日 K，
-#: 台股一年約 245 個交易日 → 80 根約需 120 個日曆天，取 180 天留餘裕。
-INDICATOR_HISTORY_DAYS = 180
+#: 抓多少日曆天的歷史來算指標。calculate_indicators 需要 >= 80 根日 K；
+#: 130 個日曆天約 92 個交易日，已有餘裕。
+#:
+#: 原本設 180，多抓的 50 天在冷啟動時是實打實的流量：每支約多 3 MB，
+#: 50 支候選就多 150 MB——而 Shioaji 每日歷史額度只有 500 MB。
+INDICATOR_HISTORY_DAYS = 130
 
 
 def fetch_indicators_shioaji_batch(codes: list[str], api=None) -> dict[str, dict]:
