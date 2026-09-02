@@ -45,11 +45,16 @@ else
   echo "[$(date '+%H:%M:%S')] ✅ main.py 已啟動 (PID: $!)"
 fi
 
-# 驗證：等它真的出現在程序表裡（Shioaji 登入約需 15-20 秒，給到 30 秒）
-for _i in $(seq 1 30); do
-  if pgrep -f "$MAIN_PATTERN" > /dev/null 2>&1; then break; fi
-  sleep 1
-done
+# 驗證：**固定等 25 秒再看**，不可「一找到就通過」。
+#
+# 為什麼：main.py 收到 SIGTERM 後要優雅關閉約 11 秒，這段期間它仍會出現在
+# pgrep 裡。2026-09-03 就是這樣——pkill 之後 sleep 2 就跑 start_all，
+# pgrep 抓到正在斷氣的舊 process，判定「已在執行」而跳過啟動，驗證也「通過」，
+# 結果舊的死了、新的沒起來，什麼都沒在跑。
+#
+# 25 秒足夠讓：垂死的舊 process 完全消失、新啟動的 main.py 完成 Shioaji
+# 登入（約 15-20 秒）並穩定下來。
+sleep 25
 
 if pgrep -f "$MAIN_PATTERN" > /dev/null 2>&1; then
   echo "[$(date '+%H:%M:%S')] ✅ main.py 驗證通過 (PID: $(pgrep -f "$MAIN_PATTERN" | head -1))"
@@ -57,7 +62,7 @@ else
   # 重試一次：pgrep 誤判導致跳過啟動時，這裡會補上
   echo "[$(date '+%H:%M:%S')] ⚠️ main.py 未在執行，重試啟動…"
   nohup python3 main.py >> logs/main.log 2>&1 &
-  sleep 20
+  sleep 25
   if pgrep -f "$MAIN_PATTERN" > /dev/null 2>&1; then
     echo "[$(date '+%H:%M:%S')] ✅ main.py 重試成功"
   else
