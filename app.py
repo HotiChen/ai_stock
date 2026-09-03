@@ -794,6 +794,21 @@ def tab_trade():
                     if not contract:
                         st.error(f"找不到 {code}")
                     else:
+                        _act = "buy" if action == "買進" else "sell"
+
+                        # 共用守衛：HALT、重複委託、PAPER_TRADING。
+                        # 這個表單原本直接呼叫 api.place_order，繞過全部守衛
+                        # ——包括 PAPER_TRADING，紙上模式下會送出真實委託。
+                        import os as _os
+
+                        from executor import guard_new_order
+                        _paper = _os.getenv("PAPER_TRADING", "true").lower() != "false"
+                        _reject = guard_new_order(code, _act, paper_trading=_paper,
+                                                  name=code)
+                        if _reject:
+                            st.warning(f"未送出：{_reject}")
+                            st.stop()
+
                         sj_action = sc.Action.Buy if action == "買進" else sc.Action.Sell
                         order = api.Order(
                             price=price if price_type == "限價" else 0,
@@ -802,8 +817,23 @@ def tab_trade():
                             price_type=sc.StockPriceType.LMT if price_type == "限價" else sc.StockPriceType.MKT,
                             order_type=sc.OrderType.ROD,
                         )
-                        trade = api.place_order(contract, order)
+                        try:
+                            trade = api.place_order(contract, order)
+                        except Exception:
+                            # 下單失敗要釋放宣告，否則這一檔今天再也不能重試
+                            try:
+                                import order_ledger
+                                order_ledger.release(code, _act)
+                            except Exception:
+                                pass
+                            raise
                         st.success(f"委託成功！{trade.order.id}")
+                        try:
+                            import order_ledger
+                            order_ledger.confirm(code, _act,
+                                                 order_id=str(trade.order.id))
+                        except Exception:
+                            pass
                         save_trade(TradeRecord(code, TradeAction.BUY if action == "買進" else TradeAction.SELL,
                                                quantity * 1000, price, 0.0, date.today()))
                 except Exception as e:
