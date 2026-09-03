@@ -250,16 +250,23 @@ class TestFormatIndicatorsText:
 
 class TestFetchIndicators:
     def _make_kbars(self, n=100):
+        """假的 Shioaji kbars。
+
+        必須含 Open：kbars_to_df 會檢查 OHLCV 五個欄位，缺一個就整筆捨棄
+        （半份資料流進指標計算會算出看似合理卻錯誤的數字）。
+        ts 要是可解析的時間戳，且每根不同天——分鐘 K 聚合成日線時同一天會被
+        合併，時間全撞在一起的話只會得到 1 根日 K。
+        """
+        import pandas as pd
         closes = np.linspace(100, 120, n).tolist()
-        highs  = (np.array(closes) + 2).tolist()
-        lows   = (np.array(closes) - 2).tolist()
-        vols   = [1_000_000] * n
+        idx = pd.date_range("2025-01-01", periods=n, freq="D")
         return {
-            "ts": [f"2026-01-{i%30+1:02d}" for i in range(n)],
+            "ts": [int(t.value) for t in idx],
+            "Open": (np.array(closes) - 0.5).tolist(),
             "Close": closes,
-            "High": highs,
-            "Low": lows,
-            "Volume": vols,
+            "High": (np.array(closes) + 2).tolist(),
+            "Low": (np.array(closes) - 2).tolist(),
+            "Volume": [1_000_000.0] * n,
         }
 
     def test_returns_dict(self):

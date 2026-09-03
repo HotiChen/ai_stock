@@ -72,10 +72,9 @@ def get_indicators(api, stock_code: str) -> dict:
     contract = api.Contracts.Stocks.get(stock_code)
     if not contract:
         return {}
-    end = date.today()
-    start = end - timedelta(days=120)
-    kbars = api.kbars(contract, str(start), str(end))
-    df = pd.DataFrame({**kbars})
+    # 原本一次查 120 天，超過 Shioaji 的 30 天上限會回 400。
+    import shioaji_history as sh
+    df = sh.fetch_daily_as_kbars_df(api, stock_code, days=120)
     if df.empty:
         return {}
     df = normalize_kbars_df(df)

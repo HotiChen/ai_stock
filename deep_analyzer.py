@@ -47,14 +47,18 @@ def get_price_trend_summary(api, code: str, days: int = 20) -> str:
         contract = api.Contracts.Stocks.get(code)
         if not contract:
             return "歷史資料不足"
+        # 原本一次呼叫 api.kbars 查 days+15 天，超過 Shioaji 的 30 天上限
+        # 就會回 400（"Kbars date range must not exceed 30 days."）。
+        # 改走 shioaji_history.fetch_daily：自動分段，且回傳的是**日線**——
+        # 原本把分鐘 K 直接餵進來算 MA5/MA20，算出來的是「5 分鐘均價」，
+        # 語意本來就是錯的。
+        import shioaji_history as sh
         end = date.today()
-        start = end - timedelta(days=days + 15)
-        kbars = api.kbars(contract, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
-        
-        if not kbars or not kbars.get('Close') or len(kbars['Close']) < 5:
+        df = sh.fetch_daily(api, code, end - timedelta(days=days + 15), end)
+        if df is None or len(df) < 5:
             return "歷史資料不足"
-            
-        closes = kbars["Close"][-days:]
+
+        closes = [float(v) for v in df["Close"].tolist()][-days:]
         import numpy as np
         ma5  = float(np.mean(closes[-5:]))
         ma20 = float(np.mean(closes))

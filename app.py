@@ -157,9 +157,9 @@ def fetch_kbars(code: str, days: int = 120) -> pd.DataFrame:
     contract = api.Contracts.Stocks.get(code)
     if not contract:
         return pd.DataFrame()
-    end = date.today()
-    kbars = api.kbars(contract, str(end - timedelta(days=days)), str(end))
-    df = pd.DataFrame({**kbars})
+    # 原本一次查 days 天（預設 120），超過 Shioaji 的 30 天上限會回 400。
+    import shioaji_history as sh
+    df = sh.fetch_daily_as_kbars_df(api, code, days=days)
     return normalize_kbars_df(df) if not df.empty else df
 
 

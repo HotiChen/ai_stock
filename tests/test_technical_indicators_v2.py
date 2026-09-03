@@ -191,40 +191,58 @@ class TestCalcAtr:
 
 # ── fetch_indicators uses 100 days ────────────────────────────────────────────
 
-class TestFetchIndicators100Days:
-    def _make_api(self, n: int = 100):
+class TestFetchIndicatorsRespectsKbarsLimit:
+    """fetch_indicators 原本一次呼叫 api.kbars 查 150 天，而 Shioaji 的上限是
+    30 天——回 400 "Kbars date range must not exceed 30 days."，也就是說它
+    **從來沒有成功過**。以前 _get_indicators 有 yfinance 備援接住，2026-09-02
+    移除備援後，8:30 選股完全拿不到指標，當天零候選。
+
+    改走 shioaji_history.fetch_daily（自動分段 + 聚合成日線）。
+    """
+
+    def _make_api(self, n: int = 200):
         import numpy as np
-        prices = np.linspace(100.0, 150.0, n).tolist()
-        volumes = [1000] * n
+        import pandas as pd
+        closes = np.linspace(100.0, 150.0, n).tolist()
+        idx = pd.date_range("2025-01-01", periods=n, freq="D")
         api = MagicMock()
         api.Contracts.Stocks.get.return_value = MagicMock()
         api.kbars.return_value = {
-            "ts": list(range(n)),
-            "Close": prices,
-            "High": [p + 2 for p in prices],
-            "Low": [p - 2 for p in prices],
-            "Volume": volumes,
+            "ts": [int(t.value) for t in idx],
+            "Open": [c - 0.5 for c in closes],
+            "Close": closes,
+            "High": [c + 2 for c in closes],
+            "Low": [c - 2 for c in closes],
+            "Volume": [1000.0] * n,
         }
         return api
 
-    def test_requests_100_day_period(self):
+    def test_no_single_request_exceeds_30_days(self):
+        """★ 每一次 kbars 請求的區間都必須在 Shioaji 上限內。"""
+        from datetime import date as _date
+
         from technical_indicators import fetch_indicators
-        api = self._make_api(100)
+        api = self._make_api()
         fetch_indicators(api, "2330")
-        # kbars was called with the contract
-        api.kbars.assert_called_once()
-        call_kwargs = api.kbars.call_args
-        # start/end args should span at least 100 days
-        call_str = str(call_kwargs)
-        assert call_kwargs is not None  # was called
+
+        assert api.kbars.called, "應該有呼叫 kbars"
+        for call in api.kbars.call_args_list:
+            kw = call.kwargs
+            s = _date.fromisoformat(kw["start"])
+            e = _date.fromisoformat(kw["end"])
+            assert (e - s).days < 30, f"區間 {s}~{e} 跨 {(e - s).days} 天，超過上限"
+
+    def test_splits_long_range_into_multiple_calls(self):
+        from technical_indicators import fetch_indicators
+        api = self._make_api()
+        fetch_indicators(api, "2330")
+        assert api.kbars.call_count > 1, "130 天必須分成多次請求"
 
     def test_returns_calculate_indicators_dict_compatible(self):
         from technical_indicators import fetch_indicators
-        api = self._make_api(100)
-        result = fetch_indicators(api, "2330")
+        result = fetch_indicators(self._make_api(), "2330")
         assert result is not None
-        # should contain all keys needed by rules.py
-        assert "current_price" in result or hasattr(result, "close")
+        assert "current_price" in result
 
 
 # ── fetch_indicators_shioaji_batch（原 yfinance batch）────────────────────────

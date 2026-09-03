@@ -35,6 +35,15 @@ log = logging.getLogger(__name__)
 
 _OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
+#: Shioaji kbars 單次查詢的天數上限。超過會回
+#: {'status_code': 400, 'detail': 'Kbars date range must not exceed 30 days.'}
+#:
+#: 這個限制在 2026-09-03 才被發現，但它一直存在：
+#: technical_indicators.fetch_indicators 原本一次要 150 天，**從來沒有成功過**，
+#: 只是以前有 yfinance 備援接住，移除備援後 8:30 選股就完全拿不到指標。
+#: 因此上限在 date_chunks 內部強制執行——不能指望每個呼叫端都記得。
+MAX_KBARS_SPAN_DAYS = 30
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 純轉換
@@ -51,7 +60,9 @@ def kbars_to_df(kbars) -> Optional["object"]:
     if not kbars:
         return None
     ts = kbars.get("ts") if hasattr(kbars, "get") else None
-    if not ts:
+    # 不可寫成 `if not ts`：ts 可能是 numpy array，會拋
+    # 「truth value of an array with more than one element is ambiguous」。
+    if ts is None or len(ts) == 0:
         return None
     if any(kbars.get(c) is None for c in _OHLCV):
         log.debug("kbars_to_df: 缺少欄位，捨棄整筆")
@@ -95,18 +106,24 @@ def bars_for_day(minute_df, day: date) -> list[dict]:
     ]
 
 
-def date_chunks(start: date, end: date, chunk_days: int = 30) -> list[tuple[date, date]]:
+def date_chunks(start: date, end: date,
+                chunk_days: int = MAX_KBARS_SPAN_DAYS) -> list[tuple[date, date]]:
     """把 [start, end] 切成連續、不重疊、無空隙的區段。
+
+    ``chunk_days`` 會被強制收斂到 MAX_KBARS_SPAN_DAYS 以內：呼叫端傳 365 天
+    也會被切開。上限放在這裡而不是靠呼叫端自律，是因為 2026-09-03 的事故正是
+    「好幾個呼叫端各自傳了超過上限的天數」造成的。
 
     空隙會讓指標少幾根 K；重疊會聚合出重複的日線。兩者都不會報錯，只會靜默
     污染資料——所以有專門的測試釘住「相鄰段剛好差一天」。
     """
     if end < start:
         return []
+    span = max(1, min(int(chunk_days), MAX_KBARS_SPAN_DAYS))
     out: list[tuple[date, date]] = []
     cursor = start
     while cursor <= end:
-        chunk_end = min(cursor + timedelta(days=chunk_days - 1), end)
+        chunk_end = min(cursor + timedelta(days=span - 1), end)
         out.append((cursor, chunk_end))
         cursor = chunk_end + timedelta(days=1)
     return out
@@ -166,7 +183,12 @@ def _fetch_kbars(api, code: str, start: date, end: date):
                           end=end.strftime("%Y-%m-%d"))
     )
     if out is TIMEOUT:
+        log.warning("kbars(%s, %s~%s) 逾時", code, start, end)
         return None
+    if out is None:
+        # 移除 yfinance 備援後這是唯一資料來源，失敗不能只留在 debug——
+        # 2026-09-03 的 400 錯誤就是因為訊息埋在 debug 而找了整個早上。
+        log.warning("kbars(%s, %s~%s) 取不到資料", code, start, end)
     return out
 
 
@@ -528,3 +550,25 @@ def fetch_daily_cached(api, code: str, start: date, end: date,
     merged = merge_daily(cached, fresh)
     cache_save(cache_dir, code, merged)
     return merged
+
+
+def fetch_daily_as_kbars_df(api, code: str, days: int = 120):
+    """日線，但輸出成 logic.normalize_kbars_df 期待的 kbars 格式（含 ts 欄位）。
+
+    給 auto_trader / app.py 這類既有呼叫端使用：它們原本直接呼叫
+    api.kbars(contract, 120 天)，而 Shioaji 上限是 30 天，一直回 400。
+    改走這裡就會自動分段，格式也維持相容。
+
+    抓不到時回傳空 DataFrame（而非 None），維持既有呼叫端 `if df.empty` 的判斷。
+    """
+    from datetime import timedelta
+
+    import pandas as pd
+
+    end = date.today()
+    df = fetch_daily(api, code, end - timedelta(days=days), end)
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
+    out = df.reset_index()
+    out = out.rename(columns={out.columns[0]: "ts"})
+    return out

@@ -300,28 +300,30 @@ def format_indicators_text(ind) -> str:
 # ── Data fetcher（100 日）─────────────────────────────────────────────────────
 
 def fetch_indicators(api, code: str) -> Optional[dict]:
+    """從 Shioaji 抓歷史日線，計算所有指標。失敗回傳 None。
+
+    **這個函式原本一次呼叫 api.kbars 查 150 天，而 Shioaji 的上限是 30 天**
+    （回 400 "Kbars date range must not exceed 30 days."）——也就是說它從來
+    沒有成功過。以前 _get_indicators 有 yfinance 備援接住，所以沒人發現；
+    2026-09-02 移除備援後，8:30 選股就完全拿不到指標，當天零候選。
+
+    改走 shioaji_history.fetch_daily：它會把區間切成 30 天以內的分段，
+    並把分鐘 K 聚合成日線（calculate_indicators 要的是日線，原本直接把
+    分鐘 K 餵進去其實也是錯的）。
     """
-    從 Shioaji 抓 100 日歷史，計算所有指標。
-    回傳 calculate_indicators() 的 dict，失敗回傳 None。
-    """
-    import pandas as pd
     from datetime import date, timedelta
-    
+
+    import shioaji_history as sh
+
     try:
-        contract = api.Contracts.Stocks.get(code)
-        if not contract:
-            return None
-            
         end = date.today()
-        start = end - timedelta(days=150) # Approx 100 trading days
-        
-        kbars = api.kbars(contract, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
-        if not kbars or not kbars.get('ts') or len(kbars['ts']) < 80:
+        start = end - timedelta(days=INDICATOR_HISTORY_DAYS)
+        df = sh.fetch_daily(api, code, start, end)
+        if df is None or len(df) < 80:
             return None
-            
-        df = pd.DataFrame({**kbars})
         return calculate_indicators(df)
-    except Exception:
+    except Exception as e:
+        log.debug("fetch_indicators(%s) failed: %s", code, e)
         return None
 
 
