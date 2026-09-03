@@ -49,6 +49,27 @@ MAX_KBARS_SPAN_DAYS = 30
 # 純轉換
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _kbars_field(kbars, name: str):
+    """從 Kbars 取一個欄位，同時支援 dict 與 pydantic 物件兩種形狀。
+
+    shioaji 1.7.4 的 ``shioaji.data.Kbars`` 是 pydantic model：**沒有 .get**，
+    欄位是屬性（``kb.Close`` → list），但有 ``keys()``。舊版（或測試假物件）
+    則是普通 dict。
+
+    程式裡原本一律寫 ``kbars.get("ts")``，在 1.7.4 上永遠取不到值——而且因為
+    寫成 ``... if hasattr(kbars, "get") else None``，它不會拋錯，只會**安靜地
+    每次回 None**。2026-09-03 的 8:30 選股就是因此一支指標都算不出來。
+    """
+    if kbars is None:
+        return None
+    if hasattr(kbars, "get"):
+        try:
+            return kbars.get(name)
+        except Exception:
+            pass
+    return getattr(kbars, name, None)
+
+
 def kbars_to_df(kbars) -> Optional["object"]:
     """Shioaji kbars dict → DataFrame（DatetimeIndex，欄位 Open/High/Low/Close/Volume）。
 
@@ -59,16 +80,20 @@ def kbars_to_df(kbars) -> Optional["object"]:
 
     if not kbars:
         return None
-    ts = kbars.get("ts") if hasattr(kbars, "get") else None
+    ts = _kbars_field(kbars, "ts")
     # 不可寫成 `if not ts`：ts 可能是 numpy array，會拋
     # 「truth value of an array with more than one element is ambiguous」。
     if ts is None or len(ts) == 0:
         return None
-    if any(kbars.get(c) is None for c in _OHLCV):
-        log.debug("kbars_to_df: 缺少欄位，捨棄整筆")
+
+    cols = {c: _kbars_field(kbars, c) for c in _OHLCV}
+    missing = [c for c, v in cols.items() if v is None or len(v) != len(ts)]
+    if missing:
+        # 半份資料流進指標計算會算出看似合理卻錯誤的數字，寧可整筆捨棄。
+        log.warning("kbars_to_df: 欄位缺失或長度不符 %s，捨棄整筆", missing)
         return None
 
-    df = pd.DataFrame({c: list(kbars[c]) for c in _OHLCV},
+    df = pd.DataFrame({c: list(cols[c]) for c in _OHLCV},
                       index=pd.to_datetime(list(ts)))
     # 不假設 Shioaji 已排序：亂序會讓日線的 open/close 取到錯的那一根
     return df.sort_index()

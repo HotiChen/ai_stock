@@ -160,8 +160,13 @@ class TestFetchIntradayVwap:
         prices = np.linspace(100.0, 102.0, n).tolist()
         api = MagicMock()
         api.Contracts.Stocks.get.return_value = MagicMock()
+        # 必須含 Open：kbars_to_df 要求 OHLCV 五個欄位齊全，缺一個就整筆
+        # 捨棄（半份資料會算出看似合理卻錯誤的指標）。真實的 Shioaji Kbars
+        # 一定會回 Open，原本的假物件少了它，是測試假物件不夠真實。
+        ts0 = 1_756_000_000_000_000_000
         api.kbars.return_value = {
-            "ts": list(range(n)),
+            "ts": [ts0 + i * 60_000_000_000 for i in range(n)],
+            "Open": [p - 0.2 for p in prices],
             "Close": prices,
             "High": [p + 0.5 for p in prices],
             "Low":  [p - 0.5 for p in prices],

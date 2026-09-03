@@ -414,8 +414,12 @@ def fetch_intraday_vwap(code: str, api=None) -> Optional[float]:
                 start=today, end=today,
                 timeframe=api.constant.Timeframe.Minute,
             )
-            if kbars and kbars.get("ts") and len(kbars["ts"]) > 0:
-                df = _pd.DataFrame(kbars)
+            # 原本寫 kbars.get("ts")，但 shioaji 1.7.4 的 Kbars 是 pydantic
+            # 物件、沒有 .get，於是 VWAP 永遠是 None（安靜失敗）。
+            # 改走 shioaji_history.kbars_to_df，它兩種形狀都支援。
+            import shioaji_history as _sh
+            df = _sh.kbars_to_df(kbars)
+            if df is not None and len(df):
                 return round(calc_vwap(
                     df["High"].values.astype(float),
                     df["Low"].values.astype(float),
