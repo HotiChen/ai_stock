@@ -47,7 +47,27 @@ STOCK_NAMES: dict[str, str] = {
 STOP_LOSS_PCT: float = float(_get("STOP_LOSS_PCT", "5"))
 # 收盤強制平倉時刻。必須在連續交易時段（09:00–13:24:59）內：
 # 13:25–13:30 為收盤集合競價，市價單會被交易所退單。
-FORCE_CLOSE_TIME: str = _get("FORCE_CLOSE_TIME", "13:15")
+#
+# 單一真相：系統只能有一個「什麼時候平倉」的答案。
+# 歷史上有兩個設定（FORCE_CLOSE_TIME 給 ForceCloseJob / 主迴圈，
+# DT_FORCE_CLOSE_TIME 給 DaytradingConfig 與模擬），可以各自被 .env 設成不同
+# 的值——正式環境確實出現過主迴圈 13:15、當沖設定 13:00 的分歧。
+# 現在兩者一律解析成同一個值：DT_FORCE_CLOSE_TIME 若明確設定則以它為準
+# （向後相容既有 .env），並在兩者不一致時告警。
+def _resolve_force_close_time() -> str:
+    import logging
+
+    main_t = os.getenv("FORCE_CLOSE_TIME")
+    dt_t = os.getenv("DT_FORCE_CLOSE_TIME")
+    if dt_t and main_t and dt_t != main_t:
+        logging.getLogger(__name__).warning(
+            "FORCE_CLOSE_TIME=%s 與 DT_FORCE_CLOSE_TIME=%s 不一致，"
+            "統一採用 %s（系統只能有一個強平時間）", main_t, dt_t, dt_t,
+        )
+    return dt_t or main_t or "13:15"
+
+
+FORCE_CLOSE_TIME: str = _resolve_force_close_time()
 
 # Day-trading specific (loaded via daytrading_config.load_daytrading_config())
 DT_BUDGET: float           = float(_get("DT_BUDGET", "30000"))
@@ -55,5 +75,7 @@ DT_STOP_LOSS_PCT: float    = float(_get("DT_STOP_LOSS_PCT", "3.0"))
 DT_TAKE_PROFIT_PCT: float  = float(_get("DT_TAKE_PROFIT_PCT", "9.0"))
 DT_TRAILING_START_PCT: float = float(_get("DT_TRAILING_START_PCT", "2.0"))
 DT_TRAILING_STOP_PCT: float  = float(_get("DT_TRAILING_STOP_PCT", "0.5"))
-DT_FORCE_CLOSE_TIME: str   = _get("DT_FORCE_CLOSE_TIME", "13:00")
+#: 與 FORCE_CLOSE_TIME 恆等（見上方 _resolve_force_close_time）。
+#: 保留這個名稱是為了不動 daytrading_config 的欄位對應表。
+DT_FORCE_CLOSE_TIME: str   = FORCE_CLOSE_TIME
 DT_MANUAL_CONFIRM: bool    = _get("DT_MANUAL_CONFIRM", "true").lower() == "true"

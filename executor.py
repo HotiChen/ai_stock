@@ -217,6 +217,26 @@ def place_stock_order(
             lot_type=lt, success=False, order_id=None, reason=reason,
         )
 
+    # Guard 0: HALT — **只擋買進，賣出永遠放行**
+    #
+    # HALT 的原始設計意圖是「停止開新倉」（halt.py docstring：三段式緊急煞車
+    # 的最輕一段）。但它原本被實作成 main() 主迴圈頂端的全域擋，連停損、
+    # 13:15 強制平倉、13:35 複盤一起關掉——抱著當沖部位按下緊急暫停，系統
+    # 會停止保護那個部位，沒平掉的當沖隔天變成交割義務。
+    #
+    # 閘門放在這裡而不是各呼叫端：三個買進入口（MarketOpenJob、DT auto-buy、
+    # Telegram 快速下單）全部經過本函式，這是唯一的咽喉點。散在呼叫端遲早
+    # 會漏一個——那正是這次事故的模式。
+    if action == "buy":
+        try:
+            from halt import is_halted
+            if is_halted():
+                return _skip("系統緊急暫停中，不執行買進（賣出與強制平倉不受影響）")
+        except Exception as e:
+            # 讀不到旗標時**放行**：擋住正常買單的代價高於漏擋一次，
+            # 且緊急暫停另有 Telegram 告警與人工介入路徑。
+            log.warning("HALT 狀態讀取失敗（放行買單）: %s", e)
+
     # Guard 1: duplicate
     if is_duplicate_order(code, action, prior_orders):
         return _skip(f"重複委託：{code} {action} 今日已下單")

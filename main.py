@@ -725,6 +725,16 @@ def _auto_buy_dt_positions(
     )
     import dt_risk
 
+    # HALT：提早跳過。executor 的 Guard 0 已保證買單會被擋，但不在這裡攔的話
+    # 仍會照常推播「要買嗎」的 Telegram 確認，使用者按下確認之後才發現訂單被擋。
+    try:
+        from halt import is_halted
+        if is_halted():
+            log.warning("系統緊急暫停中，跳過自動買入（%d 檔候選）", len(positions))
+            return
+    except Exception as e:
+        log.warning("HALT 狀態讀取失敗（繼續，仍有 executor Guard 0 把關）: %s", e)
+
     if dt_risk.is_circuit_breaker_active():
         log.warning("DT 熔斷中，跳過本輪自動買入（%d 檔候選）", len(positions))
         if TELEGRAM_CHAT_ID:
@@ -1547,6 +1557,66 @@ def _run_dt_reconcile(api, dt_config: "DaytradingConfig", tag: str) -> None:
         log.warning("DT 對帳（%s）失敗: %s", tag, e)
 
 
+def _halt_notice_lines() -> list[str]:
+    """HALT 狀態的說明文字。集中一處，避免各處講法不一致。"""
+    return [
+        "⚠️ <b>系統處於緊急暫停狀態</b>",
+        "今日<b>不會執行任何買進</b>。",
+        "停損、停利、強制平倉<b>照常運作</b>，持倉仍受保護。",
+        "傳 <code>恢復系統</code> 可解除。",
+    ]
+
+
+def _announce_halt_state_on_startup() -> None:
+    """啟動時若處於 HALT，大聲宣告。
+
+    2026-08-21 有人按了緊急暫停，接下來 12 天系統每天靜靜跳過所有工作——
+    不寫 log、不告警、不過期。process 活著、log 乾淨、Telegram 無異常，
+    完全沒有任何跡象。任何會改變系統行為的持久狀態，都必須自我宣告。
+    """
+    try:
+        from halt import is_halted
+        if not is_halted():
+            return
+    except Exception as e:
+        log.warning("啟動時讀取 HALT 狀態失敗: %s", e)
+        return
+
+    log.warning("啟動時偵測到 HALT 旗標：今日不會執行買進（賣出與平倉正常）")
+    if not TELEGRAM_CHAT_ID:
+        return
+    try:
+        from telegram_bot import send_text
+        send_text(TELEGRAM_CHAT_ID, "\n".join(_halt_notice_lines()))
+    except Exception as e:
+        log.warning("HALT 啟動告警發送失敗: %s", e)
+
+
+def _maybe_halt_reminder(now: datetime, state: dict) -> None:
+    """HALT 期間每小時提醒一次（不洗版）。state 由呼叫端跨迴圈保存。"""
+    try:
+        from halt import is_halted
+        if not is_halted():
+            state.pop("last_halt_reminder", None)
+            return
+    except Exception:
+        return
+
+    slot = now.strftime("%Y-%m-%d %H")
+    if state.get("last_halt_reminder") == slot:
+        return
+    state["last_halt_reminder"] = slot
+
+    log.warning("系統仍處於緊急暫停狀態（不執行買進）")
+    if not TELEGRAM_CHAT_ID:
+        return
+    try:
+        from telegram_bot import send_text
+        send_text(TELEGRAM_CHAT_ID, "\n".join(_halt_notice_lines()))
+    except Exception as e:
+        log.warning("HALT 定期提醒發送失敗: %s", e)
+
+
 def _run_force_close_job(api, db_path: str = DB_PATH, chat_id: Optional[str] = None) -> None:
     """收盤強制平倉（預設 13:15），包 try/except。強平失敗是資金安全事件 → 另發 Telegram 告警。"""
     try:
@@ -1602,6 +1672,7 @@ def main() -> None:
 
     from notifier import notify_system_start, notify_system_stop, notify_market_open, notify_market_close
     notify_system_start(SIMULATION)
+    _announce_halt_state_on_startup()
 
     api = ensure_connected(
         os.getenv("SHIOAJI_API_KEY", ""),
@@ -1648,13 +1719,21 @@ def main() -> None:
         t = now.time()
         today_prefix = now.strftime("%Y-%m-%d")
 
-        from halt import is_halted
-        if is_halted():
-            time.sleep(30)
-            continue
+        # 註：這裡曾經有 `if is_halted(): sleep; continue` 的全域擋。
+        # 已移除——它會連 5 分鐘出場輪詢、13:15 強制平倉、13:35 複盤一起跳過，
+        # 等於「按下緊急暫停就鎖住逃生門」。HALT 現在是禁買閘門，實作在
+        # executor.place_stock_order 的 Guard 0，只擋 action=="buy"。
+        # 詳見 tests/test_halt_semantics.py。
 
         # 跨日清除已執行紀錄
         _fired_today = {k for k in _fired_today if k.startswith(today_prefix)}
+
+        # HALT 期間每小時提醒一次。不會 continue——HALT 只擋買進，
+        # 其餘 job（監控、出場、強平、複盤）照常執行。
+        try:
+            _maybe_halt_reminder(now, _dt_poll_state)
+        except Exception as e:
+            log.debug("HALT 提醒失敗（忽略）: %s", e)
 
         # ── 13:15 停止 tick 訂閱 ────────────────────────────────────────
         if t >= _DT_MON_END and _dt_agent is not None:

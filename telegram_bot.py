@@ -370,7 +370,7 @@ def handle_help(chat_id: str) -> None:
         "⚡ 快速下單　→ 執行今日計劃\n"
         "🎯 今日當沖預測 → 今日候選股當沖評分 + 預測勝率\n"
         "🛡️ 停損設定　→ 設定個股停損價\n"
-        "🚨 緊急暫停　→ 立即停止系統，今日不再下單\n"
+        "🚨 緊急暫停　→ 停止買進（停損與平倉仍正常）\n"
         "🔄 撤銷委託　→ 取消今日所有未成交委託\n"
         "💥 一鍵平倉　→ 市價賣出所有持倉\n\n"
         "排程：\n"
@@ -383,23 +383,29 @@ def handle_help(chat_id: str) -> None:
 
 
 def handle_emergency_halt(chat_id: str) -> None:
-    from halt import halt, is_halted
+    """顯示確認訊息；**不直接生效**。
+
+    「🚨 緊急暫停」和「❓ 說明」在鍵盤上相鄰，而撤單、平倉都有二次確認，
+    只有它沒有——2026-08-21 就是這樣被誤觸，之後系統靜默停擺 12 天。
+    """
+    from halt import is_halted
     if is_halted():
         send_text(chat_id,
-            "⚠️ 系統已經是暫停狀態。\n\n"
+            "⚠️ 系統已經是暫停狀態（不執行買進，賣出與平倉正常）。\n\n"
             "傳 <code>恢復系統</code> 可重新啟用。"
         )
         return
 
-    halt(reason="telegram_manual")
-    from notifier import _send
-    _send("🚨 <b>緊急暫停！</b>\n系統已停止，今日不再執行任何下單。")
     send_text(chat_id,
-        "🚨 <b>緊急暫停已啟動</b>\n"
+        "🚨 <b>緊急暫停</b>\n"
         "━━━━━━━━━━━━━━━━\n"
-        "✅ HALT flag 已寫入\n"
-        "✅ 今日不再下單\n\n"
-        "傳 <code>恢復系統</code> 可重新啟用。"
+        "確定要停止所有<b>買進</b>嗎？\n"
+        "停損、停利、強制平倉不受影響，持倉仍受保護。\n\n"
+        "請按下方按鈕確認：",
+        reply_markup={"inline_keyboard": [[
+            {"text": "🚨 確認暫停買進", "callback_data": "halt_confirm"},
+            {"text": "❌ 取消",         "callback_data": "halt_abort"},
+        ]]}
     )
 
 
@@ -1052,6 +1058,29 @@ def handle_callback(callback_query: dict) -> None:
     elif data == "order_cancel":
         send_text(chat_id, "❌ 已取消。")
         send_main_menu(chat_id)
+
+    # ── 緊急暫停確認 ──
+    elif data == "halt_confirm":
+        from halt import halt
+        halt(reason="telegram_manual")
+        # 文案必須與實際行為一致：旗標非當日失效，而且它只擋買進。
+        # 原文案寫「今日不再執行任何下單」，兩件事都說錯了。
+        body = (
+            "🚨 <b>緊急暫停已啟動</b>\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "✅ 已停止所有<b>買進</b>\n"
+            "✅ 停損、停利、強制平倉<b>照常運作</b>\n\n"
+            "此狀態會持續到你手動解除。\n"
+            "傳 <code>恢復系統</code> 可重新啟用。"
+        )
+        try:
+            from notifier import _send
+            _send(body)
+        except Exception:
+            pass
+        send_text(chat_id, body)
+    elif data == "halt_abort":
+        send_text(chat_id, "已取消，系統維持正常運作。")
 
     # ── 撤銷所有委託確認 ──
     elif data == "cancel_all_confirm":

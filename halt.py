@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 """
-Emergency halt mechanism.
+Emergency halt mechanism — 三段式緊急煞車，由輕到重：
 
-halt()        → write HALT flag, stop MonitorAgent if running
-resume()      → clear HALT flag
-is_halted()   → check flag
-cancel_all()  → cancel all today's open orders via Shioaji
-liquidate_all_positions() → sell all current positions at market price
+    halt()                    → 禁止**買進**（不影響賣出、停損、強制平倉）
+    cancel_all_orders()       → 撤銷今日所有未成交委託
+    liquidate_all_positions() → 市價出清所有持倉
+
+    resume()      → 清除 HALT 旗標
+    is_halted()   → 查詢旗標
+
+HALT 只擋買進
+-------------
+閘門實作在 executor.place_stock_order 的 Guard 0，只擋 action=="buy"。
+它**不會**、也不該停掉停損與強制平倉——抱著當沖部位按下緊急暫停時，若連
+出場一起停掉，沒平掉的當沖隔天就變成交割義務，付不出來即違約交割。
+
+（本 docstring 原本寫「halt() → write HALT flag, stop MonitorAgent if
+running」。實作從未停過 MonitorAgent，而且那個行為本身是錯的：tick 監控
+正是停損的執行者之一，停掉它等於鎖住逃生門。）
 """
 
 import os

@@ -169,12 +169,28 @@ def test_liquidate_all_empty_positions():
 
 # ── telegram_bot integration ──────────────────────────────────────────────────
 
-def test_bot_halt_button_sets_flag(monkeypatch):
+def test_bot_halt_button_asks_for_confirmation(monkeypatch):
+    """按鈕不再直接生效——改為二次確認。
+
+    「🚨 緊急暫停」和「❓ 說明」在鍵盤上相鄰，而撤單、平倉都有二次確認，
+    只有它沒有。2026-08-21 就是這樣被誤觸，之後系統靜默停擺 12 天。
+    """
     import telegram_bot as bot
     monkeypatch.setattr(bot, "CHAT_ID", "123")
-    with patch("telegram_bot.send_text"), \
-         patch("notifier._send"):
+    with patch("telegram_bot.send_text") as send, patch("notifier._send"):
         bot.handle_emergency_halt("123")
+    assert not halt.is_halted(), "只按按鈕不得寫入旗標"
+    assert send.call_args.kwargs.get("reply_markup"), "必須附確認鍵盤"
+
+
+def test_bot_halt_confirm_callback_sets_flag(monkeypatch):
+    import telegram_bot as bot
+    monkeypatch.setattr(bot, "CHAT_ID", "123")
+    cb = {"id": "cb1", "data": "halt_confirm",
+          "message": {"chat": {"id": 123}}}
+    with patch("telegram_bot.send_text"), patch("notifier._send"), \
+         patch.object(bot, "_post"):
+        bot.handle_callback(cb)
     assert halt.is_halted()
 
 
