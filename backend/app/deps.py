@@ -81,12 +81,36 @@ SECRET_KEY = _load_secret_key()
 # ── Password configuration ────────────────────────────────────────────────────
 
 
+def _sanitize_env(value: str | None) -> str | None:
+    """Return a usable env value, or None when it is empty / a stray comment.
+
+    ``.env.example`` ships lines like::
+
+        USER_PASSWORD_HASH=              # bcrypt 雜湊（建議）；或用 USER_PASSWORD 明文
+
+    ``python-dotenv`` does **not** strip the trailing comment when the value is
+    empty — the variable ends up holding the literal comment text.  That value is
+    truthy, so the ``USER_PASSWORD`` fallback below is skipped and every login
+    attempt fails against a hash that can never verify, with no warning emitted.
+    Fail-closed, but silently: exactly the pattern LESSONS.md warns about.
+
+    Only a value *starting* with ``#`` is treated as a comment — passwords may
+    legitimately contain ``#`` elsewhere.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    return stripped
+
+
 def _load_password_hash() -> str | None:
     """Return the bcrypt hash to authenticate against, or None if login is disabled."""
-    pw_hash = os.getenv("USER_PASSWORD_HASH")
+    pw_hash = _sanitize_env(os.getenv("USER_PASSWORD_HASH"))
     if pw_hash:
         return pw_hash
-    plain = os.getenv("USER_PASSWORD")
+    plain = _sanitize_env(os.getenv("USER_PASSWORD"))
     if plain:
         # Hash the plaintext once at startup so we never compare in plaintext.
         return hash_password(plain)
