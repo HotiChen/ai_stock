@@ -23,6 +23,7 @@ import os
 import sqlite3
 import subprocess
 from datetime import date
+from datetime import date as _dt_date
 from pathlib import Path
 from typing import Optional
 
@@ -257,10 +258,59 @@ def _should_do_weekly(day: date, n_samples: int) -> bool:
 # 六、建立 AI 更新 prompt
 # ═══════════════════════════════════════════════════════════════════════════
 
+def build_no_data_observation(day) -> str:
+    """今日無預測資料時的觀察紀錄——**不呼叫 LLM**。
+
+    沒有素材卻要模型「根據今日交易結果」寫觀察，它就會編。2026-09-03 那次
+    產出的「年底最後一週市場參與度進一步下降、成交量處於極低水位、外資籌碼
+    活動維持靜止、融資水位控制表現維持穩定」——當天完全沒有任何資料，
+    每一句都是憑空生成。
+
+    這種情況下唯一能確定為真的事實就是「沒有資料」，所以直接寫死。
+    """
+    return f"- {day.isoformat()}：今日無預測資料產出，無可歸因之交易結果。"
+
+
+def append_observation(adaptive_text: str, observation: str) -> str:
+    """在「## 觀察紀錄」區段末尾追加一條觀察（不經 LLM）。
+
+    找不到該區段時追加在文末——保守處理，寧可位置不完美也不要丟掉紀錄。
+    """
+    body = adaptive_text.rstrip("\n")
+    return f"{body}\n{observation}\n"
+
+
+def enforce_observation_date(text: str, day) -> str:
+    """把**最後一條**觀察紀錄的日期改成系統日期。
+
+    只動最後一條：其餘是歷史紀錄，日期是既成事實，不能改。
+    模型即使被明確告知日期仍可能寫錯（或寫成未來），這是最後一道防線。
+    """
+    import re as _re
+
+    lines = text.splitlines()
+    pattern = _re.compile(r"^(\s*-\s*)(\d{4}-\d{2}-\d{2})(\s*[：:])")
+    for i in range(len(lines) - 1, -1, -1):
+        m = pattern.match(lines[i])
+        if not m:
+            continue
+        if m.group(2) != day.isoformat():
+            log.warning("Playbook 觀察日期不符（模型寫 %s，實際 %s），已更正",
+                        m.group(2), day.isoformat())
+            lines[i] = pattern.sub(
+                lambda mm: f"{mm.group(1)}{day.isoformat()}{mm.group(3)}",
+                lines[i], count=1,
+            )
+        break
+    out = "\n".join(lines)
+    return out + "\n" if text.endswith("\n") else out
+
+
 def build_update_prompt(
     outcomes: list[dict],
     adaptive_text: str,
-    is_weekly: bool,
+    is_weekly: bool = False,
+    day: "date | None" = None,
 ) -> str:
     """組建傳給 AI 的 prompt。
 
@@ -300,15 +350,23 @@ def build_update_prompt(
     outcome_text = "\n".join(summary_lines) if summary_lines else "  （今日無預測資料）"
 
     # 每日模式指令
+    #
+    # 日期必須明確給出。原本寫「格式：- YYYY-MM-DD：觀察內容」卻沒告訴模型
+    # 今天是幾號，2026-09-03 那次它就自己填了 2024-12-30，還順帶編出「年底
+    # 最後一週市場參與度下降」這種完全沒發生的事。
+    _day_str = (day or _dt_date.today()).isoformat()
     daily_instruction = (
         "【任務：每日觀察追加】\n"
+        f"今日日期為 {_day_str}。\n"
         "請根據上方今日交易結果，在「## 觀察紀錄」區段末尾追加 1 條新觀察。\n"
-        "格式：`- YYYY-MM-DD：觀察內容`\n"
+        f"格式：`- {_day_str}：觀察內容`（日期必須完全照用，不得自行推算或更改）\n"
         "限制：\n"
         "  1. 每條觀察不超過 200 字。\n"
         "  2. 觀察紀錄最多保留 20 條；若現有觀察已達 20 條，請刪除最舊的 1 條再追加新的。\n"
         "  3. 不得修改「## 當前研究重點」區段內容。\n"
         "  4. 只允許追加觀察，不允許調整或重寫任何既有規則。\n"
+        "  5. 只陳述上方資料實際顯示的事實。沒有資料支持的市場描述（成交量、"
+        "外資動向、融資水位等）一律不得撰寫。\n"
     )
 
     # 每週模式額外指令
@@ -467,21 +525,38 @@ def run_daily_update(
 
     # ── 步驟 5：建立 prompt ──────────────────────────────────────────────
     try:
-        prompt = build_update_prompt(outcomes, adaptive_text, is_weekly=is_weekly)
+        prompt = build_update_prompt(outcomes, adaptive_text,
+                                     is_weekly=is_weekly, day=day)
     except Exception as e:
         log.error("run_daily_update：build_update_prompt 失敗：%s", e)
         return False
 
-    # ── 步驟 6：呼叫 AI ──────────────────────────────────────────────────
-    try:
-        new_adaptive = call_haiku(prompt)
-    except Exception as e:
-        log.error("run_daily_update：AI 呼叫失敗：%s", e)
-        return False
+    # ── 步驟 6：產生新的自適應區 ─────────────────────────────────────────
+    #
+    # 無預測資料時**不呼叫 LLM**：沒有素材卻要它「根據今日交易結果」寫觀察，
+    # 它就會編。2026-09-03 那次產出「年底最後一週市場參與度進一步下降、
+    # 成交量處於極低水位、外資籌碼活動維持靜止」——當天完全沒有資料，
+    # 每一句都是憑空生成，日期還寫成 2024-12-30。
+    if not outcomes:
+        log.info("run_daily_update：今日無預測資料，直接追加事實紀錄（不呼叫 AI）")
+        new_adaptive = append_observation(adaptive_text,
+                                          build_no_data_observation(day))
+    else:
+        try:
+            new_adaptive = call_haiku(prompt)
+        except Exception as e:
+            log.error("run_daily_update：AI 呼叫失敗：%s", e)
+            return False
 
-    if not new_adaptive or not new_adaptive.strip():
-        log.error("run_daily_update：AI 回傳空字串，放棄更新")
-        return False
+        if not new_adaptive or not new_adaptive.strip():
+            log.error("run_daily_update：AI 回傳空字串，放棄更新")
+            return False
+
+    # 最後一道防線：即使 prompt 已明確給出日期，模型仍可能寫錯或寫成未來。
+    try:
+        new_adaptive = enforce_observation_date(new_adaptive, day)
+    except Exception as e:
+        log.warning("run_daily_update：日期校正失敗，沿用原輸出：%s", e)
 
     # ── 步驟 7：淘汰超額觀察 ─────────────────────────────────────────────
     try:

@@ -432,8 +432,13 @@ class TestRunDailyUpdateFailSafe:
         p.write_text(content, encoding="utf-8")
         return p
 
-    def _make_empty_db(self, tmp_path: Path) -> str:
-        """建立空的 stock_prediction_log DB 並回傳路徑。"""
+    def _make_empty_db(self, tmp_path: Path, day: date = date(2026, 6, 10)) -> str:
+        """建立 stock_prediction_log DB，並塞一筆當日資料。
+
+        必須有資料，這些 fail-safe 測試才會走到 AI 呼叫那一段——無預測資料
+        時 run_daily_update 會直接寫一條事實紀錄、完全不呼叫 LLM
+        （見 tests/test_playbook_dates.py：沒有素材時模型會編造市場描述）。
+        """
         db_path = str(tmp_path / "test.db")
         conn = sqlite3.connect(db_path)
         conn.executescript("""
@@ -447,6 +452,13 @@ class TestRunDailyUpdateFailSafe:
                 UNIQUE(date, code)
             );
         """)
+        conn.execute(
+            "INSERT INTO stock_prediction_log"
+            " (date, code, name, action, confidence, expected_return_pct, entry_price)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (day.isoformat(), "2330", "台積電", "buy", 7, 3.0, 100.0),
+        )
+        conn.commit()
         conn.close()
         return db_path
 
