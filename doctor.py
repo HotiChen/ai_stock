@@ -32,6 +32,15 @@ import logging
 import os
 from dataclasses import dataclass, field
 
+# doctor 是獨立入口，必須自己載入 .env——否則 check_env 會把「設定好但沒載入」
+# 誤報成「缺少必填」。2026-09-04 首次在正式機執行就發生了，而健檢工具誤報
+# 比不檢查更糟：它會讓人不再相信它說的話。
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:      # 沒裝 python-dotenv 時退化為只讀環境變數
+    pass
+
 log = logging.getLogger(__name__)
 
 OK = "ok"
@@ -132,17 +141,51 @@ def check_env() -> CheckResult:
     return CheckResult(".env 設定", OK, "必填參數齊全")
 
 
+#: 永豐金伺服器拒絕過舊 SDK 時的回應特徵
+_SDK_OUTDATED_HINTS = ("503", "update the version of shioaji")
+
+
+def _looks_outdated(err: str) -> bool:
+    low = err.lower()
+    return all(h.lower() in low for h in _SDK_OUTDATED_HINTS)
+
+
 def check_shioaji(api=None) -> CheckResult:
-    """券商連線。"""
+    """券商連線。
+
+    特別區分「SDK 版本過舊」：永豐金會回 503 並要求升級。那不是憑證問題，
+    但若籠統顯示「請確認 SHIOAJI_API_KEY」，會把人導向完全錯誤的方向。
+    """
     if api is None:
         try:
             import shioaji_session
             api = shioaji_session.get_api()
         except Exception as e:
+            if _looks_outdated(str(e)):
+                return CheckResult(
+                    "Shioaji 連線", FAIL, "SDK 版本過舊，券商拒絕連線",
+                    "執行 `pip install -U shioaji` 升級。"
+                    "升級後 login 不再接受 fetch_contract，本專案已相容。",
+                )
             return CheckResult("Shioaji 連線", FAIL, "連線失敗", str(e))
     if api is None:
+        # ensure_connected 吞掉例外只回 None，原因要從 session 撈——
+        # 否則 503（SDK 過舊）會被顯示成「請確認憑證」，方向完全錯。
+        err = ""
+        try:
+            import shioaji_session
+            err = shioaji_session.last_error() or ""
+        except Exception:
+            pass
+        if _looks_outdated(err):
+            return CheckResult(
+                "Shioaji 連線", FAIL, "SDK 版本過舊，券商拒絕連線",
+                "執行 `pip install -U shioaji` 升級。"
+                "升級後 login 不再接受 fetch_contract，本專案已相容。",
+            )
         return CheckResult("Shioaji 連線", FAIL, "無法連線",
-                           "請確認 SHIOAJI_API_KEY / SHIOAJI_SECRET_KEY")
+                           (err + "｜" if err else "")
+                           + "請確認 SHIOAJI_API_KEY / SHIOAJI_SECRET_KEY")
     sim = os.getenv("SHIOAJI_SIMULATION", "true").lower() == "true"
     paper = os.getenv("PAPER_TRADING", "true").lower() != "false"
     return CheckResult("Shioaji 連線", OK,

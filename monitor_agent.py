@@ -121,12 +121,23 @@ def check_price_alerts(
 
 # ── Shioaji helpers ───────────────────────────────────────────────────────────
 
+#: 最後一次登入失敗的原因。ensure_connected 刻意吞掉例外（呼叫端多半只在乎
+#: 成功與否），但「為什麼失敗」決定了該怎麼修——SDK 版本過舊與憑證錯誤的
+#: 處理方式完全不同，只回 None 會讓人往錯的方向查。
+_LAST_LOGIN_ERROR: Optional[str] = None
+
+
+def last_login_error() -> Optional[str]:
+    return _LAST_LOGIN_ERROR
+
+
 def ensure_connected(
     api_key: str,
     secret_key: str,
     simulation: bool = True,
 ) -> Optional[sj.Shioaji]:
     """Login to Shioaji. Returns api on success, None on failure."""
+    global _LAST_LOGIN_ERROR
     try:
         api = sj.Shioaji(simulation=simulation)
         # shioaji >= 1.7 的 login 已移除 fetch_contract（contracts 自動抓取）。
@@ -137,6 +148,7 @@ def ensure_connected(
         except TypeError:
             log.debug("login 不接受 fetch_contract（新版 SDK），改用預設行為")
             api.login(api_key=api_key, secret_key=secret_key)
+        _LAST_LOGIN_ERROR = None
         log.info("Shioaji connected (simulation=%s)", simulation)
         try:
             import connection_watchdog
@@ -145,6 +157,7 @@ def ensure_connected(
             pass
         return api
     except Exception as e:
+        _LAST_LOGIN_ERROR = str(e)
         log.error("Shioaji connection failed: %s", e)
         try:
             import connection_watchdog

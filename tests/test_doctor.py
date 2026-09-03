@@ -188,3 +188,116 @@ class TestRunAllIsolation:
         results = doctor.run_all_checks(api=None)
         assert len(results) > 1
         assert any(r.status == doctor.FAIL and "boom" in r.detail for r in results)
+
+
+class TestDotenvLoaded:
+    """★ doctor 必須自己載入 .env。
+
+    2026-09-04 首次在正式機執行時誤報「缺少必填：SHIOAJI_API_KEY」——實際上
+    .env 裡設好了，只是 doctor.py 直接讀 os.getenv 而沒有 load_dotenv()。
+    健檢工具誤報比不檢查更糟：它會讓人不再相信它說的話。
+    """
+
+    def test_module_loads_dotenv_on_import(self):
+        import inspect
+
+        import doctor as d
+        src = inspect.getsource(d)
+        assert "load_dotenv" in src, "doctor 必須載入 .env"
+
+    def test_env_check_sees_dotenv_values(self, tmp_path, monkeypatch):
+        """把 .env 的值餵進來後，check_env 要看得到。"""
+        monkeypatch.delenv("SHIOAJI_API_KEY", raising=False)
+        monkeypatch.delenv("SHIOAJI_SECRET_KEY", raising=False)
+        assert doctor.check_env().status == doctor.FAIL
+
+        monkeypatch.setenv("SHIOAJI_API_KEY", "from-dotenv")
+        monkeypatch.setenv("SHIOAJI_SECRET_KEY", "from-dotenv")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+        monkeypatch.delenv("USER_PASSWORD_HASH", raising=False)
+        assert doctor.check_env().status == doctor.OK
+
+
+class TestSdkVersionCheck:
+    """永豐金伺服器會以 503 拒絕過舊的 shioaji：
+
+        StatusCode: 503, Detail: Please update the version of shioaji by using
+        `pip install -U shioaji`
+
+    這不是憑證問題，但 doctor 原本會顯示「請確認 SHIOAJI_API_KEY」，
+    把人導向完全錯誤的方向。
+    """
+
+    def test_503_reported_as_version_problem(self):
+        from unittest.mock import patch
+        err = ("StatusCode: 503, Detail: Please update the version of shioaji "
+               "by using `pip install -U shioaji`")
+        with patch("shioaji_session.get_api", side_effect=Exception(err)):
+            r = doctor.check_shioaji()
+        assert r.status == doctor.FAIL
+        assert "版本" in r.message or "版本" in r.detail
+        assert "pip install -U shioaji" in r.detail
+
+    def test_other_errors_still_point_at_credentials(self):
+        from unittest.mock import patch
+        with patch("shioaji_session.get_api", return_value=None):
+            r = doctor.check_shioaji()
+        assert r.status == doctor.FAIL
+        assert "SHIOAJI_API_KEY" in r.detail
+
+
+@pytest.fixture(autouse=True)
+def _no_session_leak():
+    """★ 這組測試會把假 api 塞進 shioaji_session 的全域快取。
+
+    monkeypatch 會還原被替換的函式，但**不會**清掉 get_api() 快取下來的
+    物件——一個裸 object() 就這樣洩漏成全域連線，讓之後的測試拿到它並在
+    api.Contracts 上炸掉（實際發生過，而且只在整套跑時才重現）。
+    """
+    import shioaji_session
+    shioaji_session.reset()
+    yield
+    shioaji_session.reset()
+
+
+class TestSdkVersionDetectionOnRealPath:
+    """★ 上面的 TestSdkVersionCheck 用 side_effect 讓 get_api 拋例外，但真實
+    路徑不是這樣：ensure_connected 會吞掉例外、log 之後回傳 None。
+
+    所以 doctor 拿到的是 None，永遠走不到 503 分支——測試通過但現實不會動。
+    修法：shioaji_session 記下最後一次失敗原因，doctor 讀它。
+    """
+
+    def test_session_records_last_error(self, monkeypatch):
+        import shioaji_session
+        shioaji_session.reset()
+        err = ("StatusCode: 503, Detail: Please update the version of shioaji "
+               "by using `pip install -U shioaji`")
+        monkeypatch.setattr(shioaji_session, "_connect",
+                            lambda *a, **k: (_ for _ in ()).throw(Exception(err)))
+        assert shioaji_session.get_api() is None
+        assert "503" in (shioaji_session.last_error() or "")
+
+    def test_last_error_cleared_on_success(self, monkeypatch):
+        import shioaji_session
+        shioaji_session.reset()
+        monkeypatch.setattr(shioaji_session, "_connect",
+                            lambda *a, **k: (_ for _ in ()).throw(Exception("boom")))
+        shioaji_session.get_api()
+        shioaji_session.reset()
+        monkeypatch.setattr(shioaji_session, "_connect", lambda *a, **k: object())
+        assert shioaji_session.get_api() is not None
+        assert shioaji_session.last_error() is None
+
+    def test_doctor_uses_last_error_when_api_is_none(self, monkeypatch):
+        """★ 這才是真實路徑：get_api 回 None，原因要從 last_error 拿。"""
+        import shioaji_session
+        monkeypatch.setattr(shioaji_session, "get_api", lambda *a, **k: None)
+        monkeypatch.setattr(
+            shioaji_session, "last_error",
+            lambda: "StatusCode: 503, Detail: Please update the version of shioaji")
+        r = doctor.check_shioaji()
+        assert r.status == doctor.FAIL
+        assert "版本" in r.message
+        assert "pip install -U shioaji" in r.detail
