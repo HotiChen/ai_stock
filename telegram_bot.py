@@ -1158,7 +1158,7 @@ def _handle_dt_buy(chat_id: str, code: str,
     """
     import os
     from daytrading_monitor import (
-        load_daytrading_positions, mark_entered, fetch_current_price,
+        load_daytrading_positions, record_buy_result, fetch_current_price,
     )
     from daytrading_config import load_daytrading_config
     from executor import place_stock_order, calc_risk_quantity
@@ -1223,11 +1223,15 @@ def _handle_dt_buy(chat_id: str, code: str,
 
     if result.success:
         # 原子單筆進場標記（不覆蓋其他持倉；跨 process 安全）
-        entered = mark_entered(code, result.price, result.quantity,
-                               result.lot_type, path=dt_path)
+        # 真實模式只標記「已送出」，等 sync_order_status 向券商確認成交後
+        # 才進 active——委託不等於成交。
+        import os as _os
+        _paper = _os.getenv("PAPER_TRADING", "true").lower() != "false"
+        entered = record_buy_result(code, result, paper_trading=_paper,
+                                    path=dt_path)
         if not entered:
-            # 券商已成交但持倉狀態機沒有這筆 → 監控/強平都看不到，必須告警
-            log.error("DT buy: %s 不在今日持倉庫，狀態未更新（券商已成交）", code)
+            # 券商已受理但持倉狀態機沒有這筆 → 監控/強平都看不到，必須告警
+            log.error("DT buy: %s 不在今日持倉庫，狀態未更新（券商已受理委託）", code)
             send_text(
                 chat_id,
                 f"⚠️ <b>持倉狀態未更新</b>\n"

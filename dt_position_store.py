@@ -42,6 +42,17 @@ _JSON_MIRROR = "data/daytrading_positions.json"
 _migrated: set[tuple[str, str]] = set()
 
 
+#: 「確定持有」的狀態。強平、對帳、損益結算都必須涵蓋這些。
+#:
+#: sell_submitted 也算持有——賣單送出但未成交時部位仍在手上。漏掉它會讓
+#: 系統以為已平倉，13:00 強平也不再處理，隔天就是交割義務。
+HELD_STATUSES = ("active", "sell_submitted")
+
+#: 「不確定」的狀態：買單已送出但未確認成交，可能持有也可能沒有。
+#: 不能當成持有（對它下賣單會變成放空），但必須另行向券商對帳確認。
+UNCERTAIN_STATUSES = ("buy_submitted",)
+
+
 def _today() -> str:
     return date.today().isoformat()
 
@@ -85,11 +96,19 @@ def _init(conn: sqlite3.Connection) -> None:
             lot_type        TEXT,
             sell_attempts   INTEGER DEFAULT 0,
             last_sell_error TEXT    DEFAULT '',
+            buy_order_id    TEXT,
+            sell_order_id   TEXT,
             updated_at      TEXT,
             PRIMARY KEY (trade_date, code)
         )
         """
     )
+    # 後加的欄位：CREATE TABLE IF NOT EXISTS 對既有資料表是 no-op，
+    # 光靠建表語句永遠補不上（見 LESSONS.md 錯誤 9）。
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dt_positions)")}
+    for col in ("buy_order_id", "sell_order_id"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE dt_positions ADD COLUMN {col} TEXT")
     conn.commit()
 
 
@@ -319,6 +338,138 @@ def mark_entered(code: str, entry_price: float, quantity: int,
         return cur.rowcount > 0
 
 
+def mark_buy_submitted(code: str, order_id: Optional[str] = None,
+                       trade_date: Optional[str] = None,
+                       db_path: Optional[str] = None,
+                       json_path: Optional[str] = None) -> bool:
+    """watching → buy_submitted（CAS）。回 True 表示本呼叫者送出了委託。
+
+    「送出委託」不是「已成交」。提前標成 active 會讓監控對不存在的部位算
+    損益、讓 13:00 強平對沒成交的部位下賣單（變成放空）。
+    """
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE dt_positions SET status='buy_submitted', buy_order_id=?,"
+            " updated_at=? WHERE trade_date=? AND code=? AND status='watching'",
+            (order_id, _now(), td, code),
+        )
+        conn.commit()
+        ok = cur.rowcount == 1
+        if ok:
+            _write_mirror(conn, json_path, td)
+    return ok
+
+
+def confirm_buy_filled(code: str, entry_price: float, quantity: int,
+                       lot_type: str = "common",
+                       trade_date: Optional[str] = None,
+                       db_path: Optional[str] = None,
+                       json_path: Optional[str] = None) -> bool:
+    """buy_submitted → active（僅在**券商回報成交**後呼叫）。
+
+    來源必須是券商的成交回報，不是 place_order 的回傳值。沒送過委託就回報
+    成交代表狀態機被繞過，一律拒絕。
+    """
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE dt_positions SET status='active', entry_price=?,"
+            " peak_price=?, quantity=?, lot_type=?, updated_at=?"
+            " WHERE trade_date=? AND code=? AND status='buy_submitted'",
+            (entry_price, entry_price, quantity, lot_type, _now(), td, code),
+        )
+        conn.commit()
+        ok = cur.rowcount == 1
+        if ok:
+            _write_mirror(conn, json_path, td)
+    return ok
+
+
+def revert_buy_submitted(code: str, trade_date: Optional[str] = None,
+                         db_path: Optional[str] = None,
+                         json_path: Optional[str] = None) -> bool:
+    """buy_submitted → watching（委託被退、逾時取消）。
+
+    不回滾的話這一檔今天就卡在 buy_submitted，既不會成交也不會重試。
+    """
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE dt_positions SET status='watching', buy_order_id=NULL,"
+            " updated_at=? WHERE trade_date=? AND code=? AND status='buy_submitted'",
+            (_now(), td, code),
+        )
+        conn.commit()
+        ok = cur.rowcount == 1
+        if ok:
+            _write_mirror(conn, json_path, td)
+    return ok
+
+
+def mark_sell_submitted(code: str, order_id: Optional[str] = None,
+                        trade_date: Optional[str] = None,
+                        db_path: Optional[str] = None,
+                        json_path: Optional[str] = None) -> bool:
+    """active → sell_submitted（CAS）。回 True 表示本呼叫者取得出場權。
+
+    取代 claim_for_close 直接跳到 closed 的做法：賣單送出後、成交確認前，
+    部位仍在手上（見 HELD_STATUSES）。
+    """
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE dt_positions SET status='sell_submitted', sell_order_id=?,"
+            " updated_at=? WHERE trade_date=? AND code=? AND status='active'",
+            (order_id, _now(), td, code),
+        )
+        conn.commit()
+        ok = cur.rowcount == 1
+        if ok:
+            _write_mirror(conn, json_path, td)
+    return ok
+
+
+def confirm_sell_filled(code: str, trade_date: Optional[str] = None,
+                        db_path: Optional[str] = None,
+                        json_path: Optional[str] = None) -> bool:
+    """sell_submitted → closed（僅在券商回報成交後呼叫）。"""
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE dt_positions SET status='closed', updated_at=?"
+            " WHERE trade_date=? AND code=? AND status='sell_submitted'",
+            (_now(), td, code),
+        )
+        conn.commit()
+        ok = cur.rowcount == 1
+        if ok:
+            _write_mirror(conn, json_path, td)
+    return ok
+
+
+def revert_sell_submitted(code: str, trade_date: Optional[str] = None,
+                          db_path: Optional[str] = None,
+                          json_path: Optional[str] = None) -> bool:
+    """sell_submitted → active（賣單被退）。
+
+    不回滾的話系統以為已平倉、實際上還抱著，13:00 強平也不會再處理它，
+    隔天就是交割義務。
+    """
+    td = trade_date or _today()
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE dt_positions SET status='active', sell_order_id=NULL,"
+            " updated_at=? WHERE trade_date=? AND code=? AND status='sell_submitted'",
+            (_now(), td, code),
+        )
+        conn.commit()
+        ok = cur.rowcount == 1
+        if ok:
+            _write_mirror(conn, json_path, td)
+    return ok
+
+
 def mark_skipped(code: str, trade_date: Optional[str] = None,
                  db_path: Optional[str] = None, json_path: Optional[str] = None) -> bool:
     td = trade_date or _today()
@@ -516,7 +667,7 @@ def reconcile_with_broker(api, trade_date: Optional[str] = None,
         return None
 
     positions = [p for p in load_positions(td, db_path, json_path)
-                 if p.status == "active"]
+                 if p.status in HELD_STATUSES]
     db_map = {p.code: p for p in positions}
 
     db_only: list[str] = []
@@ -575,3 +726,123 @@ def _format_reconcile(report: dict, db_map: dict) -> str:
         lines.append(f"ℹ️ 券商持有 {code}（本系統外部位，不動作）")
     lines.append("<i>請人工檢查持倉一致性。</i>")
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 券商委託狀態同步
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: 視為「已成交（手上有股票）」的券商狀態。
+#: PartFilled 也算——部分成交代表確實持有，當成「還沒成交」會讓 13:00 強平
+#: 漏掉這個部位，隔天變成交割義務。
+_FILLED_STATUSES = ("Filled", "PartFilled")
+
+#: 視為「已失效」的券商狀態 → 回滾狀態機，讓之後可以重試。
+_DEAD_STATUSES = ("Cancelled", "Failed", "Inactive")
+
+
+def _trade_field(obj, *names):
+    """從巢狀物件取欄位，取不到回 None（不同 SDK 版本欄位位置略有差異）。"""
+    cur = obj
+    for n in names:
+        cur = getattr(cur, n, None)
+        if cur is None:
+            return None
+    return cur
+
+
+def uncertain_positions(trade_date: Optional[str] = None,
+                        db_path: Optional[str] = None) -> list:
+    """回傳狀態為「不確定」（買單已送出、成交未確認）的持倉。
+
+    這些部位可能已經成交但系統不知道：13:00 強平只處理 active，不會碰它們，
+    隔天就變成交割義務。必須讓人看見。
+    """
+    return [p for p in load_positions(trade_date, db_path)
+            if p.status in UNCERTAIN_STATUSES]
+
+
+def sync_order_status(api, trade_date: Optional[str] = None,
+                      db_path: Optional[str] = None,
+                      json_path: Optional[str] = None) -> dict:
+    """向券商查詢委託狀態，推進狀態機。回傳統計 dict。
+
+    狀態機只有在「有人告訴它成交了」時才前進，而那個「有人」必須是**券商**，
+    不是 place_order 的回傳值——後者只代表委託已送出。
+
+    查詢失敗不拋出：這是週期性背景工作，中斷主流程的代價高於少同步一輪。
+    """
+    report = {"synced": 0, "filled": 0, "reverted": 0, "error": ""}
+    if api is None:
+        return report
+
+    try:
+        try:
+            api.update_status()
+        except Exception as e:      # 有些 SDK 版本不需要或不支援
+            log.debug("update_status 失敗（忽略）: %s", e)
+        trades = api.list_trades() or []
+    except Exception as e:
+        log.warning("sync_order_status: 取委託清單失敗: %s", e)
+        report["error"] = str(e)
+        return report
+
+    td = trade_date or _today()
+    # 本系統送出的委託：order_id → (code, 是買還是賣)
+    known: dict = {}
+    for p in load_positions(td, db_path):
+        if p.status == "buy_submitted":
+            oid = getattr(p, "buy_order_id", None) or _order_id_of(p, td, db_path, "buy")
+            if oid:
+                known[str(oid)] = (p.code, "buy")
+        elif p.status == "sell_submitted":
+            oid = getattr(p, "sell_order_id", None) or _order_id_of(p, td, db_path, "sell")
+            if oid:
+                known[str(oid)] = (p.code, "sell")
+
+    for t in trades:
+        oid = _trade_field(t, "order", "id")
+        if oid is None or str(oid) not in known:
+            continue        # 手動下單、其他程式送的委託——不屬於本狀態機
+        code, side = known[str(oid)]
+        status = str(_trade_field(t, "status", "status") or "")
+
+        if status in _FILLED_STATUSES:
+            if side == "buy":
+                qty = _trade_field(t, "status", "deal_quantity") or 0
+                price = _trade_field(t, "status", "deal_price") or 0.0
+                if confirm_buy_filled(code, float(price), int(qty),
+                                      trade_date=td, db_path=db_path,
+                                      json_path=json_path):
+                    report["filled"] += 1
+                    report["synced"] += 1
+            else:
+                if confirm_sell_filled(code, trade_date=td, db_path=db_path,
+                                       json_path=json_path):
+                    report["filled"] += 1
+                    report["synced"] += 1
+
+        elif status in _DEAD_STATUSES:
+            rollback = revert_buy_submitted if side == "buy" else revert_sell_submitted
+            if rollback(code, trade_date=td, db_path=db_path, json_path=json_path):
+                report["reverted"] += 1
+                report["synced"] += 1
+                log.warning("委託 %s（%s %s）狀態 %s，已回滾狀態機",
+                            oid, code, side, status)
+
+    if report["synced"]:
+        log.info("委託狀態同步：成交 %d、回滾 %d",
+                 report["filled"], report["reverted"])
+    return report
+
+
+def _order_id_of(pos, trade_date: str, db_path: Optional[str],
+                 side: str) -> Optional[str]:
+    """從 DB 直接取 order_id（DaytradingPosition 沒有這兩個欄位）。"""
+    col = "buy_order_id" if side == "buy" else "sell_order_id"
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            f"SELECT {col} FROM dt_positions WHERE trade_date=? AND code=?",
+            (trade_date, pos.code),
+        ).fetchone()
+    return row[0] if row else None

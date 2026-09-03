@@ -770,7 +770,7 @@ def _auto_buy_dt_positions(
     或算出 0 股時退回固定 budget_per_stock 預算法（行為相容）。
     """
     from daytrading_monitor import (
-        load_daytrading_positions, mark_entered, fetch_current_price,
+        load_daytrading_positions, record_buy_result, fetch_current_price,
     )
     import dt_risk
 
@@ -839,10 +839,13 @@ def _auto_buy_dt_positions(
             )
             if result.success:
                 # 原子單筆進場標記（不覆蓋其他持倉；跨 process 安全）
-                entered = mark_entered(code, result.price, result.quantity,
-                                       result.lot_type, path=dt_path)
+                # 真實模式只標記「已送出」，等 sync_order_status 向券商確認
+                # 成交後才進 active——委託不等於成交。
+                entered = record_buy_result(code, result,
+                                            paper_trading=PAPER_TRADING,
+                                            path=dt_path)
                 if not entered:
-                    # 券商已成交但持倉狀態機沒有這筆 → 監控/強平都看不到，必須告警
+                    # 券商已受理但持倉狀態機沒有這筆 → 監控/強平都看不到，必須告警
                     log.error("DT auto-buy: %s 不在今日持倉庫，狀態未更新（券商已成交）", code)
                     if TELEGRAM_CHAT_ID:
                         try:
@@ -850,7 +853,7 @@ def _auto_buy_dt_positions(
                             send_text(
                                 TELEGRAM_CHAT_ID,
                                 f"⚠️ <b>持倉狀態未更新</b>\n"
-                                f"{code} 券商已成交，但不在今日持倉庫中，"
+                                f"{code} 券商已受理委託，但不在今日持倉庫中，"
                                 f"系統將無法監控/強平此部位，請人工確認！",
                             )
                         except Exception:
@@ -1666,8 +1669,72 @@ def _maybe_halt_reminder(now: datetime, state: dict) -> None:
         log.warning("HALT 定期提醒發送失敗: %s", e)
 
 
+def _maybe_sync_orders(api, state: dict, now: datetime,
+                       interval_sec: int = 60) -> None:
+    """週期性向券商同步委託狀態（真實模式）。
+
+    狀態機只有在券商回報成交時才前進。沒有這個同步，買單送出後會永遠卡在
+    buy_submitted：不會被監控、不會被 13:00 強平，隔天變成交割義務。
+
+    紙上模式沒有券商委託可查，直接跳過。
+    """
+    if PAPER_TRADING or api is None:
+        return
+    last = state.get("last_order_sync")
+    if last is not None and (now - last).total_seconds() < interval_sec:
+        return
+    state["last_order_sync"] = now
+    try:
+        import dt_position_store as _store
+        _store.sync_order_status(api)
+    except Exception as e:
+        log.warning("委託狀態同步失敗（不影響主流程）: %s", e)
+
+
+def _warn_uncertain_positions(chat_id: Optional[str] = None) -> list:
+    """強平前點名「買單已送出、成交未確認」的部位。
+
+    這些部位可能已經成交但系統不知道——強平只處理 active，不會碰它們，
+    隔天就是交割義務。這是整條鏈裡最容易無聲出事的地方，必須讓人看見。
+    """
+    try:
+        import dt_position_store as _store
+        pending = _store.uncertain_positions()
+    except Exception as e:
+        log.warning("查詢未確認部位失敗: %s", e)
+        return []
+    if not pending:
+        return []
+
+    codes = "、".join(p.code for p in pending)
+    log.error("強平前仍有 %d 檔委託未確認成交：%s", len(pending), codes)
+    if chat_id:
+        try:
+            from telegram_bot import send_text
+            send_text(
+                chat_id,
+                f"🚨 <b>{len(pending)} 檔委託成交未確認</b>\n"
+                f"{codes}\n"
+                f"系統無法判斷是否持有，強制平倉不會處理這些部位。\n"
+                f"<b>請立即到券商端人工確認並處理</b>，否則可能留倉過夜。",
+            )
+        except Exception as e:
+            log.warning("未確認部位告警發送失敗: %s", e)
+    return pending
+
+
 def _run_force_close_job(api, db_path: str = DB_PATH, chat_id: Optional[str] = None) -> None:
     """收盤強制平倉（預設 13:15），包 try/except。強平失敗是資金安全事件 → 另發 Telegram 告警。"""
+    # 先同步一次委託狀態：可能有買單剛成交、或賣單被退回。
+    try:
+        if not PAPER_TRADING and api is not None:
+            import dt_position_store as _store
+            _store.sync_order_status(api)
+    except Exception as e:
+        log.warning("強平前委託同步失敗: %s", e)
+
+    _warn_uncertain_positions(chat_id)
+
     try:
         ForceCloseJob(api=api, db_path=db_path).run()
     except Exception as e:
@@ -1783,6 +1850,10 @@ def main() -> None:
             _maybe_halt_reminder(now, _dt_poll_state)
         except Exception as e:
             log.debug("HALT 提醒失敗（忽略）: %s", e)
+
+        # 每分鐘向券商同步委託狀態（真實模式）。沒有它，買單會永遠卡在
+        # buy_submitted：不被監控、不被強平，隔天變成交割義務。
+        _maybe_sync_orders(api, _dt_poll_state, now)
 
         # ── 13:15 停止 tick 訂閱 ────────────────────────────────────────
         if t >= _DT_MON_END and _dt_agent is not None:

@@ -379,6 +379,34 @@ def mark_entered(code, entry_price, quantity, lot_type="common", path=None) -> b
     )
 
 
+def record_buy_result(code: str, result, paper_trading: bool,
+                      trade_date=None, db_path=None, path=None) -> bool:
+    """把買單結果寫進狀態機。回傳是否有更新到該持倉。
+
+    兩個模式處理不同：
+
+      紙上模式：沒有券商，委託即成交 → 直接 active（維持既有行為，
+                切到真錢之前完全不變）。
+      真實模式：委託 ≠ 成交 → buy_submitted，記下 order_id，等
+                dt_position_store.sync_order_status() 向券商確認後才 active。
+
+    為什麼真實模式不能直接 active：提前標成持有，會讓盤中監控對一個不存在
+    的部位算損益、發停損警報；更嚴重的是 13:00 強平會對沒成交的部位下賣單，
+    變成放空。成交價也一樣——用委託價當成交價，損益從第一天就是錯的。
+    """
+    import dt_position_store as _store
+
+    if paper_trading:
+        return _store.mark_entered(
+            code, result.price, result.quantity, result.lot_type,
+            trade_date=trade_date, db_path=db_path, json_path=path,
+        )
+    return _store.mark_buy_submitted(
+        code, order_id=result.order_id,
+        trade_date=trade_date, db_path=db_path, json_path=path,
+    )
+
+
 def mark_skipped(code, path=None) -> bool:
     path = path or _DEFAULT_PATH
 
