@@ -105,7 +105,12 @@ CREATE TABLE IF NOT EXISTS daily_trades (
     sector      TEXT DEFAULT '未知',
     note        TEXT,
     executed_at TEXT,
-    exit_reason TEXT
+    exit_reason TEXT,
+    -- 'daytrade' | 'swing' | NULL(未知)。
+    -- 刻意不給預設值：NULL 代表「不知道」，而強平只放過**明確標記為
+    -- swing** 的部位。若預設成 swing，任何漏標的當沖就不會被平倉，
+    -- 隔天變成交割義務——那比誤平一檔波段嚴重得多。
+    strategy_type TEXT
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -199,6 +204,21 @@ def _upgrade_daily_trades(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE daily_trades ADD COLUMN executed_at TEXT")
     if "exit_reason" not in existing:
         con.execute("ALTER TABLE daily_trades ADD COLUMN exit_reason TEXT")
+    if "strategy_type" not in existing:
+        con.execute("ALTER TABLE daily_trades ADD COLUMN strategy_type TEXT")
+
+    # 既有列回填：當沖過去是靠自由文字標記（note / sector）辨識的，
+    # 用同一組標記回填才不會把歷史上的當沖誤認成波段。這不是臆測——
+    # 這些標記本來就是當時寫入端刻意放的。
+    con.execute("""
+        UPDATE daily_trades
+        SET strategy_type = 'daytrade'
+        WHERE strategy_type IS NULL
+          AND (note IN ('daytrade_buy', 'auto_exit', 'force_close_simulation',
+                        'force_close_requested')
+               OR sector = '當沖')
+    """)
+    # 其餘維持 NULL——不臆測。歷史上沒有標記的列，我們確實不知道它是什麼。
 
 
 def init_db(path: str) -> None:
@@ -405,6 +425,7 @@ def save_daily_trade(trade: dict, path: str) -> None:
 
     Required keys: trade_date, code, action.
     Optional keys: name, quantity, price, amount, pnl (nullable),
+                   strategy_type ('daytrade' | 'swing'，預設 'swing'),
                    lot_type (default 'common'), sector (default '未知'), note,
                    executed_at (default: datetime.now() ISO 8601 to seconds),
                    exit_reason (nullable: e.g. 'stop_loss' / 'trailing_stop').
@@ -425,8 +446,8 @@ def save_daily_trade(trade: dict, path: str) -> None:
         con.execute(
             "INSERT INTO daily_trades "
             "(trade_date, code, name, action, quantity, price, amount, pnl, "
-            " lot_type, sector, note, executed_at, exit_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " lot_type, sector, note, executed_at, exit_reason, strategy_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 td_str,
                 trade.get("code"),
@@ -441,6 +462,8 @@ def save_daily_trade(trade: dict, path: str) -> None:
                 trade.get("note"),
                 executed_at,
                 trade.get("exit_reason"),
+                # 未指定就是 NULL（未知），不臆測。見 DDL 的說明。
+                trade.get("strategy_type"),
             ),
         )
 
@@ -449,12 +472,14 @@ def load_daily_trades(trade_date: date, path: str) -> list[dict]:
     """Return all trades for the given date.
 
     Each dict contains: code, name, action, quantity, price, amount, pnl,
-                        lot_type, sector, note, executed_at, exit_reason.
+                        lot_type, sector, note, executed_at, exit_reason,
+                        strategy_type.
     """
     with _conn(path) as con:
         rows = con.execute(
             "SELECT code, name, action, quantity, price, amount, pnl, "
-            "       lot_type, sector, note, executed_at, exit_reason "
+            "       lot_type, sector, note, executed_at, exit_reason, "
+            "       strategy_type "
             "FROM daily_trades WHERE trade_date=? ORDER BY id",
             (trade_date.isoformat(),),
         ).fetchall()
@@ -464,6 +489,10 @@ def load_daily_trades(trade_date: date, path: str) -> list[dict]:
             "quantity":    r[3], "price":    r[4], "amount":      r[5],
             "pnl":         r[6], "lot_type": r[7], "sector":      r[8],
             "note":        r[9], "executed_at": r[10], "exit_reason": r[11],
+            # NULL 保持 NULL——它代表「未知」，不是「波段」。硬轉成 'swing'
+            # 會把資訊抹掉，讓 dt_risk 的回溯判斷（靠 note 辨識舊當沖紀錄）
+            # 失效。呼叫端各自決定缺值時怎麼處理。
+            "strategy_type": r[12],
         }
         for r in rows
     ]

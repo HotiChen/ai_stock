@@ -165,7 +165,9 @@ def load_prior_orders(api) -> list[dict]:
         return []
 
 
-def load_current_positions(trade_date: date, db_path: str) -> list[dict]:
+def load_current_positions(trade_date: date, db_path: str,
+                           strategy_type: Optional[str] = None,
+                           exclude_strategy_types: Optional[tuple] = None) -> list[dict]:
     """Return today's executed buy trades as a risk_guard-compatible position list.
 
     Each returned dict has the shape expected by risk_guard.validate_plan():
@@ -176,12 +178,29 @@ def load_current_positions(trade_date: date, db_path: str) -> list[dict]:
         value    ← daily_trades.amount  (cost basis = quantity × price)
         lot_type ← daily_trades.lot_type (written at trade time from ExecutionResult)
 
+    strategy_type:          只取這個策略（精確比對）。
+    exclude_strategy_types: 排除這些策略；NULL（未知）**不會**被排除。
+
+    為什麼需要篩選：daily_trades 同時裝當沖與波段。不篩的話 ForceCloseJob
+    會把 9:00 買的波段股在強平時間一起賣掉——波段策略等於不存在。
+
+    ForceCloseJob 用 exclude 而非 strategy_type，是因為安全方向不對稱：
+    漏平一檔當沖 → 隔天交割義務、可能違約；誤平一檔波段 → 少賺。
+    所以只放過**明確標記為 swing** 的，未知一律照平。
+
     Limitation: this reflects *today's executed buys* only.  It does NOT include
     positions carried over from previous sessions.  For a production multi-day
     position tracker, replace with a dedicated `positions` table (A1 task).
     """
     try:
         trades = load_daily_trades(trade_date, db_path)
+        # 買賣都要一起篩，否則跨策略的賣出會把另一個策略的買進抵銷掉
+        if strategy_type is not None:
+            trades = [t for t in trades
+                      if t.get("strategy_type") == strategy_type]
+        if exclude_strategy_types:
+            trades = [t for t in trades
+                      if t.get("strategy_type") not in exclude_strategy_types]
 
         # ── Net-quantity approach ─────────────────────────────────────────────
         # Only CONFIRMED fills (action="sell") reduce the open position.
@@ -408,6 +427,7 @@ class MarketOpenJob:
                         "lot_type":   result.lot_type,            # proper column (not note)
                         "sector":     pick.get("sector", "未知"),  # proper column (not note)
                         "note":       f"id={result.order_id}",    # note: only order_id now
+                        "strategy_type": "swing",                 # 波段：不受強平影響
                     }, self._db_path)
                 except Exception as db_err:
                     log.error("save_daily_trade failed for %s: %s", code, db_err)
@@ -552,8 +572,34 @@ class ForceCloseJob:
         self._api     = api
         self._db_path = db_path
 
+    STRATEGY_TYPE = "daytrade"
+
+    @staticmethod
+    def _protected_strategies() -> tuple:
+        """強平放過哪些策略。
+
+        預設空 tuple ＝ 維持既有行為：把所有部位平掉，不留倉。
+        設定 PROTECT_SWING_FROM_FORCE_CLOSE=true 才會放過 strategy_type=='swing'。
+
+        這是**資金面的決定不是技術設定**：波段留倉過夜需要 T+2 全額交割金。
+        原本系統每天把所有部位平掉（含波段），改變它必須是明確的選擇。
+
+        未標記策略（NULL）永遠照平——漏平一檔當沖會變成隔日交割義務、
+        可能違約，代價遠高於誤平一檔波段。
+        """
+        try:
+            import config as _c
+            if getattr(_c, "PROTECT_SWING_FROM_FORCE_CLOSE", False):
+                return ("swing",)
+        except Exception:
+            pass
+        return ()
+
     def run(self) -> list[dict]:
-        positions = load_current_positions(date.today(), self._db_path)
+        positions = load_current_positions(
+            date.today(), self._db_path,
+            exclude_strategy_types=self._protected_strategies(),
+        )
 
         # Idempotency guard — real mode only.
         # load_current_positions() does NOT subtract force_close_requested from
@@ -632,6 +678,7 @@ class ForceCloseJob:
                             "lot_type":   lot_type,
                             "sector":     pos.get("sector", "未知"),
                             "note":       "force_close_simulation",
+                            "strategy_type": self.STRATEGY_TYPE,
                         }, self._db_path)
                     except Exception as db_err:
                         log.error("ForceClose: save simulation sell record failed %s: %s", code, db_err)
@@ -657,6 +704,7 @@ class ForceCloseJob:
                             "lot_type":   lot_type,
                             "sector":     pos.get("sector", "未知"),
                             "note":       "force_close_requested",
+                            "strategy_type": self.STRATEGY_TYPE,
                         }, self._db_path)
                     except Exception as db_err:
                         log.error("ForceClose: save pending record failed %s: %s", code, db_err)
@@ -692,6 +740,7 @@ def _save_dt_buy_trade(result, db_path: str = DB_PATH, chat_id: Optional[str] = 
             "lot_type":   result.lot_type,
             "sector":     "當沖",
             "note":       "daytrade_buy",
+            "strategy_type": "daytrade",
         }, db_path)
     except Exception as db_err:
         log.error("DT buy save_daily_trade failed for %s: %s", getattr(result, "code", "?"), db_err)

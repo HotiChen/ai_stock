@@ -66,8 +66,15 @@ def get_today_dt_realized_pnl(db_path: str) -> float:
     只計入：
       - action == "sell"
       - pnl 非 None（未確認成交的賣單不計）
-      - note == "auto_exit"（DT tick 監控自動出場）
-        或 note == "force_close_simulation" 且 sector == "當沖"（DT 強平模擬）
+      - strategy_type == "daytrade"
+
+    回溯相容：strategy_type 是後來才加的欄位，舊資料沒有。缺值時退回原本的
+    自由文字判斷（note == "auto_exit"，或 note == "force_close_simulation"
+    且 sector == "當沖"）。
+
+    改用正式欄位的理由：原本的判斷完全依賴 note 字串，任何人改了那些字串
+    ——或新增一條沒帶對 note 的出場路徑——統計就會靜默失準，而且不會有
+    任何錯誤訊息。
     """
     from research_db import load_daily_trades
 
@@ -79,6 +86,14 @@ def get_today_dt_realized_pnl(db_path: str) -> float:
         pnl = t.get("pnl")
         if pnl is None:
             continue
+        st = t.get("strategy_type")
+        if st == "daytrade":
+            total += float(pnl)
+            continue
+        if st == "swing":
+            continue          # 明確標記為波段：不計入當沖熔斷
+
+        # strategy_type 缺值（舊資料）→ 退回自由文字判斷
         note = t.get("note")
         if note == _DT_AUTO_EXIT_NOTE:
             total += pnl

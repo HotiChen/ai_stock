@@ -79,3 +79,15 @@ DT_TRAILING_STOP_PCT: float  = float(_get("DT_TRAILING_STOP_PCT", "0.5"))
 #: 保留這個名稱是為了不動 daytrading_config 的欄位對應表。
 DT_FORCE_CLOSE_TIME: str   = FORCE_CLOSE_TIME
 DT_MANUAL_CONFIRM: bool    = _get("DT_MANUAL_CONFIRM", "true").lower() == "true"
+
+# 強平是否放過波段部位（strategy_type == 'swing'）。
+#
+# 預設 false ＝ 維持既有行為：收盤前把所有部位平掉，不留倉。
+# 設為 true ＝ 波段部位留倉過夜——這需要 **T+2 全額交割金**，是資金面的決定，
+# 不是技術設定。確定帳戶有足夠交割款再開。
+#
+# 未標記策略（strategy_type IS NULL）永遠照平：漏平一檔當沖會變成隔日交割
+# 義務、可能違約，代價遠高於誤平一檔波段。
+PROTECT_SWING_FROM_FORCE_CLOSE: bool = (
+    _get("PROTECT_SWING_FROM_FORCE_CLOSE", "false").lower() == "true"
+)
