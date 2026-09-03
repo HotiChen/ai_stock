@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# ./doctor — 系統自檢包裝腳本
+#
+# 用法：
+#   ./doctor                完整檢查（含真實行情驗證）
+#   ./doctor --no-market    略過行情驗證，不消耗 Shioaji 歷史額度
+#   ./doctor --telegram     同時推播結果（08:20 晨間就緒檢查用）
+#   ./doctor --quiet        只顯示失敗與警告
+#
+# 全部通過回 0，任一項 fail 回 1（warn 不算失敗）。
+set -uo pipefail
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 優先用專案 venv，沒有才退回系統 python3——兩個環境的套件不同，
+# 用錯的那個會得到「模組不存在」這種與實際狀況無關的假警報。
+if [ -x "./venv/bin/python3" ]; then
+  PY="./venv/bin/python3"
+else
+  PY="python3"
+fi
+
+exec "$PY" doctor.py "$@"

@@ -129,7 +129,14 @@ def ensure_connected(
     """Login to Shioaji. Returns api on success, None on failure."""
     try:
         api = sj.Shioaji(simulation=simulation)
-        api.login(api_key=api_key, secret_key=secret_key, fetch_contract=True)
+        # shioaji >= 1.7 的 login 已移除 fetch_contract（contracts 自動抓取）。
+        # 舊版需要它，新版傳了會拋 TypeError——而那個錯誤訊息跟「憑證錯誤」
+        # 長得完全不一樣，升級當天很容易誤判成帳號問題。兩個版本都支援。
+        try:
+            api.login(api_key=api_key, secret_key=secret_key, fetch_contract=True)
+        except TypeError:
+            log.debug("login 不接受 fetch_contract（新版 SDK），改用預設行為")
+            api.login(api_key=api_key, secret_key=secret_key)
         log.info("Shioaji connected (simulation=%s)", simulation)
         try:
             import connection_watchdog
