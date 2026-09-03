@@ -85,6 +85,64 @@ def check_workdir() -> CheckResult:
     return CheckResult("工作目錄", OK, str(here))
 
 
+#: start_all.sh / launchd 都是用裸 `python3` 啟動 main.py 的，
+#: 而 ./doctor 有 venv 時會優先用 venv——兩者可能是不同的直譯器。
+_TRADING_LAUNCHER = "python3"
+
+
+def _shioaji_version_of(executable: str, timeout: float = 20.0):
+    """回傳該直譯器裡的 shioaji 版本；沒裝回 None，問不到回 ""。"""
+    import subprocess
+    code = ("import shioaji,sys;"
+            "sys.stdout.write(getattr(shioaji,'__version__','?'))")
+    try:
+        p = subprocess.run([executable, "-c", code], capture_output=True,
+                           text=True, timeout=timeout)
+    except Exception:
+        return ""
+    if p.returncode != 0:
+        return None
+    return (p.stdout or "").strip() or "?"
+
+
+def check_interpreter() -> CheckResult:
+    """自檢用的 Python 必須和真正交易的那個是同一個。
+
+    ./doctor 有 venv 就用 venv，start_all.sh 卻一律用裸 `python3`。
+    兩邊套件版本不同時，doctor 全綠但 main.py 用著舊版 shioaji 被券商
+    503 拒絕——健檢說的話就完全不算數了。這比任何一項單獨的檢查都優先。
+    """
+    import shutil
+    import sys
+
+    mine = os.path.realpath(sys.executable)
+    theirs_path = shutil.which(_TRADING_LAUNCHER)
+    if not theirs_path:
+        return CheckResult("直譯器一致性", WARN, "PATH 上找不到 python3",
+                           "start_all.sh 用裸 python3 啟動 main.py，"
+                           "cron/launchd 的 PATH 可能與互動 shell 不同。")
+    theirs = os.path.realpath(theirs_path)
+
+    my_ver = _shioaji_version_of(sys.executable)
+    if theirs == mine:
+        return CheckResult("直譯器一致性", OK,
+                           f"{sys.executable}（shioaji {my_ver or '未安裝'}）")
+
+    their_ver = _shioaji_version_of(theirs_path)
+    if my_ver == their_ver:
+        return CheckResult("直譯器一致性", OK,
+                           f"兩個直譯器的 shioaji 同為 {my_ver or '未安裝'}",
+                           f"自檢：{sys.executable}｜交易：{theirs_path}")
+    return CheckResult(
+        "直譯器一致性", FAIL,
+        "自檢與交易用的 Python 不是同一個，套件版本也不同",
+        f"自檢 {sys.executable} → shioaji {my_ver or '未安裝'}；"
+        f"交易 {theirs_path} → shioaji {their_ver or '未安裝'}。"
+        "本次自檢結果不能代表 main.py 的實際狀況——"
+        "請對交易用的那個直譯器升級（或讓 start_all.sh 改用 venv）。",
+    )
+
+
 def check_halt() -> CheckResult:
     """HALT 旗標。存在時必須大聲——這是 12 天靜默停擺的元凶。"""
     try:
@@ -379,6 +437,7 @@ def check_telegram(send=None) -> CheckResult:
 
 _CHECKS = (
     ("check_workdir", ()),
+    ("check_interpreter", ()),
     ("check_env", ()),
     ("check_halt", ()),
     ("check_shioaji", ("api",)),

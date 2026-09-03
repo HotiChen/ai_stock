@@ -301,3 +301,66 @@ class TestSdkVersionDetectionOnRealPath:
         assert r.status == doctor.FAIL
         assert "版本" in r.message
         assert "pip install -U shioaji" in r.detail
+
+
+class TestCheckInterpreter:
+    """自檢用的 Python 必須和真正交易的那個是同一個。
+
+    ./doctor 有 venv 就用 venv，start_all.sh 卻一律用裸 `python3`。
+    兩邊 shioaji 版本不同時，doctor 全綠但 main.py 被券商 503 拒絕——
+    這正是 2026-09-04 的處境：系統 python3 是 1.3.3，venv 裡未必。
+    """
+
+    def test_ok_when_same_interpreter(self):
+        import sys
+        with patch("shutil.which", return_value=sys.executable), \
+             patch.object(doctor, "_shioaji_version_of", return_value="1.7.4"):
+            r = doctor.check_interpreter()
+        assert r.status == doctor.OK
+
+    def test_fails_when_versions_differ(self):
+        versions = {"/usr/local/bin/python3": "1.3.3",
+                    "/repo/venv/bin/python3": "1.7.4"}
+
+        with patch("sys.executable", "/repo/venv/bin/python3"), \
+             patch("shutil.which", return_value="/usr/local/bin/python3"), \
+             patch("os.path.realpath", side_effect=lambda p: p), \
+             patch.object(doctor, "_shioaji_version_of",
+                          side_effect=lambda exe, timeout=20.0: versions[exe]):
+            r = doctor.check_interpreter()
+        assert r.status == doctor.FAIL
+        assert "1.3.3" in r.detail and "1.7.4" in r.detail
+
+    def test_fails_when_trading_python_lacks_shioaji(self):
+        def fake(exe, timeout=20.0):
+            return None if exe.startswith("/usr") else "1.7.4"
+
+        with patch("sys.executable", "/repo/venv/bin/python3"), \
+             patch("shutil.which", return_value="/usr/local/bin/python3"), \
+             patch("os.path.realpath", side_effect=lambda p: p), \
+             patch.object(doctor, "_shioaji_version_of", side_effect=fake):
+            r = doctor.check_interpreter()
+        assert r.status == doctor.FAIL
+        assert "未安裝" in r.detail
+
+    def test_ok_when_different_path_but_same_version(self):
+        """兩個路徑指到不同檔案、套件卻一致——不是問題，別亂叫。"""
+        with patch("sys.executable", "/repo/venv/bin/python3"), \
+             patch("shutil.which", return_value="/usr/local/bin/python3"), \
+             patch("os.path.realpath", side_effect=lambda p: p), \
+             patch.object(doctor, "_shioaji_version_of", return_value="1.7.4"):
+            r = doctor.check_interpreter()
+        assert r.status == doctor.OK
+
+    def test_warns_when_python3_not_on_path(self):
+        with patch("shutil.which", return_value=None):
+            r = doctor.check_interpreter()
+        assert r.status == doctor.WARN
+
+    def test_registered_in_check_list(self):
+        assert "check_interpreter" in [name for name, _ in doctor._CHECKS]
+
+    def test_never_raises_even_if_subprocess_explodes(self):
+        with patch("subprocess.run", side_effect=OSError("boom")):
+            r = doctor.check_interpreter()
+        assert r.status in (doctor.OK, doctor.WARN, doctor.FAIL)
