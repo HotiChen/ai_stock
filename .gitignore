@@ -38,3 +38,9 @@ check_updates.py
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# 本機執行產物（nohup 重導、Vite 快取、下載的安裝檔）
+# 這些每天都會冒出來，混在 git status 裡會讓真正該注意的變更被淹掉
+logs_*.out
+frontend/.vite/
+*.dmg
