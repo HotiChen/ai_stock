@@ -364,3 +364,58 @@ class TestCheckInterpreter:
         with patch("subprocess.run", side_effect=OSError("boom")):
             r = doctor.check_interpreter()
         assert r.status in (doctor.OK, doctor.WARN, doctor.FAIL)
+
+
+class TestCheckOpenPositions:
+    """現股當沖跨日就是交割義務——沒平掉的部位必須在隔天早上被吼出來。
+
+    2026-09-04：電腦被帶出門，收盤結算沒跑。強平只處理 active，
+    buy_submitted（送出後沒收到成交回報）本來就不在它的範圍內。
+    """
+
+    def _db(self, tmp_path, rows):
+        import sqlite3
+        p = tmp_path / "pos.db"
+        conn = sqlite3.connect(p)
+        conn.execute("CREATE TABLE dt_positions (trade_date TEXT, code TEXT,"
+                     " name TEXT, status TEXT, quantity INTEGER)")
+        conn.executemany("INSERT INTO dt_positions VALUES (?,?,?,?,?)", rows)
+        conn.commit()
+        conn.close()
+        return str(p)
+
+    def test_ok_when_nothing_left_open(self, tmp_path):
+        db = self._db(tmp_path, [("2026-09-03", "2330", "台積電", "closed", 1000)])
+        assert doctor.check_open_positions(db).status == doctor.OK
+
+    def test_fails_on_yesterday_active_position(self, tmp_path):
+        db = self._db(tmp_path, [("2026-09-03", "2330", "台積電", "active", 1000)])
+        r = doctor.check_open_positions(db)
+        assert r.status == doctor.FAIL
+        assert "2330" in r.detail
+
+    def test_fails_on_buy_submitted_which_force_close_never_touches(self, tmp_path):
+        """★ 強平只掃 active；buy_submitted 會靜靜地變成交割義務。"""
+        db = self._db(tmp_path, [("2026-09-03", "2454", "聯發科", "buy_submitted", 0)])
+        r = doctor.check_open_positions(db)
+        assert r.status == doctor.FAIL
+
+    def test_today_positions_are_not_flagged(self, tmp_path):
+        """盤中本來就會有 active，那不是問題。"""
+        import datetime
+        today = datetime.date.today().isoformat()
+        db = self._db(tmp_path, [(today, "2330", "台積電", "active", 1000)])
+        assert doctor.check_open_positions(db).status == doctor.OK
+
+    def test_ok_when_db_missing(self, tmp_path):
+        assert doctor.check_open_positions(
+            str(tmp_path / "nope.db")).status == doctor.OK
+
+    def test_never_raises_on_broken_db(self, tmp_path):
+        p = tmp_path / "junk.db"
+        p.write_text("not a database")
+        assert doctor.check_open_positions(str(p)).status in (
+            doctor.OK, doctor.WARN, doctor.FAIL)
+
+    def test_registered_in_check_list(self):
+        assert "check_open_positions" in [n for n, _ in doctor._CHECKS]

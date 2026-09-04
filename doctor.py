@@ -386,6 +386,59 @@ def check_db_schema(review_db: str | None = None) -> CheckResult:
     return CheckResult("資料庫 schema", OK, "欄位齊全")
 
 
+def check_open_positions(db_path: str | None = None) -> CheckResult:
+    """今天以前的當沖部位不該還開著。
+
+    現股當沖只在當天成立；隔夜就變成 T+2 交割義務，戶頭沒錢就是違約交割。
+    強平會漏掉的情況都是真的發生過的：電腦被帶出門、券商連線 503、
+    買單送出後成交回報沒收到（buy_submitted 不在強平範圍內）。
+    這一項要在**隔天早上還來得及處理時**把它們吼出來。
+    """
+    try:
+        import dt_position_store as store
+    except Exception as e:
+        return CheckResult("隔夜當沖部位", WARN, "無法讀取持倉庫", str(e))
+
+    import datetime as _dt
+    import sqlite3
+
+    path = db_path or store._DB_PATH
+    if not os.path.exists(path):
+        return CheckResult("隔夜當沖部位", OK, "尚無持倉資料庫")
+
+    today = _dt.date.today().isoformat()
+    watched = tuple(store.HELD_STATUSES) + tuple(store.UNCERTAIN_STATUSES)
+    marks = ",".join("?" * len(watched))
+    try:
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"SELECT trade_date, code, name, status, quantity FROM dt_positions"
+                f" WHERE trade_date < ? AND status IN ({marks})"
+                f" ORDER BY trade_date, code",
+                (today, *watched),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as e:
+        return CheckResult("隔夜當沖部位", WARN, "查詢失敗", str(e))
+
+    if not rows:
+        return CheckResult("隔夜當沖部位", OK, "無隔夜未平倉")
+
+    items = "；".join(
+        f"{r['trade_date']} {r['code']} {r['name'] or ''}"
+        f"（{r['status']}{'／' + str(r['quantity']) + ' 股' if r['quantity'] else ''}）"
+        for r in rows
+    )
+    return CheckResult(
+        "隔夜當沖部位", FAIL, f"{len(rows)} 筆當沖部位跨日未平倉",
+        items + "。現股當沖跨日即成交割義務——請立刻向券商核對實際庫存，"
+                "確認是已成交未回報、還是根本沒買到。",
+    )
+
+
 def check_processes() -> CheckResult:
     """main.py 是否真的在執行。
 
@@ -444,6 +497,7 @@ _CHECKS = (
     ("check_market_data", ("api",)),
     ("check_quota", ("api",)),
     ("check_db_schema", ()),
+    ("check_open_positions", ()),
     ("check_processes", ()),
     ("check_ai_keys", ()),
 )

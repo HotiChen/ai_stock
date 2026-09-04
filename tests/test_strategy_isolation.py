@@ -24,7 +24,10 @@ import pytest
 
 from research_db import init_db, load_daily_trades, save_daily_trade
 
-TODAY = date(2026, 9, 3)
+# ForceCloseJob.run() 自己呼叫 date.today()，不吃參數。這裡若寫死日期，
+# 測試只在那一天會過——2026-09-04 起 TestForceCloseScope 就全紅了，
+# 而且紅的原因與被測行為無關。跟著今天走，才測得到真正的篩選邏輯。
+TODAY = date.today()
 
 
 @pytest.fixture
