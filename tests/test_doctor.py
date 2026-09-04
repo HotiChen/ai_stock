@@ -304,58 +304,53 @@ class TestSdkVersionDetectionOnRealPath:
 
 
 class TestCheckInterpreter:
-    """自檢用的 Python 必須和真正交易的那個是同一個。
+    """所有可能跑這個專案的 Python，shioaji 版本必須一致。
 
     ./doctor 有 venv 就用 venv，start_all.sh 卻一律用裸 `python3`。
-    兩邊 shioaji 版本不同時，doctor 全綠但 main.py 被券商 503 拒絕——
-    這正是 2026-09-04 的處境：系統 python3 是 1.3.3，venv 裡未必。
+    兩邊版本不同時，doctor 全綠但 main.py 被券商 503 拒絕。
     """
 
-    def test_ok_when_same_interpreter(self):
-        import sys
-        with patch("shutil.which", return_value=sys.executable), \
+    def test_ok_when_single_interpreter(self):
+        with patch.object(doctor, "_candidate_interpreters",
+                          return_value=["/usr/local/bin/python3"]), \
              patch.object(doctor, "_shioaji_version_of", return_value="1.7.4"):
             r = doctor.check_interpreter()
         assert r.status == doctor.OK
+        assert "1.7.4" in r.message
 
     def test_fails_when_versions_differ(self):
-        versions = {"/usr/local/bin/python3": "1.3.3",
-                    "/repo/venv/bin/python3": "1.7.4"}
-
-        with patch("sys.executable", "/repo/venv/bin/python3"), \
-             patch("shutil.which", return_value="/usr/local/bin/python3"), \
-             patch("os.path.realpath", side_effect=lambda p: p), \
+        vers = {"/repo/venv/bin/python3": "1.5.1",
+                "/usr/local/bin/python3": "1.3.3"}
+        with patch.object(doctor, "_candidate_interpreters",
+                          return_value=list(vers)), \
              patch.object(doctor, "_shioaji_version_of",
-                          side_effect=lambda exe, timeout=20.0: versions[exe]):
+                          side_effect=lambda p, timeout=20.0: vers[p]):
             r = doctor.check_interpreter()
         assert r.status == doctor.FAIL
-        assert "1.3.3" in r.detail and "1.7.4" in r.detail
+        assert "1.5.1" in r.detail and "1.3.3" in r.detail
 
-    def test_fails_when_trading_python_lacks_shioaji(self):
-        def fake(exe, timeout=20.0):
-            return None if exe.startswith("/usr") else "1.7.4"
-
-        with patch("sys.executable", "/repo/venv/bin/python3"), \
-             patch("shutil.which", return_value="/usr/local/bin/python3"), \
-             patch("os.path.realpath", side_effect=lambda p: p), \
-             patch.object(doctor, "_shioaji_version_of", side_effect=fake):
+    def test_fails_when_one_lacks_shioaji(self):
+        vers = {"/repo/venv/bin/python3": "1.7.4",
+                "/usr/local/bin/python3": None}
+        with patch.object(doctor, "_candidate_interpreters",
+                          return_value=list(vers)), \
+             patch.object(doctor, "_shioaji_version_of",
+                          side_effect=lambda p, timeout=20.0: vers[p]):
             r = doctor.check_interpreter()
         assert r.status == doctor.FAIL
         assert "未安裝" in r.detail
 
-    def test_ok_when_different_path_but_same_version(self):
-        """兩個路徑指到不同檔案、套件卻一致——不是問題，別亂叫。"""
-        with patch("sys.executable", "/repo/venv/bin/python3"), \
-             patch("shutil.which", return_value="/usr/local/bin/python3"), \
-             patch("os.path.realpath", side_effect=lambda p: p), \
+    def test_ok_when_two_interpreters_agree(self):
+        with patch.object(doctor, "_candidate_interpreters",
+                          return_value=["/repo/venv/bin/python3",
+                                        "/usr/local/bin/python3"]), \
              patch.object(doctor, "_shioaji_version_of", return_value="1.7.4"):
             r = doctor.check_interpreter()
         assert r.status == doctor.OK
 
-    def test_warns_when_python3_not_on_path(self):
-        with patch("shutil.which", return_value=None):
-            r = doctor.check_interpreter()
-        assert r.status == doctor.WARN
+    def test_warns_when_no_interpreter_found(self):
+        with patch.object(doctor, "_candidate_interpreters", return_value=[]):
+            assert doctor.check_interpreter().status == doctor.WARN
 
     def test_registered_in_check_list(self):
         assert "check_interpreter" in [name for name, _ in doctor._CHECKS]
@@ -364,6 +359,56 @@ class TestCheckInterpreter:
         with patch("subprocess.run", side_effect=OSError("boom")):
             r = doctor.check_interpreter()
         assert r.status in (doctor.OK, doctor.WARN, doctor.FAIL)
+
+
+class TestCandidateInterpreters:
+    """★ 2026-09-05 正式機假綠燈的根因。
+
+    venv 的 bin/python3 是指向系統直譯器的 symlink，realpath 之後兩者
+    永遠相等——用 realpath 去重，這個檢查對 venv 就完全失效。而
+    site-packages 是跟著 sys.prefix 走的，不是跟著 realpath 走的：
+    venv 裝 1.5.1、系統裝 1.3.3，realpath 卻說「同一個」。
+    """
+
+    def test_venv_symlink_does_not_collapse_into_system_python(self, tmp_path):
+        import os as _os
+        import sys as _sys
+
+        real = tmp_path / "python3.14"
+        real.write_text("")
+        sysbin = tmp_path / "bin"
+        sysbin.mkdir()
+        _os.symlink(real, sysbin / "python3")
+
+        proj = tmp_path / "proj"
+        (proj / "venv" / "bin").mkdir(parents=True)
+        _os.symlink(real, proj / "venv" / "bin" / "python3")
+
+        with patch("os.getcwd", return_value=str(proj)), \
+             patch("shutil.which", return_value=str(sysbin / "python3")), \
+             patch.object(_sys, "executable",
+                          str(proj / "venv" / "bin" / "python3")):
+            found = doctor._candidate_interpreters()
+
+        assert str(proj / "venv" / "bin" / "python3") in found
+        assert str(sysbin / "python3") in found
+        assert len(found) == 2
+
+    def test_same_path_listed_twice_is_deduped(self, tmp_path):
+        import sys as _sys
+        exe = tmp_path / "python3"
+        exe.write_text("")
+        with patch("os.getcwd", return_value=str(tmp_path)), \
+             patch("shutil.which", return_value=str(exe)), \
+             patch.object(_sys, "executable", str(exe)):
+            assert doctor._candidate_interpreters() == [str(exe)]
+
+    def test_missing_paths_are_skipped(self, tmp_path):
+        import sys as _sys
+        with patch("os.getcwd", return_value=str(tmp_path)), \
+             patch("shutil.which", return_value="/nope/python3"), \
+             patch.object(_sys, "executable", "/also/nope"):
+            assert doctor._candidate_interpreters() == []
 
 
 class TestCheckOpenPositions:

@@ -105,41 +105,61 @@ def _shioaji_version_of(executable: str, timeout: float = 20.0):
     return (p.stdout or "").strip() or "?"
 
 
-def check_interpreter() -> CheckResult:
-    """自檢用的 Python 必須和真正交易的那個是同一個。
+def _candidate_interpreters() -> list:
+    """所有可能被拿來跑這個專案的 Python，依「路徑字串」去重。
 
-    ./doctor 有 venv 就用 venv，start_all.sh 卻一律用裸 `python3`。
-    兩邊套件版本不同時，doctor 全綠但 main.py 用著舊版 shioaji 被券商
-    503 拒絕——健檢說的話就完全不算數了。這比任何一項單獨的檢查都優先。
+    **絕對不能用 realpath 去重**：venv 的 bin/python3 本來就是指向系統
+    直譯器的 symlink，realpath 之後兩者永遠相等，這個檢查就整個失效了。
+    2026-09-05 首次在正式機上就是這樣給出假綠燈的——venv 是 1.5.1、
+    系統是 1.3.3，它卻報「同一個直譯器」。site-packages 才是重點，
+    而 site-packages 是跟著 sys.prefix 走的，不是跟著 realpath 走的。
     """
     import shutil
     import sys
 
-    mine = os.path.realpath(sys.executable)
-    theirs_path = shutil.which(_TRADING_LAUNCHER)
-    if not theirs_path:
-        return CheckResult("直譯器一致性", WARN, "PATH 上找不到 python3",
+    found = []
+    for p in (sys.executable,
+              shutil.which(_TRADING_LAUNCHER),
+              os.path.join(os.getcwd(), "venv", "bin", "python3")):
+        if p and os.path.exists(p) and p not in found:
+            found.append(p)
+    return found
+
+
+def check_interpreter() -> CheckResult:
+    """所有可能跑這個專案的 Python，shioaji 版本必須一致。
+
+    ./doctor 有 venv 就用 venv，start_all.sh 卻一律用裸 `python3`，
+    而 cron/launchd 的 PATH 又和互動 shell 不同。任何兩者的套件版本不同，
+    自檢就只代表它自己那個環境：doctor 全綠、main.py 仍被券商 503 拒絕。
+    """
+    import sys
+
+    cands = _candidate_interpreters()
+    if not cands:
+        return CheckResult("直譯器一致性", WARN, "找不到任何 python3",
                            "start_all.sh 用裸 python3 啟動 main.py，"
                            "cron/launchd 的 PATH 可能與互動 shell 不同。")
-    theirs = os.path.realpath(theirs_path)
 
-    my_ver = _shioaji_version_of(sys.executable)
-    if theirs == mine:
-        return CheckResult("直譯器一致性", OK,
-                           f"{sys.executable}（shioaji {my_ver or '未安裝'}）")
+    vers = {p: _shioaji_version_of(p) for p in cands}
+    distinct = set(vers.values())
 
-    their_ver = _shioaji_version_of(theirs_path)
-    if my_ver == their_ver:
+    if len(distinct) == 1:
+        ver = next(iter(distinct)) or "未安裝"
+        if len(cands) == 1:
+            return CheckResult("直譯器一致性", OK,
+                               f"{cands[0]}（shioaji {ver}）")
         return CheckResult("直譯器一致性", OK,
-                           f"兩個直譯器的 shioaji 同為 {my_ver or '未安裝'}",
-                           f"自檢：{sys.executable}｜交易：{theirs_path}")
+                           f"{len(cands)} 個直譯器的 shioaji 同為 {ver}",
+                           "｜".join(cands))
+
     return CheckResult(
         "直譯器一致性", FAIL,
-        "自檢與交易用的 Python 不是同一個，套件版本也不同",
-        f"自檢 {sys.executable} → shioaji {my_ver or '未安裝'}；"
-        f"交易 {theirs_path} → shioaji {their_ver or '未安裝'}。"
-        "本次自檢結果不能代表 main.py 的實際狀況——"
-        "請對交易用的那個直譯器升級（或讓 start_all.sh 改用 venv）。",
+        f"{len(cands)} 個直譯器的 shioaji 版本不一致",
+        "；".join(f"{p} → {v or '未安裝'}" for p, v in vers.items())
+        + f"。自檢跑在 {sys.executable}，start_all.sh 跑的是裸 python3——"
+          "本次自檢結果不代表 main.py 的實際狀況。"
+          "請把兩邊升到同一版（或讓 start_all.sh 明確改用 venv）。",
     )
 
 
