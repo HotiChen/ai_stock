@@ -427,7 +427,8 @@ class TestNoticeNeedsDateRange:
     def test_notice_url_carries_a_date_range(self):
         notice = next(s for s in tr.SOURCES if s.kind == "attention")
         url = notice.resolve_url(date(2026, 9, 5))
-        assert "startDate=20260806" in url
+        # 回看窗 7 天（原本 30 天會回 142 檔，含權證與 TDR）
+        assert "startDate=20260829" in url
         assert "endDate=20260905" in url
 
     def test_punish_url_needs_no_substitution(self):
@@ -442,3 +443,111 @@ class TestNoticeNeedsDateRange:
         s = tr.Source("x", "u?s={start}&e={end}", "attention",
                       blocking=False, lookback_days=7)
         assert "s=20260829" in s.resolve_url(date(2026, 9, 5))
+
+
+class TestDispositionWindow:
+    """★ 2026-09-05 實機資料：punish 端點回的是**公告**，不是「今天有效的處置」。
+
+    第一列 2455 的處置期間是 115/09/07～115/09/15，而當天是 115/09/05——
+    還沒開始。同理，期間已經結束的公告也會留在清單裡。只取代號不看期間，
+    等於把一檔股票擋到公告從端點消失為止。
+
+    方向仍然保守：**看不懂期間就照擋**（fail-closed）。誤擋少賺，漏擋可能
+    違約交割。但「看得懂而且已經過期」就該放行。
+    """
+
+    def _row(self, code, period):
+        return {
+            "stat": "OK",
+            "fields": ["編號", "公布日期", "證券代號", "證券名稱", "累計",
+                       "處置條件", "處置起迄時間", "處置措施"],
+            "data": [[1, "115/09/04", code, "測試", 1, "x", period, "y"]],
+        }
+
+    def _parse(self, code, period, today):
+        return tr.parse_restricted_payload(
+            self._row(code, period), kind="disposition", today=today)
+
+    def test_active_window_blocks(self):
+        s = self._parse("2455", "115/09/07～115/09/15", date(2026, 9, 10))
+        assert "2455" in s.codes
+
+    def test_future_window_still_blocks(self):
+        """尚未開始的處置照擋：兩天內就會生效，先擋沒有壞處。"""
+        s = self._parse("2455", "115/09/07～115/09/15", date(2026, 9, 5))
+        assert "2455" in s.codes
+
+    def test_expired_window_is_released(self):
+        """★ 處置期滿就該解禁，一直擋著是錯的。"""
+        s = self._parse("2455", "115/08/07～115/08/15", date(2026, 9, 5))
+        assert s.codes == {}
+        assert s.ok is True
+
+    def test_last_day_still_blocks(self):
+        s = self._parse("2455", "115/09/07～115/09/15", date(2026, 9, 15))
+        assert "2455" in s.codes
+
+    def test_day_after_is_released(self):
+        s = self._parse("2455", "115/09/07～115/09/15", date(2026, 9, 16))
+        assert s.codes == {}
+
+    def test_unparseable_period_blocks(self):
+        """看不懂就擋——保守方向。"""
+        s = self._parse("2455", "民國某天到某天", date(2026, 9, 5))
+        assert "2455" in s.codes
+
+    def test_missing_period_column_blocks_everything(self):
+        """沒有期間欄位時退回舊行為（全擋），不能因此放行。"""
+        p = {"stat": "OK", "fields": ["證券代號", "證券名稱"],
+             "data": [["2455", "全新"]]}
+        s = tr.parse_restricted_payload(p, kind="disposition",
+                                        today=date(2026, 9, 5))
+        assert "2455" in s.codes
+
+    def test_reason_carries_the_period(self):
+        s = self._parse("2455", "115/09/07～115/09/15", date(2026, 9, 10))
+        assert "09/15" in s.codes["2455"]
+
+    def test_attention_source_ignores_window(self):
+        """注意股沒有處置期間欄位，不該因此整批作廢。"""
+        p = {"stat": "OK",
+             "fields": ["編號", "證券代號", "證券名稱", "日期"],
+             "data": [[1, "2454", "聯發科", "115.09.04"]]}
+        s = tr.parse_restricted_payload(p, kind="attention", blocking=False,
+                                        today=date(2026, 9, 5))
+        assert "2454" in s.warnings
+
+
+class TestRocDate:
+    def test_slash_format(self):
+        assert tr.parse_roc_date("115/09/07") == date(2026, 9, 7)
+
+    def test_dot_format(self):
+        assert tr.parse_roc_date("115.09.04") == date(2026, 9, 4)
+
+    def test_junk_returns_none(self):
+        for j in ("", None, "abc", "115/13/99", "9/7"):
+            assert tr.parse_roc_date(j) is None
+
+    def test_period_with_fullwidth_tilde(self):
+        assert tr.parse_roc_period("115/09/07～115/09/15") == (
+            date(2026, 9, 7), date(2026, 9, 15))
+
+    def test_period_with_ascii_tilde(self):
+        assert tr.parse_roc_period("115/09/07~115/09/15") == (
+            date(2026, 9, 7), date(2026, 9, 15))
+
+    def test_period_junk_returns_none(self):
+        assert tr.parse_roc_period("不知道") is None
+
+
+class TestAttentionLookbackIsShort:
+    """142 檔（30 天累積，含權證與 TDR）的警告等於沒有警告。
+
+    注意股的意義是「最近連續達標、可能轉處置」，看一個月前的公告沒有價值，
+    只會訓練人忽略警告。
+    """
+
+    def test_default_lookback_is_one_trading_week(self):
+        notice = next(s for s in tr.SOURCES if s.kind == "attention")
+        assert notice.lookback_days <= 7

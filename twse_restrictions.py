@@ -112,7 +112,10 @@ SOURCES: tuple[Source, ...] = (
     Source("TWSE 注意有價證券",
            "https://www.twse.com.tw/rwd/zh/announcement/notice"
            "?response=json&querytype=1&startDate={start}&endDate={end}",
-           "attention", blocking=False),
+           # 30 天累積會回 142 檔（含權證與 TDR），對 142 檔開火的警告等於
+           # 沒有警告。注意股的意義是「最近連續達標、可能轉處置」，看一個月
+           # 前的公告沒有價值。一個交易週足夠。
+           "attention", blocking=False, lookback_days=7),
 )
 
 
@@ -152,6 +155,46 @@ class Restriction:
 # 解析
 # ══════════════════════════════════════════════════════════════════════════════
 
+#: 處置期間欄位可能的名稱
+_PERIOD_FIELDS = ("處置起迄時間", "處置期間", "起迄")
+
+_PERIOD_SEP = ("～", "~", "－", "-", "至")
+
+
+def parse_roc_date(s) -> Optional[date]:
+    """民國日期 → 西元。接受 115/09/07 與 115.09.04 兩種寫法。"""
+    if not s:
+        return None
+    t = str(s).strip().replace(".", "/")
+    parts = t.split("/")
+    if len(parts) != 3:
+        return None
+    try:
+        y, m, d = (int(x) for x in parts)
+    except ValueError:
+        return None
+    if y < 1 or not (1 <= m <= 12) or not (1 <= d <= 31):
+        return None
+    try:
+        return date(y + 1911, m, d)
+    except ValueError:
+        return None
+
+
+def parse_roc_period(s) -> Optional[tuple]:
+    """"115/09/07～115/09/15" → (date, date)。看不懂回 None。"""
+    if not s:
+        return None
+    t = str(s).strip()
+    for sep in _PERIOD_SEP:
+        if sep in t:
+            a, _, b = t.partition(sep)
+            start, end = parse_roc_date(a), parse_roc_date(b)
+            if start and end:
+                return start, end
+    return None
+
+
 def _find_field(fields: list, candidates: Iterable[str]) -> Optional[int]:
     for i, f in enumerate(fields):
         t = str(f).strip()
@@ -161,8 +204,16 @@ def _find_field(fields: list, candidates: Iterable[str]) -> Optional[int]:
     return None
 
 
-def parse_restricted_payload(payload, kind: str, blocking: bool = True) -> RestrictedSet:
-    """把 TWSE rwd 封包轉成 RestrictedSet。任何形狀不符都回 ok=False。"""
+def parse_restricted_payload(payload, kind: str, blocking: bool = True,
+                             today: Optional[date] = None) -> RestrictedSet:
+    """把 TWSE rwd 封包轉成 RestrictedSet。任何形狀不符都回 ok=False。
+
+    punish 端點回的是**公告**不是「今天有效的處置」：期間可能還沒開始
+    （2026-09-05 實測，2455 的期間是 115/09/07～115/09/15），也可能已經結束。
+    有處置期間欄位時據此過濾——期滿就該解禁，一直擋著是錯的。
+
+    **看不懂期間就照擋**：誤擋少賺，漏擋可能違約交割。
+    """
     if not isinstance(payload, dict):
         return RestrictedSet(ok=False, error="回應不是 JSON 物件")
 
@@ -182,14 +233,37 @@ def parse_restricted_payload(payload, kind: str, blocking: bool = True) -> Restr
         )
 
     label = _KIND_LABEL.get(kind, kind)
+    today = today or date.today()
+    p_idx = _find_field(fields, _PERIOD_FIELDS)
+
     codes: dict[str, str] = {}
     for row in payload.get("data") or []:
         try:
             code = str(row[idx]).strip()
         except (TypeError, IndexError, KeyError):
             continue          # 單列壞掉跳過；整批形狀壞掉才作廢
-        if code:
-            codes[code] = label
+        if not code:
+            continue
+
+        reason = label
+        if p_idx is not None:
+            try:
+                raw = row[p_idx]
+            except (TypeError, IndexError, KeyError):
+                raw = None
+            period = parse_roc_period(raw)
+            if period is not None:
+                start, end = period
+                if today > end:
+                    continue          # 期滿解禁
+                reason = f"{label}　期間 {start:%m/%d}–{end:%m/%d}"
+            # 解析不出來 → 不 continue，照擋（fail-closed）
+
+        # 同一檔可能有多列公告（第一次／第二次處置）。保留期間最長的那個
+        # 描述，避免顯示成已經過期的那一次。
+        if code not in codes or len(reason) > len(codes[code]):
+            codes[code] = reason
+
     if blocking:
         return RestrictedSet(codes=codes, ok=True)
     return RestrictedSet(warnings=codes, ok=True)
@@ -229,7 +303,8 @@ def fetch_source(src: Source, timeout: int = REQUEST_TIMEOUT,
         payload = resp.json()
     except Exception as e:
         return RestrictedSet(ok=False, error=f"{src.label}：{e}")
-    s = parse_restricted_payload(payload, src.kind, blocking=src.blocking)
+    s = parse_restricted_payload(payload, src.kind, blocking=src.blocking,
+                                 today=today)
     if not s.ok:
         s.error = f"{src.label}：{s.error}"
     return s
