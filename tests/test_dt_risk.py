@@ -10,6 +10,10 @@
     _dt_poll_tick 節流點呼叫熔斷檢查、_auto_buy_dt_positions 熔斷時拒絕買單
   - telegram_bot._handle_dt_buy 熔斷時拒絕買單
 """
+# 這些 fixture 的 stop_loss 不是裝飾：dt_rules.check_exit_plan 會擋掉
+# 沒有停損價的買單（沒有停損價 = 沒有風險上限）。測的是別的行為，
+# 但買單得先送得出去。詳見 tests/test_dt_exit_plan.py。
+
 from __future__ import annotations
 
 import os
@@ -398,7 +402,7 @@ class TestAutoBuyRespectsCircuitBreaker:
         init_db(db_path)
         save_daytrading_positions([
             DaytradingPosition(code="2330", name="台積電", entry_low=None, entry_high=None,
-                               target_price=None, stop_loss=None, dt_score=90, status="watching"),
+                               target_price=None, stop_loss=97.0, dt_score=90, status="watching"),
         ], path=pos_path)
 
         from daytrading_monitor import load_daytrading_positions
@@ -425,7 +429,7 @@ class TestAutoBuyRespectsCircuitBreaker:
         init_db(db_path)
         save_daytrading_positions([
             DaytradingPosition(code="2330", name="台積電", entry_low=None, entry_high=None,
-                               target_price=None, stop_loss=None, dt_score=90, status="watching"),
+                               target_price=None, stop_loss=97.0, dt_score=90, status="watching"),
         ], path=pos_path)
         watching = load_daytrading_positions(path=pos_path)
         cfg = DaytradingConfig(budget_per_stock=100_000.0)
@@ -456,7 +460,7 @@ class TestTelegramDtBuyRespectsCircuitBreaker:
         pos_path = str(tmp_path / "pos.json")
         save_daytrading_positions([
             DaytradingPosition(code="2330", name="台積電", entry_low=None, entry_high=None,
-                               target_price=None, stop_loss=None, dt_score=90, status="watching"),
+                               target_price=None, stop_loss=97.0, dt_score=90, status="watching"),
         ], path=pos_path)
 
         with patch("dt_risk.is_circuit_breaker_active", return_value=True), \
@@ -482,7 +486,7 @@ class TestTelegramDtBuyRespectsCircuitBreaker:
         init_db(db_path)
         save_daytrading_positions([
             DaytradingPosition(code="2330", name="台積電", entry_low=None, entry_high=None,
-                               target_price=None, stop_loss=None, dt_score=90, status="watching"),
+                               target_price=None, stop_loss=97.0, dt_score=90, status="watching"),
         ], path=pos_path)
 
         ok_result = SimpleNamespace(

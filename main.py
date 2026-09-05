@@ -756,6 +756,22 @@ def _save_dt_buy_trade(result, db_path: str = DB_PATH, chat_id: Optional[str] = 
                 pass
 
 
+def _notify_no_exit_plan(code: str, name: str, reason: str) -> None:
+    """把「因為沒有出場計畫而不買」推播出去。
+
+    靜默跳過會讓人以為是選股沒選到，而不是被守衛擋下——兩者要採取的行動
+    完全不同（前者調門檻，後者查為什麼 8:30 沒算出停損價）。
+    """
+    if not TELEGRAM_CHAT_ID:
+        return
+    try:
+        from telegram_bot import send_text
+        send_text(TELEGRAM_CHAT_ID,
+                  f"⛔️ <b>{code} {name}</b> 不進場\n{reason}")
+    except Exception:
+        pass
+
+
 def _auto_buy_dt_positions(
     api,
     positions: list,
@@ -773,6 +789,7 @@ def _auto_buy_dt_positions(
         load_daytrading_positions, record_buy_result, fetch_current_price,
     )
     import dt_risk
+    import dt_rules
 
     # HALT：提早跳過。executor 的 Guard 0 已保證買單會被擋，但不在這裡攔的話
     # 仍會照常推播「要買嗎」的 Telegram 確認，使用者按下確認之後才發現訂單被擋。
@@ -812,6 +829,17 @@ def _auto_buy_dt_positions(
                 continue
 
             stop_loss_price = pos_map[code].stop_loss
+
+            # 沒有停損價就沒有風險上限——不管 8:30 規則、9:05 LLM 誰說要買。
+            # 2026-09-04 的 3021：8:30 判定 skip（stop_loss 為 None），
+            # 9:05 由 LLM 翻案 proceed，於是帶著空的出場計畫進場。
+            if dt_rules.require_stop_loss_default():
+                plan = dt_rules.check_exit_plan(stop_loss_price, price)
+                if not plan.ok:
+                    log.warning("DT auto-buy 跳過 %s：%s", code, plan.reason)
+                    _notify_no_exit_plan(code, pos_map[code].name, plan.reason)
+                    continue
+
             budget = dt_config.budget_per_stock
             risk_shares, risk_reason = calc_risk_quantity(
                 total_budget=CAPITAL,

@@ -195,10 +195,11 @@ class TestAutoBuyUsesRiskSizing:
         # risk_amount=1000, per_share_risk=5 → shares=200 → budget=200*100=20000
         assert kwargs["budget"] == 20_000.0
 
-    def test_falls_back_to_fixed_budget_when_stop_loss_missing(self, tmp_path):
+    def _run_without_stop_loss(self, tmp_path, mock_place):
         import main
         from daytrading_config import DaytradingConfig
-        from daytrading_monitor import DaytradingPosition, save_daytrading_positions, load_daytrading_positions
+        from daytrading_monitor import (DaytradingPosition, save_daytrading_positions,
+                                        load_daytrading_positions)
         from research_db import init_db
 
         db_path = str(tmp_path / "research.db")
@@ -211,14 +212,36 @@ class TestAutoBuyUsesRiskSizing:
         watching = load_daytrading_positions(path=pos_path)
         cfg = DaytradingConfig(budget_per_stock=30_000.0, risk_per_trade_pct=1.0)
 
-        with patch("main.place_stock_order", return_value=_ok_result()) as mock_place, \
+        with patch("main.place_stock_order", mock_place), \
              patch("daytrading_monitor.fetch_current_price", return_value=100.0), \
              patch("main.CAPITAL", 100_000.0), \
              patch("dt_risk.is_circuit_breaker_active", return_value=False):
-            main._auto_buy_dt_positions(MagicMock(), watching, cfg, dt_path=pos_path, db_path=db_path)
+            main._auto_buy_dt_positions(MagicMock(), watching, cfg,
+                                        dt_path=pos_path, db_path=db_path)
 
+    def test_no_stop_loss_means_no_order(self, tmp_path, monkeypatch):
+        """★ 這個測試原本叫 test_falls_back_to_fixed_budget_when_stop_loss_missing，
+        斷言「沒有停損價 → 退回固定 30,000 預算照買」。
+
+        那正是 2026-09-04 的 3021 走過的路：8:30 判定 skip（stop_loss 為
+        None），9:05 由 LLM 翻案，9:10 帶著空的出場計畫以 24.3 進場。
+        calc_risk_quantity 當下就回了「缺少停損價，改用固定預算法」——
+        系統知道這筆沒有風險上限，然後照買。
+
+        沒有停損價 = 沒有風險上限 = 不進場。
+        """
+        monkeypatch.delenv("DT_REQUIRE_STOP_LOSS", raising=False)
+        mock_place = MagicMock(return_value=_ok_result())
+        self._run_without_stop_loss(tmp_path, mock_place)
+        assert not mock_place.called
+
+    def test_fallback_still_available_when_explicitly_disabled(self, tmp_path, monkeypatch):
+        """關掉保護是明確的選擇，關掉之後舊的固定預算法行為仍在。"""
+        monkeypatch.setenv("DT_REQUIRE_STOP_LOSS", "false")
+        mock_place = MagicMock(return_value=_ok_result())
+        self._run_without_stop_loss(tmp_path, mock_place)
         _, kwargs = mock_place.call_args
-        assert kwargs["budget"] == 30_000.0   # 舊 budget 法
+        assert kwargs["budget"] == 30_000.0
 
 
 # ── telegram_bot._handle_dt_buy 接線 ──────────────────────────────────────────
@@ -256,7 +279,7 @@ class TestTelegramDtBuyUsesRiskSizing:
         assert any("風險額" in m for m in success_msgs)
         assert any("每股風險" in m for m in success_msgs)
 
-    def test_falls_back_when_stop_loss_missing(self, tmp_path):
+    def _run_without_stop_loss(self, tmp_path, mock_place, mock_send):
         import telegram_bot
         from daytrading_monitor import DaytradingPosition, save_daytrading_positions
         from research_db import init_db
@@ -272,10 +295,33 @@ class TestTelegramDtBuyUsesRiskSizing:
         with patch("dt_risk.is_circuit_breaker_active", return_value=False), \
              patch("telegram_bot._get_sj_api", return_value=MagicMock()), \
              patch("daytrading_monitor.fetch_current_price", return_value=100.0), \
-             patch("executor.place_stock_order", return_value=_ok_result()) as mock_place, \
-             patch("telegram_bot.send_text") as mock_send:
+             patch("executor.place_stock_order", mock_place), \
+             patch("telegram_bot.send_text", mock_send):
             telegram_bot._handle_dt_buy("999", "2330", dt_path=pos_path, db_path=db_path)
 
+    def test_no_stop_loss_means_no_order(self, tmp_path, monkeypatch):
+        """★ 原本斷言「沒有停損價 → 退回固定預算照買」。
+
+        DT_MANUAL_CONFIRM 預設 true，平常走的就是這條 Telegram 路徑——
+        2026-09-04 的 3021 正是這樣進場的。沒有停損價 = 沒有風險上限。
+        """
+        monkeypatch.delenv("DT_REQUIRE_STOP_LOSS", raising=False)
+        mock_place, mock_send = MagicMock(return_value=_ok_result()), MagicMock()
+        self._run_without_stop_loss(tmp_path, mock_place, mock_send)
+        assert not mock_place.called
+
+    def test_user_is_told_why(self, tmp_path, monkeypatch):
+        """使用者按了「買入」卻沒買，一定要說原因——靜默不作為最傷信任。"""
+        monkeypatch.delenv("DT_REQUIRE_STOP_LOSS", raising=False)
+        mock_place, mock_send = MagicMock(return_value=_ok_result()), MagicMock()
+        self._run_without_stop_loss(tmp_path, mock_place, mock_send)
+        said = " ".join(str(c) for c in mock_send.call_args_list)
+        assert "停損" in said
+
+    def test_fallback_still_available_when_explicitly_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DT_REQUIRE_STOP_LOSS", "false")
+        mock_place, mock_send = MagicMock(return_value=_ok_result()), MagicMock()
+        self._run_without_stop_loss(tmp_path, mock_place, mock_send)
         _, kwargs = mock_place.call_args
         from daytrading_config import load_daytrading_config
         assert kwargs["budget"] == load_daytrading_config().budget_per_stock

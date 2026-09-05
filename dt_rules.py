@@ -252,3 +252,57 @@ def rule_opening_reconfirm(
     proceed = range_ok and market_ok and change_ok
     reason = "；".join(reasons) if reasons else "全部條件通過"
     return RuleReconfirm(proceed=proceed, reason=reason)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# check_exit_plan — 沒有出場計畫就不進場
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class ExitPlanCheck:
+    ok: bool
+    reason: str = ""
+
+
+def require_stop_loss_default() -> bool:
+    """預設要求停損價。只有明確設成 false 才放行。"""
+    import os
+    return os.getenv("DT_REQUIRE_STOP_LOSS", "true").strip().lower() != "false"
+
+
+def check_exit_plan(stop_loss, entry_price) -> ExitPlanCheck:
+    """進場前確認這筆有風險上限。
+
+    2026-09-04 的 3021 鴻名：8:30 判定 skip（entry/target/stop 全 None），
+    9:05 由 LLM 翻案 proceed，9:10 以 24.3 進場——**stop_loss 仍是 None**。
+    9:05 翻案只會更新進場區間，不會補上停損價。
+
+    而系統在下單那一刻是知道的：calc_risk_quantity 回
+    (0, "缺少停損價，改用固定預算法")，也就是「算不出風險額」，
+    然後退回固定預算照買。知道有問題卻照買，是這裡要擋掉的行為。
+
+    這道檢查與「規則或 LLM 誰有最終決定權」無關：不管哪一方說買，
+    **沒有停損價就是沒有風險上限**。停損價不低於進場價也一樣——
+    那等於買進當下就觸發，形同沒有停損。
+    """
+    try:
+        px = float(entry_price) if entry_price is not None else 0.0
+    except (TypeError, ValueError):
+        px = 0.0
+    if px <= 0:
+        # 0 是「沒有報價」不是「免費」——與行情層對 close==0 的處理一致
+        return ExitPlanCheck(False, "無有效進場價（報價缺失）")
+
+    try:
+        sl = float(stop_loss) if stop_loss is not None else 0.0
+    except (TypeError, ValueError):
+        sl = 0.0
+    if sl <= 0:
+        return ExitPlanCheck(
+            False, f"缺少停損價，這筆沒有風險上限（進場價 {px:g}）")
+
+    if sl >= px:
+        return ExitPlanCheck(
+            False, f"停損價 {sl:g} 未低於進場價 {px:g}，買進當下即觸發")
+
+    return ExitPlanCheck(True)

@@ -1,4 +1,8 @@
 """tests/test_twse_sim_scanner.py — PR-7：模擬模式 TWSE OpenAPI 選股"""
+# 這些 fixture 的 stop_loss 不是裝飾：dt_rules.check_exit_plan 會擋掉
+# 沒有停損價的買單（沒有停損價 = 沒有風險上限）。測的是別的行為，
+# 但買單得先送得出去。詳見 tests/test_dt_exit_plan.py。
+
 from __future__ import annotations
 
 from unittest.mock import patch, MagicMock
@@ -139,7 +143,7 @@ class TestHandleDtBuy:
         return DaytradingPosition(
             code=code, name=name,
             entry_low=None, entry_high=None,
-            target_price=None, stop_loss=None,
+            target_price=None, stop_loss=97.0,
             dt_score=7, status="watching",
         )
 

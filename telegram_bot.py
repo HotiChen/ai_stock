@@ -1195,6 +1195,18 @@ def _handle_dt_buy(chat_id: str, code: str,
         send_text(chat_id, f"❌ 無法取得 {code} 即時報價，買入取消。")
         return
 
+    # 沒有停損價就沒有風險上限——不管 8:30 規則、9:05 LLM 誰說要買。
+    # DT_MANUAL_CONFIRM 預設 true，平常走的就是這條路徑，只在 auto-buy
+    # 加檢查等於沒加。
+    import dt_rules
+    if dt_rules.require_stop_loss_default():
+        plan = dt_rules.check_exit_plan(pos.stop_loss, price)
+        if not plan.ok:
+            send_text(chat_id,
+                      f"⛔️ <b>{code} {pos.name}</b> 不進場\n{plan.reason}")
+            log.warning("DT buy 跳過 %s：%s", code, plan.reason)
+            return
+
     capital = float(os.getenv("BUDGET", "100000"))
     hard_limit = float(os.getenv("ORDER_HARD_LIMIT", "150000"))
     budget = dt_config.budget_per_stock

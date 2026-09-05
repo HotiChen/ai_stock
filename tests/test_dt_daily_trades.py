@@ -1,4 +1,8 @@
 """tests/test_dt_daily_trades.py — Task 2: 當沖買入寫入 daily_trades."""
+# 這些 fixture 的 stop_loss 不是裝飾：dt_rules.check_exit_plan 會擋掉
+# 沒有停損價的買單（沒有停損價 = 沒有風險上限）。測的是別的行為，
+# 但買單得先送得出去。詳見 tests/test_dt_exit_plan.py。
+
 from __future__ import annotations
 
 from datetime import date
@@ -26,7 +30,7 @@ def _seed_positions(path, code="2330", name="台積電"):
     from daytrading_monitor import DaytradingPosition, save_daytrading_positions
     save_daytrading_positions([
         DaytradingPosition(code=code, name=name, entry_low=None, entry_high=None,
-                           target_price=None, stop_loss=None, dt_score=90, status="watching"),
+                           target_price=None, stop_loss=97.0, dt_score=90, status="watching"),
     ], path=path)
 
 
