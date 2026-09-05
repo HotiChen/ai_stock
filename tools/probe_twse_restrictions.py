@@ -38,11 +38,12 @@ OUT_DIR = Path("data")
 
 
 def probe(src: tr.Source) -> tuple[bool, dict]:
-    print(f"\n── {src.label}")
-    print(f"   {src.url}")
+    url = src.resolve_url()
+    print(f"\n── {src.label}　[{'擋單' if src.blocking else '僅提示'}]")
+    print(f"   {url}")
     try:
         import requests
-        resp = requests.get(src.url, timeout=tr.REQUEST_TIMEOUT)
+        resp = requests.get(url, timeout=tr.REQUEST_TIMEOUT)
         print(f"   HTTP {resp.status_code}  {len(resp.content):,} bytes")
         payload = resp.json()
     except Exception as e:
@@ -68,18 +69,26 @@ def probe(src: tr.Source) -> tuple[bool, dict]:
     if rows:
         print(f"   第一列 = {rows[0]}")
 
-    parsed = tr.parse_restricted_payload(payload, kind=src.kind)
+    parsed = tr.parse_restricted_payload(payload, kind=src.kind,
+                                         blocking=src.blocking)
+    found = parsed.codes if src.blocking else parsed.warnings
     if parsed.ok:
-        print(f"   ✅ 解析成功，取得 {len(parsed.codes)} 檔")
-        for c in list(parsed.codes)[:5]:
+        print(f"   ✅ 解析成功，取得 {len(found)} 檔"
+              f"（原始 {len(payload.get('data') or [])} 列，重複代號已合併）")
+        for c in list(found)[:5]:
             print(f"      {c}")
-        if len(parsed.codes) > 5:
-            print(f"      …共 {len(parsed.codes)} 檔")
+        if len(found) > 5:
+            print(f"      …共 {len(found)} 檔")
+        if not found and (payload.get("data") or []) == []:
+            print("   ⚠️  回傳 0 列。stat 是 OK，所以這可能是"
+                  "「今天真的沒有」，也可能是查詢參數不對——"
+                  "後者看起來一模一樣，是最難察覺的失敗。")
     else:
         print(f"   ❌ 解析失敗：{parsed.error}")
         print(f"   → 模組目前認得的代號欄位名：{tr._CODE_FIELDS}")
         print("   → 把上面 fields 裡真正的代號欄位名加進 _CODE_FIELDS 即可")
-    return parsed.ok, parsed.codes
+    # 非擋單來源的結果在 warnings 而非 codes——回錯桶的話注意股永遠顯示 0 檔
+    return parsed.ok, found
 
 
 def main() -> int:
@@ -87,17 +96,21 @@ def main() -> int:
     print("=" * 60)
 
     all_ok = True
-    merged: dict = {}
+    blocked: dict = {}
+    warned: dict = {}
     for src in tr.SOURCES:
         ok, codes = probe(src)
         all_ok = all_ok and ok
-        merged.update(codes)
+        (blocked if src.blocking else warned).update(codes)
+    merged = blocked
 
     print("\n" + "=" * 60)
     if all_ok:
-        print(f"✅ 所有來源可解析。今天總共會擋 {len(merged)} 檔。")
-        if merged:
-            print("   " + "、".join(sorted(merged)))
+        print(f"✅ 所有來源可解析。")
+        print(f"   處置（擋單）  {len(blocked)} 檔"
+              + ("：" + "、".join(sorted(blocked)) if blocked else ""))
+        print(f"   注意（僅提示）{len(warned)} 檔"
+              + ("：" + "、".join(sorted(warned)) if warned else ""))
         print("\n可以放心讓 Guard 0b 生效。")
     else:
         print("❌ 有來源無法解析。")

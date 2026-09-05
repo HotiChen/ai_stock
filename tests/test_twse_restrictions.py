@@ -358,3 +358,87 @@ class TestTodayMemo:
             tr.check(code, today=date(2026, 9, 5),
                      cache_path=str(tmp_path / "c.json"), fetch=fetch)
         assert len(calls) == 1
+
+
+class TestBlockingVsWarning:
+    """★ 處置與注意是兩件不同的事，不能一起擋。
+
+      處置股 → 分盤集合競價（人工管制，約每 2 分鐘撮合一次）＋ 預收款券，
+               多半禁止當沖。買了就出不掉 → 必須擋。
+      注意股 → 交易方式完全正常，只是「可能轉處置」的提示。當沖做得了，
+               而且注意股往往正是波動大的那些。全擋是過度保護。
+    """
+
+    def test_blocking_source_goes_to_codes(self):
+        s = tr.parse_restricted_payload(DISPOSED, kind="disposition", blocking=True)
+        assert set(s.codes) == {"3021", "6666"}
+        assert s.warnings == {}
+
+    def test_non_blocking_source_goes_to_warnings(self):
+        s = tr.parse_restricted_payload(DISPOSED, kind="attention", blocking=False)
+        assert set(s.warnings) == {"3021", "6666"}
+        assert s.codes == {}
+
+    def test_check_does_not_block_a_warning_only_code(self):
+        r = tr.check("2454", restricted=tr.RestrictedSet(
+            warnings={"2454": "注意股票"}, ok=True))
+        assert r.blocked is False
+        assert "注意" in r.warning
+
+    def test_check_blocks_when_in_both(self):
+        r = tr.check("2455", restricted=tr.RestrictedSet(
+            codes={"2455": "處置股票"}, warnings={"2455": "注意股票"}, ok=True))
+        assert r.blocked is True
+
+    def test_warning_survives_the_unknown_path(self):
+        """清單不完整時，已知的注意標記仍要帶出來。"""
+        r = tr.check("2454", restricted=tr.RestrictedSet(
+            warnings={"2454": "注意股票"}, ok=False, error="逾時"))
+        assert "注意" in r.warning
+
+    def test_merge_keeps_the_two_buckets_separate(self):
+        a = tr.RestrictedSet(codes={"2455": "處置"}, ok=True)
+        b = tr.RestrictedSet(warnings={"2454": "注意"}, ok=True)
+        m = tr.merge([a, b])
+        assert set(m.codes) == {"2455"}
+        assert set(m.warnings) == {"2454"}
+
+    def test_cache_round_trips_warnings(self, tmp_path):
+        p = str(tmp_path / "c.json")
+        tr.cache_save(tr.RestrictedSet(codes={"1": "a"}, warnings={"2": "b"},
+                                       ok=True, as_of=date(2026, 9, 5)), p)
+        back = tr.cache_load(p)
+        assert back.warnings == {"2": "b"}
+
+    def test_sources_declare_which_ones_block(self):
+        kinds = {s.kind: s.blocking for s in tr.SOURCES}
+        assert kinds["disposition"] is True
+        assert kinds["attention"] is False
+
+
+class TestNoticeNeedsDateRange:
+    """★ 2026-09-05 實機探測發現：notice 端點不帶日期會回 0 列，stat 仍是 OK。
+
+    那看起來就像「今天沒有注意股」——解析成功、集合為空、沒有任何錯誤，
+    是最難察覺的一種失敗。punish 的回應裡自帶的連結揭露了正確的參數：
+    notice.html?querytype=2&startDate=...&endDate=...
+    """
+
+    def test_notice_url_carries_a_date_range(self):
+        notice = next(s for s in tr.SOURCES if s.kind == "attention")
+        url = notice.resolve_url(date(2026, 9, 5))
+        assert "startDate=20260806" in url
+        assert "endDate=20260905" in url
+
+    def test_punish_url_needs_no_substitution(self):
+        punish = next(s for s in tr.SOURCES if s.kind == "disposition")
+        assert punish.resolve_url(date(2026, 9, 5)) == punish.url
+
+    def test_resolve_url_defaults_to_today(self):
+        notice = next(s for s in tr.SOURCES if s.kind == "attention")
+        assert date.today().strftime("%Y%m%d") in notice.resolve_url()
+
+    def test_lookback_window_is_configurable(self):
+        s = tr.Source("x", "u?s={start}&e={end}", "attention",
+                      blocking=False, lookback_days=7)
+        assert "s=20260829" in s.resolve_url(date(2026, 9, 5))

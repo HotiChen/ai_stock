@@ -50,7 +50,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -70,26 +70,49 @@ _NAME_FIELDS = ("證券名稱", "股票名稱", "有價證券名稱", "名稱")
 
 _KIND_LABEL = {
     "disposition": "處置股票（分盤交易，多半禁止當沖）",
-    "attention": "注意股票（連續達注意標準，可能轉處置）",
+    "attention": "注意股票（交易正常，但可能轉處置）",
 }
 
 
 @dataclass(frozen=True)
 class Source:
     label: str
-    url: str
-    kind: str   # "disposition" | "attention"
+    url: str          # 可含 {start} / {end}（YYYYMMDD），fetch 時代入
+    kind: str         # "disposition" | "attention"
+    blocking: bool    # True = 買不到，擋單；False = 只是風險提示
+    lookback_days: int = 30
+
+    def resolve_url(self, today: Optional[date] = None) -> str:
+        if "{start}" not in self.url and "{end}" not in self.url:
+            return self.url
+        today = today or date.today()
+        start = today - timedelta(days=self.lookback_days)
+        return self.url.format(start=start.strftime("%Y%m%d"),
+                               end=today.strftime("%Y%m%d"))
 
 
-#: 資料來源。上櫃（TPEx）的處置股同樣會鎖死你，端點確認後再補進來——
-#: 在那之前這份清單只涵蓋上市，這件事必須寫在這裡而不是靠人記得。
+#: 資料來源。
+#:
+#: 處置 vs 注意是**兩件不同的事**，不能一起擋：
+#:   處置股 → 分盤集合競價（人工管制，約每 2 分鐘撮合一次）＋ 預收款券，
+#:            多半禁止當沖。買了就出不掉 → 必須擋。
+#:   注意股 → 交易方式完全正常，只是「連續達注意標準、可能轉處置」的提示。
+#:            當沖是可以做的，而且注意股往往正是波動大的那些。
+#:            全擋等於每天砍掉一批合格標的，屬於過度保護。
+#:
+#: notice 端點**必須帶日期區間**，不帶會回 0 列且 stat 仍是 OK——
+#: 那看起來就像「今天沒有注意股」，是最難察覺的一種錯。
+#:
+#: 上櫃（TPEx）的處置股同樣會鎖死你，端點確認後再補進來——在那之前這份
+#: 清單只涵蓋上市，這件事必須寫在這裡而不是靠人記得。
 SOURCES: tuple[Source, ...] = (
     Source("TWSE 處置有價證券",
            "https://www.twse.com.tw/rwd/zh/announcement/punish?response=json",
-           "disposition"),
+           "disposition", blocking=True),
     Source("TWSE 注意有價證券",
-           "https://www.twse.com.tw/rwd/zh/announcement/notice?response=json",
-           "attention"),
+           "https://www.twse.com.tw/rwd/zh/announcement/notice"
+           "?response=json&querytype=1&startDate={start}&endDate={end}",
+           "attention", blocking=False),
 )
 
 
@@ -102,6 +125,8 @@ class RestrictedSet:
     stale  True  = 用的是舊快取
     """
     codes: dict = field(default_factory=dict)
+    #: 不擋單、只提示的標記（注意股）。代號 → 原因
+    warnings: dict = field(default_factory=dict)
     ok: bool = False
     error: str = ""
     as_of: Optional[date] = None
@@ -110,10 +135,15 @@ class RestrictedSet:
 
 @dataclass
 class Restriction:
-    """單一代號的查詢結果。"""
+    """單一代號的查詢結果。
+
+    blocked  不能買
+    warning  可以買，但有風險標記（注意股）
+    """
     code: str
     blocked: bool
     reason: str = ""
+    warning: str = ""
     as_of: Optional[date] = None
     stale: bool = False
 
@@ -131,7 +161,7 @@ def _find_field(fields: list, candidates: Iterable[str]) -> Optional[int]:
     return None
 
 
-def parse_restricted_payload(payload, kind: str) -> RestrictedSet:
+def parse_restricted_payload(payload, kind: str, blocking: bool = True) -> RestrictedSet:
     """把 TWSE rwd 封包轉成 RestrictedSet。任何形狀不符都回 ok=False。"""
     if not isinstance(payload, dict):
         return RestrictedSet(ok=False, error="回應不是 JSON 物件")
@@ -160,7 +190,9 @@ def parse_restricted_payload(payload, kind: str) -> RestrictedSet:
             continue          # 單列壞掉跳過；整批形狀壞掉才作廢
         if code:
             codes[code] = label
-    return RestrictedSet(codes=codes, ok=True)
+    if blocking:
+        return RestrictedSet(codes=codes, ok=True)
+    return RestrictedSet(warnings=codes, ok=True)
 
 
 def merge(sets: Iterable[RestrictedSet]) -> RestrictedSet:
@@ -173,13 +205,15 @@ def merge(sets: Iterable[RestrictedSet]) -> RestrictedSet:
         return RestrictedSet(ok=False, error="沒有任何資料來源")
 
     codes: dict[str, str] = {}
+    warnings: dict[str, str] = {}
     errors = []
     for s in sets:
         codes.update(s.codes)
+        warnings.update(s.warnings)
         if not s.ok:
             errors.append(s.error or "未知錯誤")
     return RestrictedSet(
-        codes=codes, ok=not errors, error="；".join(errors),
+        codes=codes, warnings=warnings, ok=not errors, error="；".join(errors),
     )
 
 
@@ -187,14 +221,15 @@ def merge(sets: Iterable[RestrictedSet]) -> RestrictedSet:
 # 抓取與快取
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_source(src: Source, timeout: int = REQUEST_TIMEOUT) -> RestrictedSet:
+def fetch_source(src: Source, timeout: int = REQUEST_TIMEOUT,
+                 today: Optional[date] = None) -> RestrictedSet:
     try:
         import requests
-        resp = requests.get(src.url, timeout=timeout)
+        resp = requests.get(src.resolve_url(today), timeout=timeout)
         payload = resp.json()
     except Exception as e:
         return RestrictedSet(ok=False, error=f"{src.label}：{e}")
-    s = parse_restricted_payload(payload, src.kind)
+    s = parse_restricted_payload(payload, src.kind, blocking=src.blocking)
     if not s.ok:
         s.error = f"{src.label}：{s.error}"
     return s
@@ -217,6 +252,7 @@ def cache_save(s: RestrictedSet, path: str = DEFAULT_CACHE_PATH) -> None:
     tmp.write_text(json.dumps({
         "as_of": (s.as_of or date.today()).isoformat(),
         "codes": s.codes,
+        "warnings": s.warnings,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(p)
 
@@ -226,9 +262,10 @@ def cache_load(path: str = DEFAULT_CACHE_PATH) -> RestrictedSet:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
         as_of = datetime.strptime(raw["as_of"], "%Y-%m-%d").date()
         codes = dict(raw["codes"])
+        warnings = dict(raw.get("warnings") or {})
     except Exception as e:
         return RestrictedSet(ok=False, error=f"快取不可用：{e}")
-    return RestrictedSet(codes=codes, ok=True, as_of=as_of)
+    return RestrictedSet(codes=codes, warnings=warnings, ok=True, as_of=as_of)
 
 
 def load_restricted(
@@ -265,10 +302,11 @@ def load_restricted(
             cached.stale = age > 0
             # 已知的代號合併進來：新抓到一半也算數
             cached.codes.update(fresh.codes)
+            cached.warnings.update(fresh.warnings)
             return cached
 
     return RestrictedSet(
-        codes=fresh.codes, ok=False,
+        codes=fresh.codes, warnings=fresh.warnings, ok=False,
         error=fresh.error or "無可用資料", as_of=None,
     )
 
@@ -300,22 +338,25 @@ def check(
     if not c:
         return Restriction(code=c, blocked=True, reason="代號為空，無法確認交易限制")
 
+    warning = restricted.warnings.get(c, "")
+
     if c in restricted.codes:
         return Restriction(
-            code=c, blocked=True, reason=restricted.codes[c],
+            code=c, blocked=True, reason=restricted.codes[c], warning=warning,
             as_of=restricted.as_of, stale=restricted.stale,
         )
 
     if not restricted.ok:
         return Restriction(
             code=c, blocked=bool(block_on_unknown),
-            reason=(f"查不到處置／注意股清單（{restricted.error}），"
+            reason=(f"查不到處置股清單（{restricted.error}），"
                     f"無法確認 {c} 是否可當沖"),
+            warning=warning,
             as_of=restricted.as_of, stale=restricted.stale,
         )
 
-    return Restriction(code=c, blocked=False, as_of=restricted.as_of,
-                       stale=restricted.stale)
+    return Restriction(code=c, blocked=False, warning=warning,
+                       as_of=restricted.as_of, stale=restricted.stale)
 
 
 # ── 當日記憶體快取 ────────────────────────────────────────────────────────────

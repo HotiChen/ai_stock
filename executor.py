@@ -294,6 +294,10 @@ def place_stock_order(
             r = twse_restrictions.check(code)
             if r.blocked:
                 return _skip(f"交易限制：{r.reason}")
+            if r.warning:
+                # 注意股交易方式完全正常，當沖做得了；全擋等於每天砍掉一批
+                # 合格標的（而且往往正是波動大的那些）。記錄不擋。
+                log.warning("%s %s：%s", code, name, r.warning)
             if r.stale:
                 log.warning("交易限制清單為 %s 的舊資料（%s 放行）", r.as_of, code)
         except Exception as e:

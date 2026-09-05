@@ -14,12 +14,13 @@ import executor
 import twse_restrictions as tr
 
 
-def _seed(codes=None, ok=True):
+def _seed(codes=None, warnings=None, ok=True):
     """覆寫 conftest 注入的「今天沒有任何限制」。"""
     tr.reset_memo()
     if ok:
         tr._MEMO[date.today()] = tr.RestrictedSet(
-            codes=codes or {}, ok=True, as_of=date.today())
+            codes=codes or {}, warnings=warnings or {},
+            ok=True, as_of=date.today())
     # ok=False 時不塞 memo，並讓抓取直接失敗（見各測試的 patch）
 
 
@@ -48,9 +49,25 @@ class TestBlocksRestrictedCode:
         r = _order(code="2330")
         assert r.success is True
 
-    def test_attention_stock_also_blocked(self):
-        _seed({"2454": "注意股票（連續達注意標準，可能轉處置）"})
-        assert _order(code="2454").success is False
+    def test_attention_stock_is_not_blocked(self):
+        """★ 注意股交易方式完全正常，當沖做得了——擋掉是過度保護。
+
+        原本這個測試叫 test_attention_stock_also_blocked，靠著把注意股直接
+        塞進 codes（擋單清單）而「通過」。名字與實際驗證的東西不一致，
+        等於用測試背書一個沒被驗證過的設計。
+        """
+        _seed(warnings={"2454": "注意股票（交易正常，但可能轉處置）"})
+        assert _order(code="2454").success is True
+
+    def test_attention_stock_is_logged(self, caplog):
+        _seed(warnings={"2454": "注意股票（交易正常，但可能轉處置）"})
+        with caplog.at_level("WARNING"):
+            _order(code="2454")
+        assert any("注意股票" in r.getMessage() for r in caplog.records)
+
+    def test_disposed_beats_attention_when_both(self):
+        _seed(codes={"2455": "處置股票"}, warnings={"2455": "注意股票"})
+        assert _order(code="2455").success is False
 
 
 class TestSellIsNeverBlocked:

@@ -427,20 +427,22 @@ def check_trading_restrictions() -> CheckResult:
         blocking = tr.block_on_unknown_default()
         return CheckResult(
             "交易限制清單", FAIL if blocking else WARN,
-            "查不到處置／注意股清單"
+            "查不到處置股清單"
             + ("——今日所有買單都會被擋" if blocking else "（已設定為放行，無保護）"),
             f"{s.error}。先跑 `python3 tools/probe_twse_restrictions.py` "
             f"確認端點與欄位名。",
         )
 
     n = len(s.codes)
+    w = len(s.warnings)
     if s.stale:
         return CheckResult(
-            "交易限制清單", WARN, f"使用 {s.as_of} 的舊清單（{n} 檔）",
+            "交易限制清單", WARN, f"使用 {s.as_of} 的舊清單（處置 {n} 檔／注意 {w} 檔）",
             "今日抓取失敗，退回快取。處置期通常連續多日，舊清單多半仍成立，"
             "但請確認網路與端點。",
         )
-    return CheckResult("交易限制清單", OK, f"今日 {n} 檔受限")
+    return CheckResult("交易限制清單", OK,
+                       f"處置 {n} 檔（擋單）／注意 {w} 檔（僅提示）")
 
 
 def check_open_positions(db_path: str | None = None) -> CheckResult:
