@@ -45,78 +45,79 @@ def check_price_alerts(
     pick: dict,
     trailing_start_pct: float = _TRAILING_START_PCT,
     trailing_gap_pct: float = _TRAILING_GAP_PCT,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
+    force_close_time: Optional[str] = None,
 ) -> list[dict]:
     """
     每個 tick 呼叫一次。pick 是 mutable dict，會在這裡更新 peak_price。
 
+    門檻與觸發順序全部委派給 dt_exit_rules——那是全系統唯一的出場規則來源。
+    在收斂之前，這條路徑（tick / 實盤）用 ATR 絕對價、
+    daytrading_monitor.check_trailing_stop（輪詢 / 紙上）用固定百分比，
+    同一個部位會在不同價位出場，紙上模擬的損益無法推論實盤。
+
+    舊版還有一個隱蔽缺陷：移動停損啟動後直接 `return alerts`（空 list），
+    目標價與停損價都不再檢查。而 ATR 目標價通常大於移動停損啟動門檻（3%），
+    所以目標價實質上永遠不會觸發。統一後不再提前 return。
+
     參數
     ----
-    trailing_start_pct : 移動停損啟動門檻（預設 3%）
-    trailing_gap_pct   : 停損點與最高點的距離（預設 2%）
+    trailing_start_pct : 移動停損啟動門檻
+    trailing_gap_pct   : 停損點與最高點的距離
+    stop_loss_pct      : 固定停損百分比。**僅在 pick 沒有 ATR 停損價時**生效
+    take_profit_pct    : 天花板停利百分比（漲停前出場）
+    force_close_time   : "HH:MM"，時間到無條件出場
 
-    觸發規則（依優先順序）：
-    1. 移動停損：進場後漲超過 trailing_start_pct，停損跟著最高點 -trailing_gap_pct
-    2. AI 目標價：現價 >= target_price
-    3. AI 停損價：現價 <= stop_loss_price（移動停損未啟動前的保護）
+    回傳最多一個 alert dict（依 dt_exit_rules.PRIORITY 取第一個成立的理由）。
     """
-    alerts = []
-    name         = pick.get("name", code)
-    entry_price  = pick.get("entry_price")
-    target       = pick.get("target_price")
-    stop_loss    = pick.get("stop_loss_price")
-    now          = datetime.now()
+    import dt_exit_rules
 
-    def _alert(alert_type: str, message: str, **extra) -> dict:
-        return {
-            "code": code, "name": name,
-            "alert_type": alert_type, "message": message,
-            "severity": "high", "created_at": now,
-            "current_price": current_price,
-            **extra,
-        }
+    name        = pick.get("name", code)
+    entry_price = pick.get("entry_price")
+    target      = pick.get("target_price")
+    stop_loss   = pick.get("stop_loss_price")
 
-    # ── 移動停損（有進場價才能算）──────────────────────────────────
+    # 最高點只升不降（移動停損的基準，呼叫端依賴這個副作用）
     if entry_price is not None and entry_price > 0:
-        gain_pct = (current_price - entry_price) / entry_price * 100
-
-        # 更新最高點（只升不降）
         peak = pick.get("peak_price") or entry_price
         if current_price > peak:
             pick["peak_price"] = current_price
             peak = current_price
+    else:
+        peak = pick.get("peak_price")
 
-        peak_gain_pct = (peak - entry_price) / entry_price * 100
+    d = dt_exit_rules.evaluate_exit(
+        entry_price=entry_price,
+        current_price=current_price,
+        peak_price=peak,
+        stop_loss=stop_loss,
+        target_price=target,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+        trailing_start_pct=trailing_start_pct,
+        trailing_gap_pct=trailing_gap_pct,
+        force_close_time=force_close_time,
+    )
+    if not d.should_exit:
+        return []
 
-        if peak_gain_pct >= trailing_start_pct:
-            trailing_stop = peak * (1 - trailing_gap_pct / 100)
-            if current_price <= trailing_stop:
-                return [_alert(
-                    "trailing_stop",
-                    f"{name} 移動停損觸發：最高 +{peak_gain_pct:.1f}%，"
-                    f"現價 +{gain_pct:.1f}%，停損 {trailing_stop:,.1f}",
-                    trailing_stop=trailing_stop,
-                    peak_price=peak,
-                )]
-            # 啟動中，跳過固定停損（避免重複警報）
-            return alerts
-
-    # ── AI 目標價 ──────────────────────────────────────────────────
-    if target is not None and current_price >= target:
-        alerts.append(_alert(
-            "target_hit",
-            f"{name} 達到目標價 {target:,.1f}，現價 {current_price:,.1f}",
-            target_price=target,
-        ))
-
-    # ── AI 停損價（移動停損未啟動前的保護）──────────────────────────
-    if stop_loss is not None and current_price <= stop_loss:
-        alerts.append(_alert(
-            "stop_loss",
-            f"{name} 觸及停損價 {stop_loss:,.1f}，現價 {current_price:,.1f}",
-            stop_loss_price=stop_loss,
-        ))
-
-    return alerts
+    alert = {
+        "code": code, "name": name,
+        "alert_type": d.reason,
+        "message": f"{name} {d.message}",
+        "severity": "high",
+        "created_at": datetime.now(),
+        "current_price": current_price,
+    }
+    if d.reason == dt_exit_rules.REASON_TARGET:
+        alert["target_price"] = target
+    elif d.reason == dt_exit_rules.REASON_STOP_LOSS:
+        alert["stop_loss_price"] = stop_loss
+    elif d.reason == dt_exit_rules.REASON_TRAILING:
+        alert["trailing_stop"] = d.trailing_stop_price
+        alert["peak_price"] = d.peak_price
+    return [alert]
 
 
 # ── Shioaji helpers ───────────────────────────────────────────────────────────
@@ -292,11 +293,17 @@ class AlertWorker:
                 )
                 mark_alert_sent(alert_id, self._db_path)
 
-                # 若啟用自動執行且為停損/追蹤停利警報，直接下市價賣單
+                # 若啟用自動執行且為出場警報，直接下市價賣單。
+                #
+                # 白名單直接取 dt_exit_rules.PRIORITY——出場理由只有那五個，
+                # 手寫一份就會漏。原本只列 stop_loss / trailing_stop，於是
+                # 天花板停利與時間強平即使觸發也只發通知不出場，而那兩個正是
+                # 最不能漏的：漲停鎖死賣不掉、跨日變成交割義務。
+                import dt_exit_rules as _er
                 if (
                     self._auto_execute
                     and self._api is not None
-                    and alert.get("alert_type") in ("stop_loss", "trailing_stop")
+                    and alert.get("alert_type") in _er.PRIORITY
                 ):
                     code = alert.get("code", "")
                     pick = self._watchlist.get(code, {})
@@ -462,6 +469,9 @@ class MonitorAgent:
         trailing_gap_pct: float = _TRAILING_GAP_PCT,
         auto_execute: bool = False,
         peaks_path: str = _DEFAULT_PEAKS_PATH,
+        stop_loss_pct: Optional[float] = None,
+        take_profit_pct: Optional[float] = None,
+        force_close_time: Optional[str] = None,
     ) -> None:
         self._api_key              = api_key
         self._secret_key           = secret_key
@@ -470,6 +480,10 @@ class MonitorAgent:
         self._telegram_chat_id     = telegram_chat_id
         self._trailing_start_pct   = trailing_start_pct
         self._trailing_gap_pct     = trailing_gap_pct
+        # 沒有 ATR 停損價時的保底百分比，以及 tick 路徑原本缺的兩道保護
+        self._stop_loss_pct        = stop_loss_pct
+        self._take_profit_pct      = take_profit_pct
+        self._force_close_time     = force_close_time
         self._auto_execute         = auto_execute
         self._peaks_path           = peaks_path
 
@@ -584,6 +598,9 @@ class MonitorAgent:
         watchlist = self._watchlist
         trailing_start = self._trailing_start_pct
         trailing_gap   = self._trailing_gap_pct
+        stop_pct       = self._stop_loss_pct
+        take_pct       = self._take_profit_pct
+        force_close    = self._force_close_time
 
         @self._api.on_tick_stk_v1()
         def _on_tick(exchange, tick):
@@ -597,6 +614,9 @@ class MonitorAgent:
                     tick.code, price, pick,
                     trailing_start_pct=trailing_start,
                     trailing_gap_pct=trailing_gap,
+                    stop_loss_pct=stop_pct,
+                    take_profit_pct=take_pct,
+                    force_close_time=force_close,
                 )
                 for a in alerts:
                     self._alert_queue.put(a)

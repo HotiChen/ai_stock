@@ -21,6 +21,8 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Optional
 
+import dt_exit_rules as _er
+
 from atomic_json import atomic_write_json
 
 log = logging.getLogger(__name__)
@@ -82,9 +84,18 @@ def check_trailing_stop(
     peak_price: float,
     config,                            # DaytradingConfig（鴨型別避免循環 import）
     current_time: Optional[datetime] = None,
+    stop_loss: Optional[float] = None,
+    target_price: Optional[float] = None,
 ) -> TrailingStopResult:
     """
     追蹤停利 / 停損純函數，不修改任何外部狀態。
+
+    門檻與觸發順序全部委派給 dt_exit_rules——那是全系統唯一的出場規則來源。
+    這個函式本身只負責把結果轉回既有的 TrailingStopResult 形狀。
+
+    在收斂之前，這裡（輪詢 / 紙上路徑）用固定百分比、
+    monitor_agent.check_price_alerts（tick / 實盤路徑）用 ATR 絕對價，
+    兩者對同一個部位會在不同價位出場——紙上模擬的損益因此無法推論實盤。
 
     參數
     ----
@@ -93,59 +104,27 @@ def check_trailing_stop(
     peak_price    : 持倉期間已觀測到的最高價（呼叫前需先更新）
     config        : DaytradingConfig
     current_time  : 測試用時間注入（None = datetime.now()）
+    stop_loss     : 8:30 以 ATR 算出的停損絕對價。**優先於 config 的百分比**
+    target_price  : 8:30 以 ATR 算出的目標絕對價
 
-    規則優先順序
-    ------------
-    1. 跌幅 >= stop_loss_pct        → 停損出場
-    2. 漲幅 >= take_profit_pct      → 天花板停利（漲停前出場）
-    3. 時間 >= force_close_time     → 強制平倉
-    4. 峰值漲幅 >= trailing_start_pct
-       且峰值回落 >= trailing_gap_pct → 追蹤停利觸發
+    規則優先順序見 dt_exit_rules.PRIORITY。
     """
-    now = current_time or datetime.now()
-    gain_pct = (current_price - entry_price) / entry_price * 100
-    peak_gain_pct = (peak_price - entry_price) / entry_price * 100
-    peak_drop_pct = (current_price - peak_price) / peak_price * 100
+    import dt_exit_rules
 
-    def _sell(reason: str, msg: str) -> TrailingStopResult:
-        return TrailingStopResult(
-            should_sell=True, reason=reason,
-            message=msg, trigger_price=current_price,
-        )
-
-    # 1. 停損
-    if gain_pct <= -config.stop_loss_pct:
-        return _sell(
-            "stop_loss",
-            f"停損觸發：跌幅 {gain_pct:.2f}%（停損線 -{config.stop_loss_pct}%）",
-        )
-
-    # 2. 天花板停利
-    if gain_pct >= config.take_profit_pct:
-        return _sell(
-            "take_profit_ceiling",
-            f"天花板停利：漲幅 {gain_pct:+.2f}%（上限 +{config.take_profit_pct}%）",
-        )
-
-    # 3. 強制平倉時間
-    h, m = map(int, config.force_close_time.split(":"))
-    if now.time() >= dtime(h, m):
-        return _sell(
-            "force_close",
-            f"強制平倉：到達 {config.force_close_time}，避免交割",
-        )
-
-    # 4. 追蹤停利（峰值漲幅達門檻後，從峰值回落觸發）
-    if peak_gain_pct >= config.trailing_start_pct:
-        if peak_drop_pct <= -config.trailing_gap_pct:
-            return _sell(
-                "trailing_stop",
-                f"追蹤停利：高點 +{peak_gain_pct:.2f}% → 回落 {abs(peak_drop_pct):.2f}%，"
-                f"現漲幅 {gain_pct:+.2f}%",
-            )
-
+    d = dt_exit_rules.evaluate_exit_from_config(
+        config=config,
+        entry_price=entry_price,
+        current_price=current_price,
+        peak_price=peak_price,
+        stop_loss=stop_loss,
+        target_price=target_price,
+        now=current_time,
+    )
     return TrailingStopResult(
-        should_sell=False, reason="", message="", trigger_price=current_price,
+        should_sell=d.should_exit,
+        reason=d.reason,
+        message=d.message,
+        trigger_price=current_price,
     )
 
 
@@ -190,6 +169,10 @@ def check_position_alerts(
             current_price=current_price,
             peak_price=peak,
             config=config,
+            # 8:30 算出的 ATR 絕對價要一路帶到出場判斷，否則這條路徑就會
+            # 退回固定百分比，跟 tick 路徑分歧（正是本次要收斂掉的問題）。
+            stop_loss=pos.stop_loss,
+            target_price=pos.target_price,
         )
         # 賣單訊號「不」用 alerts_sent 去重：出場未成功前，每輪輪詢都要能再次觸發賣單重試。
         # 通知重複由呼叫端（_run_dt_sell_alerts）以重試次數標記，不在此靜音。
@@ -586,6 +569,7 @@ def run_daytrading_monitor(
 _ALERT_EMOJI = {
     "entry":               "🟢",
     "target":              "🎯",
+    "target_hit":          "🎯",
     "stoploss":            "🛑",
     "stop_loss":           "🛑",
     "take_profit_ceiling": "🎯",
@@ -593,12 +577,9 @@ _ALERT_EMOJI = {
     "force_close":         "⏰",
 }
 
-_SELL_LABEL = {
-    "stop_loss":           "停損出場",
-    "take_profit_ceiling": "天花板停利",
-    "trailing_stop":       "追蹤停利",
-    "force_close":         "強制平倉",
-}
+#: 出場理由 → 中文標籤。以 dt_exit_rules.SELL_LABEL 為準，這裡只做別名補充，
+#: 避免兩處各自維護一份標籤又分歧。
+_SELL_LABEL = dict(_er.SELL_LABEL)
 
 
 def format_alerts_message(alerts: list[DaytradingAlert]) -> str:

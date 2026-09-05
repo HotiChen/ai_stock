@@ -2012,6 +2012,13 @@ def main() -> None:
                             api=api,
                             trailing_start_pct=dt_config.trailing_start_pct,
                             trailing_gap_pct=dt_config.trailing_gap_pct,
+                            # tick 路徑原本沒有天花板停利與時間強平，也沒有
+                            # 沒 ATR 停損價時的保底百分比——三個門檻都要跟
+                            # 輪詢/紙上路徑取自同一份 dt_config，否則兩條路徑
+                            # 又會各走各的（見 dt_exit_rules 模組說明）。
+                            stop_loss_pct=dt_config.stop_loss_pct,
+                            take_profit_pct=dt_config.take_profit_pct,
+                            force_close_time=dt_config.force_close_time,
                             auto_execute=True,
                         )
                         _dt_agent.set_watchlist(watchlist)

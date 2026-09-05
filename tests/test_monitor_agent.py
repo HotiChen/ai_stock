@@ -227,31 +227,66 @@ class TestTrailingStop:
         check_price_alerts("2330", 101.0, pick)
         assert pick["peak_price"] == pytest.approx(101.0)
 
-    # ── 移動停損啟動後，固定停損/目標被跳過 ──────────────────────────────────────
+    # ── 移動停損與停損/目標的優先順序（dt_exit_rules.PRIORITY）───────────────────
+    #
+    # 這兩個案例原本斷言「移動停損啟動後跳過停損與目標」——那是把當時的實作
+    # 缺陷釘成規格。舊版在移動停損啟動後直接 `return alerts`（空 list），
+    # 於是：
+    #   (a) 賠錢出場會被標成「追蹤停利」，損益歸因整個錯掉；
+    #   (b) ATR 目標價（通常 > 3% 啟動門檻）實質上永遠不會觸發。
+    # 收斂到 dt_exit_rules 後，順序是 停損 → 天花板 → 強平 → 移動停損 → 目標價。
 
-    def test_trailing_active_skips_fixed_stoploss(self):
-        """移動停損啟動中（未觸發）：即使現價跌破固定停損，也不發固定停損警報。"""
+    def test_stop_loss_wins_over_trailing_when_below_entry(self):
+        """★ 現價已跌破進場價：這是虧損出場，必須標成停損而不是「追蹤停利」。
+
+        entry=100、peak=104（移動停損已啟動、線在 101.92）、ATR 停損 100、
+        現價 99——兩條規則都成立，但只有 stop_loss 是誠實的標籤。
+        """
         from monitor_agent import check_price_alerts
-        # entry=100, peak=104 (+4%), trailing_stop=104*0.98=101.92
-        # current=99 < fixed stop_loss=95? No — current=99 is above stop_loss=95
-        # Actually let's put stop_loss=100 so current=99 would be below it
         pick = self._pick(entry_price=100.0, peak_price=104.0, stop_loss_price=100.0)
-        # trailing active (peak +4%), trailing_stop=101.92, current=99 triggers trailing
         alerts = check_price_alerts("2330", 99.0, pick)
         types = [a["alert_type"] for a in alerts]
-        # should get trailing_stop, NOT stop_loss
-        assert "trailing_stop" in types
-        assert "stop_loss" not in types
+        assert "stop_loss" in types
+        assert "trailing_stop" not in types
 
-    def test_trailing_active_not_triggered_skips_fixed_target(self):
-        """移動停損啟動中（未觸發）：即使現價超過固定目標，也不發目標價警報。"""
+    def test_target_reachable_while_trailing_armed(self):
+        """★ 回歸測試：移動停損啟動中，價格一路衝到目標價仍要出場。
+
+        entry=100、peak 更新為 125、移動停損線 122.5、現價 125 未回落，
+        目標價 120 已達成。舊版在這裡回空 list，部位就這樣一直掛著。
+        """
         from monitor_agent import check_price_alerts
-        # entry=100, peak=104 (+4%), trailing_stop=104*0.98=101.92
-        # current=125 > target_price=120 → but trailing active, return empty
         pick = self._pick(entry_price=100.0, peak_price=104.0)
-        # current=125 is above trailing_stop=101.92, so not triggered → empty
         alerts = check_price_alerts("2330", 125.0, pick)
-        assert alerts == []
+        assert [a["alert_type"] for a in alerts] == ["target_hit"]
+
+    def test_trailing_still_wins_when_price_has_dropped(self):
+        """已經自峰值回落到移動停損線之下 → 走移動停損，不是目標價。"""
+        from monitor_agent import check_price_alerts
+        # entry=100, peak=110（+10%）, 線=107.8, 現價 107 已跌破；目標 105 也達成
+        pick = self._pick(entry_price=100.0, peak_price=110.0, target_price=105.0)
+        alerts = check_price_alerts("2330", 107.0, pick)
+        assert [a["alert_type"] for a in alerts] == ["trailing_stop"]
+
+    def test_ceiling_take_profit_when_configured(self):
+        """天花板停利要排在目標價之前——漲停鎖死就賣不掉了。"""
+        from monitor_agent import check_price_alerts
+        pick = self._pick(entry_price=100.0, target_price=120.0,
+                          stop_loss_price=95.0)
+        alerts = check_price_alerts("2330", 109.0, pick,
+                                    trailing_start_pct=50.0,
+                                    take_profit_pct=9.0)
+        assert [a["alert_type"] for a in alerts] == ["take_profit_ceiling"]
+
+    def test_force_close_time_when_configured(self):
+        """tick 路徑原本完全沒有時間強平，只能等排程器那一分鐘剛好跑到。"""
+        from monitor_agent import check_price_alerts
+        pick = self._pick(entry_price=100.0)
+        with patch("dt_exit_rules.datetime") as m:
+            m.now.return_value = datetime(2026, 9, 7, 13, 5)
+            alerts = check_price_alerts("2330", 101.0, pick,
+                                        force_close_time="13:00")
+        assert [a["alert_type"] for a in alerts] == ["force_close"]
 
     # ── 無 entry_price 時走舊邏輯 ────────────────────────────────────────────────
 
@@ -550,3 +585,61 @@ class TestMonitorAgent:
             agent.start()
             agent.stop()
             assert agent._api is pre_api
+
+
+# ── AlertWorker 自動出場白名單 ────────────────────────────────────────────────
+
+class TestAutoExecuteCoversEveryExitReason:
+    """★ 自動出場的白名單原本是手寫的 ("stop_loss", "trailing_stop")。
+
+    於是天花板停利與時間強平即使觸發，也只發 Telegram 通知、不會真的賣出——
+    而那兩個正是最不能漏的：漲停鎖死就賣不掉，跨日就變成交割義務。
+    改成直接取 dt_exit_rules.PRIORITY，出場理由新增時不可能再漏。
+    """
+
+    def _alert(self, alert_type):
+        return dict(
+            code="2330", name="台積電", alert_type=alert_type,
+            message="觸發", severity="high",
+            created_at=datetime(2026, 9, 7, 11, 0), current_price=842.0,
+        )
+
+    def _run(self, alert_type, tmp_path):
+        from monitor_agent import AlertWorker
+        from research_db import init_db
+        db_path = str(tmp_path / "t.db")
+        init_db(db_path)
+        q = queue.Queue()
+        worker = AlertWorker(
+            q, db_path=db_path, telegram_chat_id=None,
+            auto_execute=True, api=MagicMock(),
+            watchlist=[dict(code="2330", name="台積電", quantity=1000,
+                            lot_type="common", entry_price=820.0)],
+        )
+        q.put(self._alert(alert_type))
+        q.put(None)
+        with patch("monitor_agent.force_stop_loss", return_value=True) as sell, \
+                patch("notifier.notify_price_alert"):
+            worker.run()
+        return sell
+
+    @pytest.mark.parametrize("reason", [
+        "stop_loss", "take_profit_ceiling", "force_close",
+        "trailing_stop", "target_hit",
+    ])
+    def test_every_exit_reason_places_a_sell_order(self, reason, tmp_path):
+        assert self._run(reason, tmp_path).called, f"{reason} 沒有下賣單"
+
+    def test_non_exit_alert_does_not_sell(self, tmp_path):
+        """進場提示之類的通知不該觸發賣單。"""
+        assert not self._run("entry", tmp_path).called
+
+    def test_whitelist_is_the_shared_priority_tuple(self):
+        """白名單必須就是 dt_exit_rules.PRIORITY 本身，不是另一份拷貝。"""
+        import inspect
+
+        import dt_exit_rules
+        import monitor_agent
+        src = inspect.getsource(monitor_agent.AlertWorker.run)
+        assert "_er.PRIORITY" in src
+        assert len(dt_exit_rules.PRIORITY) == 5
