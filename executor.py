@@ -277,6 +277,31 @@ def place_stock_order(
             # 且緊急暫停另有 Telegram 告警與人工介入路徑。
             log.warning("HALT 狀態讀取失敗（放行買單）: %s", e)
 
+    # Guard 0b: 處置股／注意股 — **只擋買進**
+    #
+    # 買到處置股會讓你出不掉：分盤集合競價（每 5 或 20 分鐘撮合一次）且多半
+    # 禁止當沖 → 買進當下就註定留到隔天 → T+2 交割義務 → 錢不夠就是違約交割。
+    #
+    # 放在 paper_trading 分支**之前**是刻意的：紙上模擬若不套用同一組限制，
+    # 模擬損益就會包含實盤根本買不到的標的，紙上績效又變成不能推論實盤——
+    # 那正是 dt_exit_rules 這次剛收斂掉的問題，不要在這裡重新製造一次。
+    #
+    # 查不到清單時預設**擋單**（fail-closed）：漏擋一檔可能違約交割，
+    # 誤擋一檔只是少賺。要放行必須明確設 DT_BLOCK_ON_UNKNOWN_RESTRICTION=false。
+    if action == "buy":
+        try:
+            import twse_restrictions
+            r = twse_restrictions.check(code)
+            if r.blocked:
+                return _skip(f"交易限制：{r.reason}")
+            if r.stale:
+                log.warning("交易限制清單為 %s 的舊資料（%s 放行）", r.as_of, code)
+        except Exception as e:
+            # 模組本身壞掉（import 失敗、程式錯誤）時**放行**並大聲記錄。
+            # 這與「查不到清單」不同：那是資料問題，由 check() 內部 fail-closed
+            # 處理；這裡是程式問題，擋住全部買單的代價高於漏擋，且會留下 log。
+            log.error("交易限制檢查異常（放行買單，請立即查明）%s: %s", code, e)
+
     # Guard 1: duplicate（記憶體內，僅在呼叫端有傳 prior_orders 時生效）
     if is_duplicate_order(code, action, prior_orders):
         return _skip(f"重複委託：{code} {action} 今日已下單")

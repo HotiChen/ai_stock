@@ -130,3 +130,22 @@ def _isolate_planset(monkeypatch):
     """
     import telegram_bot
     monkeypatch.setattr(telegram_bot, "load_pending_planset", lambda *a, **kw: None)
+
+
+@pytest.fixture(autouse=True)
+def _clean_trading_restrictions():
+    """預設讓「處置股／注意股」清單是「查得到、且今天沒有任何限制」。
+
+    executor 的 Guard 0b 是 fail-closed 的：查不到清單就擋買單。測試環境沒有
+    對外網路，若不預先注入，每一個買進測試都會變成「因為查不到清單而被擋」，
+    而且失敗訊息與被測行為完全無關。
+
+    要驗證 Guard 0b 本身的測試請顯式注入自己的 RestrictedSet（見
+    tests/test_executor_restriction_guard.py），不要依賴這個 fixture。
+    """
+    import twse_restrictions as _tr
+    from datetime import date as _date
+    _tr.reset_memo()
+    _tr._MEMO[_date.today()] = _tr.RestrictedSet(codes={}, ok=True, as_of=_date.today())
+    yield
+    _tr.reset_memo()

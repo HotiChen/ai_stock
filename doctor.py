@@ -406,6 +406,43 @@ def check_db_schema(review_db: str | None = None) -> CheckResult:
     return CheckResult("資料庫 schema", OK, "欄位齊全")
 
 
+def check_trading_restrictions() -> CheckResult:
+    """處置股／注意股清單今天抓不抓得到。
+
+    Guard 0b 是 fail-closed 的：清單查不到就擋掉所有買單。那是刻意的
+    （漏擋一檔可能違約交割，誤擋一檔只是少賺），但如果沒有人在早上發現，
+    表現出來就是「今天又 0 檔」——和 8/21 的 HALT 事故一模一樣的沉默失敗。
+    """
+    try:
+        import twse_restrictions as tr
+    except Exception as e:
+        return CheckResult("交易限制清單", WARN, "模組不可用", str(e))
+
+    try:
+        s = tr.restricted_for_today()
+    except Exception as e:
+        return CheckResult("交易限制清單", FAIL, "查詢異常", str(e))
+
+    if not s.ok:
+        blocking = tr.block_on_unknown_default()
+        return CheckResult(
+            "交易限制清單", FAIL if blocking else WARN,
+            "查不到處置／注意股清單"
+            + ("——今日所有買單都會被擋" if blocking else "（已設定為放行，無保護）"),
+            f"{s.error}。先跑 `python3 tools/probe_twse_restrictions.py` "
+            f"確認端點與欄位名。",
+        )
+
+    n = len(s.codes)
+    if s.stale:
+        return CheckResult(
+            "交易限制清單", WARN, f"使用 {s.as_of} 的舊清單（{n} 檔）",
+            "今日抓取失敗，退回快取。處置期通常連續多日，舊清單多半仍成立，"
+            "但請確認網路與端點。",
+        )
+    return CheckResult("交易限制清單", OK, f"今日 {n} 檔受限")
+
+
 def check_open_positions(db_path: str | None = None) -> CheckResult:
     """今天以前的當沖部位不該還開著。
 
@@ -517,6 +554,7 @@ _CHECKS = (
     ("check_market_data", ("api",)),
     ("check_quota", ("api",)),
     ("check_db_schema", ()),
+    ("check_trading_restrictions", ()),
     ("check_open_positions", ()),
     ("check_processes", ()),
     ("check_ai_keys", ()),

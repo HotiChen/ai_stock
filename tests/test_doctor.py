@@ -464,3 +464,63 @@ class TestCheckOpenPositions:
 
     def test_registered_in_check_list(self):
         assert "check_open_positions" in [n for n, _ in doctor._CHECKS]
+
+
+class TestCheckTradingRestrictions:
+    """Guard 0b 是 fail-closed 的：清單查不到 → 所有買單被擋 → 今天又 0 檔。
+
+    那是刻意的設計，但沒人在早上發現的話，表現出來就跟 8/21 的 HALT 事故
+    一樣是沉默失敗。這一項要在 08:20 就把它吼出來。
+    """
+
+    def _r(self, **kw):
+        import twse_restrictions as tr
+        base = dict(codes={}, ok=True, as_of=doctor.__dict__.get("_x"), stale=False)
+        base.update(kw)
+        return tr.RestrictedSet(**base)
+
+    def test_ok_when_list_available(self):
+        import twse_restrictions as tr
+        with patch.object(tr, "restricted_for_today",
+                          return_value=self._r(codes={"3021": "處置"})):
+            r = doctor.check_trading_restrictions()
+        assert r.status == doctor.OK
+        assert "1" in r.message
+
+    def test_fails_when_unavailable_and_blocking(self, monkeypatch):
+        import twse_restrictions as tr
+        monkeypatch.delenv("DT_BLOCK_ON_UNKNOWN_RESTRICTION", raising=False)
+        with patch.object(tr, "restricted_for_today",
+                          return_value=self._r(ok=False, error="逾時")):
+            r = doctor.check_trading_restrictions()
+        assert r.status == doctor.FAIL
+        assert "買單" in r.message
+
+    def test_only_warns_when_user_opted_out(self, monkeypatch):
+        """明確關掉保護時不該報 FAIL——那是使用者的決定，但要提醒沒有保護。"""
+        import twse_restrictions as tr
+        monkeypatch.setenv("DT_BLOCK_ON_UNKNOWN_RESTRICTION", "false")
+        with patch.object(tr, "restricted_for_today",
+                          return_value=self._r(ok=False, error="逾時")):
+            r = doctor.check_trading_restrictions()
+        assert r.status == doctor.WARN
+
+    def test_warns_on_stale_list(self):
+        import datetime
+
+        import twse_restrictions as tr
+        with patch.object(tr, "restricted_for_today",
+                          return_value=self._r(stale=True,
+                                               as_of=datetime.date(2026, 9, 4))):
+            r = doctor.check_trading_restrictions()
+        assert r.status == doctor.WARN
+        assert "舊清單" in r.message
+
+    def test_never_raises(self):
+        import twse_restrictions as tr
+        with patch.object(tr, "restricted_for_today", side_effect=RuntimeError("x")):
+            r = doctor.check_trading_restrictions()
+        assert r.status in (doctor.OK, doctor.WARN, doctor.FAIL)
+
+    def test_registered_in_check_list(self):
+        assert "check_trading_restrictions" in [n for n, _ in doctor._CHECKS]
