@@ -524,3 +524,43 @@ class TestCheckTradingRestrictions:
 
     def test_registered_in_check_list(self):
         assert "check_trading_restrictions" in [n for n, _ in doctor._CHECKS]
+
+
+class TestOpenPositionQuantityUnits:
+    """★ lot_type=="common" 時 quantity 的單位是**張**，不是股。
+
+    2026-09-04 的 3021 是 quantity=1、lot_type='common'、entry_price=24.3，
+    也就是 1 張＝1000 股＝24,300 元。原本直接接「股」會顯示成「1 股」，
+    看起來像 24 元的零頭——真倉時這個誤導會讓人低估曝險而不去查證。
+    """
+
+    def _db(self, tmp_path, qty, lot, px):
+        import sqlite3
+        p = tmp_path / "pos.db"
+        conn = sqlite3.connect(p)
+        conn.execute("CREATE TABLE dt_positions (trade_date TEXT, code TEXT,"
+                     " name TEXT, status TEXT, quantity INTEGER,"
+                     " lot_type TEXT, entry_price REAL)")
+        conn.execute("INSERT INTO dt_positions VALUES"
+                     " ('2026-09-04','3021','鴻名','active',?,?,?)",
+                     (qty, lot, px))
+        conn.commit(); conn.close()
+        return str(p)
+
+    def test_common_lot_reported_in_lots_and_shares(self, tmp_path):
+        r = doctor.check_open_positions(self._db(tmp_path, 1, "common", 24.3))
+        assert "1 張" in r.detail
+        assert "1,000 股" in r.detail
+
+    def test_common_lot_reports_the_amount(self, tmp_path):
+        r = doctor.check_open_positions(self._db(tmp_path, 1, "common", 24.3))
+        assert "24,300" in r.detail
+
+    def test_odd_lot_reported_in_shares(self, tmp_path):
+        r = doctor.check_open_positions(self._db(tmp_path, 50, "intraday_odd", 24.3))
+        assert "50 股" in r.detail
+        assert "張" not in r.detail
+
+    def test_missing_price_still_reports_quantity(self, tmp_path):
+        r = doctor.check_open_positions(self._db(tmp_path, 2, "common", 0))
+        assert "2 張" in r.detail

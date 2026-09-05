@@ -445,6 +445,33 @@ def check_trading_restrictions() -> CheckResult:
                        f"處置 {n} 檔（擋單）／注意 {w} 檔（僅提示）")
 
 
+def _qty_text(row) -> str:
+    """把持倉數量講成人看得懂的話。
+
+    lot_type=="common" 時 quantity 的單位是**張**（1 張 = 1000 股）。
+    直接接「股」會把一筆 24,300 元的部位顯示成 24 元——如果那是真倉，
+    這個誤導會讓人低估曝險而不去查證。金額算得出來就一起印。
+    """
+    def _get(key, default=None):
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            return default
+
+    try:
+        qty = int(_get("quantity") or 0)
+        lot = _get("lot_type") or "common"
+    except Exception:
+        return ""
+    shares = qty * 1000 if lot == "common" else qty
+    unit = f"{qty} 張（{shares:,} 股）" if lot == "common" else f"{qty} 股"
+    try:
+        px = float(_get("entry_price") or 0)
+    except Exception:
+        px = 0.0
+    return f"{unit}／約 {shares * px:,.0f} 元" if px > 0 else unit
+
+
 def check_open_positions(db_path: str | None = None) -> CheckResult:
     """今天以前的當沖部位不該還開著。
 
@@ -473,7 +500,10 @@ def check_open_positions(db_path: str | None = None) -> CheckResult:
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
-                f"SELECT trade_date, code, name, status, quantity FROM dt_positions"
+                # SELECT * 而非列舉欄位：這個表的 schema 隨版本增修過
+                # （buy_order_id / sell_order_id 是後來才加的），寫死欄位名
+                # 會在舊資料庫上整個查詢失敗，而自檢工具自己爆炸最沒有意義。
+                f"SELECT * FROM dt_positions"
                 f" WHERE trade_date < ? AND status IN ({marks})"
                 f" ORDER BY trade_date, code",
                 (today, *watched),
@@ -488,7 +518,7 @@ def check_open_positions(db_path: str | None = None) -> CheckResult:
 
     items = "；".join(
         f"{r['trade_date']} {r['code']} {r['name'] or ''}"
-        f"（{r['status']}{'／' + str(r['quantity']) + ' 股' if r['quantity'] else ''}）"
+        f"（{r['status']}{'／' + _qty_text(r) if r['quantity'] else ''}）"
         for r in rows
     )
     return CheckResult(
