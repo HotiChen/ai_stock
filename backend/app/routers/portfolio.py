@@ -9,7 +9,7 @@ import os
 import sys
 from datetime import date, datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..deps import get_current_user
 from ..schemas.auth import User
@@ -43,32 +43,6 @@ def _calc_countdown_seconds() -> int:
 
 import logging as _logging
 _log = _logging.getLogger(__name__)
-
-
-def _mock_portfolio() -> PortfolioSummary:
-    budget = float(os.getenv("BUDGET", "1000000"))
-    return PortfolioSummary(
-        net_value=int(budget),
-        budget=int(budget),
-        free_cash=int(budget),
-        cash_ratio=1.0,
-        unrealized_pnl=0,
-        realized_pnl=0,
-        net_pnl=0,
-        net_pnl_pct=0.0,
-        position_count=0,
-        closed_today=0,
-        countdown_seconds=_calc_countdown_seconds(),
-        positions=[],
-        sector_breakdown=[],
-        recent_pnl_days=[{"date": date.today().isoformat(), "pnl": 0}],
-        cumulative_vs_index={
-            "dates": [date.today().isoformat()],
-            "me": [1.0],
-            "index": [1.0],
-        },
-        alpha_mtd=0.0,
-    )
 
 
 # ── Real data builder ─────────────────────────────────────────────────────────
@@ -166,10 +140,13 @@ async def portfolio(current_user: User = Depends(get_current_user)) -> Portfolio
     """
     GET /api/portfolio → PortfolioSummary
 
-    try: portfolio.load_current_positions() + daily_tracker.last_n_days(14)
-    except: mock PortfolioSummary with real countdown_seconds
+    真實資料取自 portfolio.load_current_positions() + daily_tracker。
+    取不到就回 503——原本降級回一份寫死的持倉組合。
     """
     try:
         return _build_real_portfolio()
-    except Exception:
-        return _mock_portfolio()
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"取不到持倉資料：{e}",
+        ) from e

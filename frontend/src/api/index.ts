@@ -20,6 +20,27 @@ import type {
 
 const BASE = '/api';
 
+/**
+ * 帶 HTTP 狀態碼的錯誤。
+ *
+ * 「今天還沒有選股」和「後端連不上」是兩件完全不同的事，使用者要採取的
+ * 行動也不同（等 08:30 / 去看 logs/backend.log）。過去兩者都只是 throw
+ * 一個字串，前端無從分辨——於是後端乾脆回假資料，兩個問題一起被蓋掉。
+ */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+/** 404 = 這個資源今天還不存在（不是錯誤，是還沒發生）。 */
+export function isNotFound(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 404;
+}
+
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   const token = localStorage.getItem('access_token');
   const res = await fetch(BASE + path, {
@@ -36,7 +57,15 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
     // Throw to stop further processing in the caller
     throw new Error('Unauthorized');
   }
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const body = await res.text();
+    let detail = body;
+    try {
+      const j = JSON.parse(body);
+      detail = j.detail ?? body;
+    } catch { /* 非 JSON，用原文 */ }
+    throw new ApiError(res.status, detail);
+  }
   return res.json() as Promise<T>;
 }
 

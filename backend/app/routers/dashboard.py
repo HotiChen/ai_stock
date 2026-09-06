@@ -2,7 +2,7 @@
 dashboard.py — Dashboard aggregate Router (Wave 2-C)
 
 聚合：KPI（daily_tracker）、top_picks（predict/today）、recent_alerts（research_db.alerts）。
-若 ai_stock 模組不可用，降級回 mock 資料並加 X-Data-Source: mock header。
+沒有資料的欄位回 None／空陣列，不以假資料充數。
 """
 
 from __future__ import annotations
@@ -35,43 +35,6 @@ _TRACK_DIR = os.path.join(_AI_STOCK_ROOT, "data", "daily_tracking")
 # ── Mock 資料 ────────────────────────────────────────────────────────────────
 
 _TODAY = date.today().isoformat()
-
-_MOCK_KPI = {
-    "net_value": 1_034_200,
-    "net_pnl": 34_200,
-    "net_pnl_pct": 0.0342,
-    "realized_pnl": 12_500,
-    "unrealized_pnl": 21_700,
-    "win_rate": 0.68,
-    "trades_today": 3,
-}
-
-_MOCK_CHART_DATA = {
-    "dates": [_TODAY],
-    "equity": [1_034_200],
-    "index": [21845],
-}
-
-_MOCK_ALERTS = [
-    {
-        "id": "mock-001",
-        "time": "09:32:11",
-        "level": "high",
-        "code": "2330",
-        "name": "台積電",
-        "text": "突破前高，量能放大",
-        "kind": "note",
-        "resolved": False,
-        "source": "mock",
-        "telegram_sent": False,
-    }
-]
-
-_MOCK_MARKET = {
-    "taiex": {"value": 21845.32, "change": 127.45, "change_pct": 0.0059},
-    "otc": {"value": 248.73, "change": 1.82, "change_pct": 0.0074},
-}
-
 
 # ── 真實資料輔助 ─────────────────────────────────────────────────────────────
 
@@ -177,45 +140,23 @@ async def dashboard(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Dashboard aggregate：KPI + chart_data + top_picks + recent_alerts。"""
-    is_mock = False
-
-    # 1. KPI
+    # 每一項各自可能沒有資料。原本任一項缺就換上寫死的假值（台積電 82%、
+    # 假的 KPI、假的走勢圖），而且只在 header 標記——前端從來沒讀那個 header。
+    # 現在缺的就是 None／空陣列，由前端顯示「—」或空狀態。
     kpi = _load_kpi_from_tracker()
-    if kpi is None:
-        kpi = _MOCK_KPI
-        is_mock = True
-
-    # 2. Top picks（輕量版）
-    top_picks = _load_top_picks()
-    if not top_picks:
-        # 用 mock picks 摘要
-        top_picks = [
-            {"code": "2330", "name": "台積電", "signal": "buy", "confidence": 0.82, "action": "approved"},
-            {"code": "2454", "name": "聯發科", "signal": "buy", "confidence": 0.76, "action": "approved"},
-            {"code": "2382", "name": "廣達", "signal": "buy", "confidence": 0.71, "action": "pending"},
-        ]
-        is_mock = True
-
-    # 3. Recent alerts
-    recent_alerts = _load_recent_alerts()
-    if recent_alerts is None:
-        recent_alerts = _MOCK_ALERTS
-        is_mock = True
-
-    # 4. Mode
+    top_picks = _load_top_picks() or []
+    recent_alerts = _load_recent_alerts() or []
     mode = _load_mode()
-
-    if is_mock:
-        response.headers["X-Data-Source"] = "mock"
 
     return {
         "date": _TODAY,
         "mode": mode,
         "kpi": kpi,
-        "chart_data": _MOCK_CHART_DATA,   # 週期性圖表資料由 portfolio router 提供
+        # 走勢圖後端尚未實作（spec/BACKEND_MAPPING 未定義這個端點）
+        "chart_data": None,
         "top_picks": top_picks,
         "recent_alerts": recent_alerts,
-        "market": _MOCK_MARKET,
+        "market": None,
         "alerts_count": len(recent_alerts),
         "positions_count": 0,
     }

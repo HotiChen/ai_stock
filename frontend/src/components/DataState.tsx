@@ -1,4 +1,5 @@
 import React from 'react';
+import { ApiError, isNotFound } from '../api';
 
 /**
  * 空狀態 / 錯誤狀態。
@@ -111,12 +112,26 @@ export function queryState(opts: {
 
   if (isError) {
     const msg = error instanceof Error ? error.message : String(error ?? '');
+
+    // 404 代表「這個東西今天還不存在」，不是故障。後端會在 detail 說明
+    // 是什麼還沒發生（例如「08:30 PremarketJob 尚未產生今日計畫」）。
+    if (isNotFound(error)) {
+      return (
+        <DataState
+          title={`目前沒有${what}`}
+          detail={msg || emptyDetail}
+          compact={compact}
+        />
+      );
+    }
+
+    const status = error instanceof ApiError ? `HTTP ${error.status}　` : '';
     return (
       <DataState
         isError
         title={`無法取得${what}`}
         detail={
-          (msg ? `${msg.slice(0, 160)}　` : '') +
+          status + (msg ? `${msg.slice(0, 160)}　` : '') +
           '後端 :1234 是否在執行？bash start_all.sh 可重新啟動，logs/backend.log 有詳細錯誤。'
         }
         compact={compact}

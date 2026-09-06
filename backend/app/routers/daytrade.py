@@ -1,17 +1,21 @@
 """daytrade.py — Wave 2-D upgrade.
 
 Wraps ai_stock modules (monitor_agent, portfolio, risk_guard, research_db,
-intraday_monitor, executor) with try/except fallback to mock data.
+intraday_monitor, executor)。取不到資料回 503／未實作回 501，不以假資料充數。
 Every endpoint always returns 200.
 """
 from __future__ import annotations
+
+import logging
 
 import sys
 import os
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+
+log = logging.getLogger(__name__)
 
 from ..deps import get_current_user
 from ..schemas.auth import User
@@ -50,187 +54,10 @@ def _calc_countdown_seconds() -> int:
         remaining = int((force_close - now).total_seconds())
         return max(0, remaining)
     except Exception:
-        return 9900  # mock fallback (~2h45m)
+        return 0  # 算不出來就是 0，不編一個看起來合理的 2h45m
 
 
-# ── Mock helpers ──────────────────────────────────────────────────────────────
-
-def _mock_positions() -> list[Position]:
-    return [
-        Position(
-            code="2330",
-            name="台積電",
-            sector="半導體",
-            side=Side.BUY,
-            entry_price=1120,
-            last_price=1135,
-            quantity=1,
-            lot=LotType.COMMON,
-            cost=112_000,
-            market_value=113_500,
-            pnl=1500,
-            pnl_pct=0.0134,
-            target_price=1185,
-            stop_loss_price=1085,
-            distance_to_tp_pct=0.044,
-            distance_to_sl_pct=0.044,
-            thread_state=ThreadState.MONITORING,
-            confidence=0.82,
-            opened_at="2026-05-24T09:05:32+08:00",
-        ),
-        Position(
-            code="2454",
-            name="聯發科",
-            sector="半導體",
-            side=Side.BUY,
-            entry_price=1295,
-            last_price=1315,
-            quantity=1,
-            lot=LotType.COMMON,
-            cost=129_500,
-            market_value=131_500,
-            pnl=2000,
-            pnl_pct=0.0154,
-            target_price=1380,
-            stop_loss_price=1260,
-            distance_to_tp_pct=0.049,
-            distance_to_sl_pct=0.042,
-            thread_state=ThreadState.MONITORING,
-            confidence=0.76,
-            opened_at="2026-05-24T09:12:18+08:00",
-        ),
-    ]
-
-
-def _mock_alerts() -> list[Alert]:
-    return [
-        Alert(
-            id="alert-001",
-            time="10:41:55",
-            level=AlertLevel.HIGH,
-            code="2330",
-            name="台積電",
-            text="台積電達到目標價 1185，建議評估獲利了結",
-            kind=AlertKind.TARGET_HIT,
-            resolved=False,
-            source="MonitorAgent",
-            telegram_sent=True,
-        ),
-        Alert(
-            id="alert-002",
-            time="10:25:12",
-            level=AlertLevel.MED,
-            code="2454",
-            name="聯發科",
-            text="聯發科接近停損價 1260，目前距離 4.2%",
-            kind=AlertKind.STOP_WARN,
-            resolved=False,
-            source="MonitorAgent",
-            telegram_sent=False,
-        ),
-    ]
-
-
-def _mock_threads() -> list[StrategyThread]:
-    return [
-        StrategyThread(
-            code="2330",
-            name="台積電",
-            state=ThreadState.MONITORING,
-            last_tick_at="2026-05-24T10:45:00+08:00",
-            age_seconds=5988,
-            target_price=1185,
-            stop_loss_price=1085,
-            distance_label="+4.4% / -4.4%",
-            poll_count=200,
-            alert_count=1,
-        ),
-        StrategyThread(
-            code="2454",
-            name="聯發科",
-            state=ThreadState.MONITORING,
-            last_tick_at="2026-05-24T10:45:00+08:00",
-            age_seconds=5562,
-            target_price=1380,
-            stop_loss_price=1260,
-            distance_label="+4.9% / -4.2%",
-            poll_count=186,
-            alert_count=1,
-        ),
-    ]
-
-
-def _mock_risk() -> RiskCockpit:
-    return RiskCockpit(
-        budget=1_000_000,
-        used=245_000,
-        free=755_000,
-        utilization=0.245,
-        intraday_pnl=3500,
-        intraday_pnl_pct=0.0035,
-        daily_max_dd_limit=-0.03,
-        sector_allocation=[
-            SectorAllocation(name="半導體", ratio=0.245, limit=0.4, value=245_000),
-        ],
-        blacklist=["1234"],
-        single_max=SingleMax(value=131_500, ratio=0.1315, limit=0.2, ok=True),
-    )
-
-
-def _mock_daytrade_live() -> DaytradeLive:
-    return DaytradeLive(
-        countdown_seconds=_calc_countdown_seconds(),
-        force_close_at="13:15:00",
-        monitoring_count=2,
-        closed_count=0,
-        unrealized_pnl=3500,
-        realized_pnl=0,
-        net_pnl=3500,
-        net_value=1_003_500,
-        positions=_mock_positions(),
-        alerts=_mock_alerts(),
-        threads=_mock_threads(),
-        risk=_mock_risk(),
-        next_poll_in_seconds=30,
-    )
-
-
-def _mock_chart_view(code: str) -> ChartView:
-    ticks = [
-        Tick(t="09:00", open=1120, high=1122, low=1118, close=1121, volume=1250),
-        Tick(t="09:30", open=1121, high=1128, low=1120, close=1126, volume=1480),
-        Tick(t="10:00", open=1126, high=1135, low=1125, close=1132, volume=1820),
-        Tick(t="10:30", open=1132, high=1142, low=1130, close=1135, volume=2100),
-    ]
-    closes = [t.close for t in ticks]
-    return ChartView(
-        code=code,
-        ticks=ticks,
-        ma20=[1098.0, 1100.0, 1105.0, 1110.0],
-        ma5=[1120.0, 1122.5, 1127.0, 1131.0],
-        bollinger={
-            "upper": [1150.0, 1152.0, 1155.0, 1158.0],
-            "mid": [1110.0, 1112.0, 1115.0, 1118.0],
-            "lower": [1070.0, 1072.0, 1075.0, 1078.0],
-        },
-        rsi=[52.0, 55.0, 58.0, 60.0],
-        ai_marks=[
-            AIMark(
-                index=0,
-                time="09:05",
-                kind="buy",
-                label="AI 買進信號",
-                confidence=0.82,
-                reasoning="突破前高，量能放大",
-            )
-        ],
-        next_action_suggestion={
-            "kind": "hold",
-            "text": "持續持有，目標 1185 仍有 4.4% 空間",
-            "confidence": 0.75,
-        },
-    )
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 # ── Real data helpers ─────────────────────────────────────────────────────────
 
@@ -326,13 +153,17 @@ async def live(current_user: User = Depends(get_current_user)) -> DaytradeLive:
     """
     GET /api/daytrade/live → DaytradeLive
 
-    try: real data from portfolio + risk_guard
-    except: mock DaytradeLive with real countdown_seconds
+    真實資料取自 portfolio + risk_guard。取不到就回 503——原本降級回一份
+    寫死的持倉（含假的損益與風控數字），畫面完全看不出來是假的。
     """
     try:
         return _build_live_from_real()
-    except Exception:
-        return _mock_daytrade_live()
+    except Exception as e:
+        log.warning("daytrade live failed: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail=f"取不到當沖實況：{e}。main.py 是否在執行？",
+        ) from e
 
 
 @router.get("/{code}/chart", response_model=ChartView)
@@ -341,7 +172,7 @@ async def chart(code: str, current_user: User = Depends(get_current_user)) -> Ch
     GET /api/daytrade/{code}/chart → ChartView
 
     try: intraday_monitor tick data + daytrading_analyzer
-    except: mock ChartView
+    except: 503
     """
     try:
         # intraday_monitor doesn't expose a direct fetch_ticks; use daytrading_analyzer if available
@@ -379,8 +210,12 @@ async def chart(code: str, current_user: User = Depends(get_current_user)) -> Ch
             ai_marks=[],
             next_action_suggestion=None,
         )
-    except Exception:
-        return _mock_chart_view(code)
+    except Exception as e:
+        log.warning("chart(%s) failed: %s", code, e)
+        raise HTTPException(
+            status_code=503,
+            detail=f"取不到 {code} 的 K 線：{e}",
+        ) from e
 
 
 @router.post("/close")
@@ -400,43 +235,64 @@ async def close(code: str, current_user: User = Depends(get_current_user)) -> di
         )
         return {"ok": result.success, "code": code, "message": result.reason or "平倉指令已送出"}
     except Exception as exc:
-        return {"ok": True, "code": code, "message": f"{code} 平倉指令已送出（mock）"}
+        # 原本這裡回 ok=True 說「平倉指令已送出」，實際上例外被吞掉、
+        # 什麼都沒送。使用者以為部位平掉了。
+        log.warning("close(%s) failed: %s", code, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"{code} 平倉失敗：{exc}",
+        ) from exc
 
 
 @router.post("/close-all")
 async def close_all(current_user: User = Depends(get_current_user)) -> dict:
     """POST /api/daytrade/close-all → {"ok": True}"""
     try:
-        # ForceCloseJob manual trigger – requires Shioaji api object
-        # Fall through to mock since no live api available
-        raise NotImplementedError("no live api")
-    except Exception:
-        return {"ok": True, "message": "全部平倉指令已送出（mock）"}
+        # ForceCloseJob 手動觸發需要 Shioaji api handle，API 行程沒有。
+        # 原本這裡回 ok=True 說「全部平倉指令已送出」——一張單都沒送。
+        raise HTTPException(
+            status_code=501,
+            detail="從 UI 一鍵全平尚未實作。"
+                   "13:00／13:15 的自動強平仍由 main.py 執行。",
+        )
+    except HTTPException:
+        raise
 
 
 @router.post("/adjust-tp")
 async def adjust_tp(code: str, value: float, current_user: User = Depends(get_current_user)) -> dict:
     """POST /api/daytrade/adjust-tp?code={code}&value={value} → {"ok": True}"""
     try:
-        # Would update position target price in DB/state — no direct module function yet
-        raise NotImplementedError("not implemented in ai_stock")
-    except Exception:
-        return {"ok": True, "code": code, "target_price": value}
+        # 原本回 ok=True 說目標價已改，實際上沒有任何寫入——
+        # 畫面顯示新的目標價，系統用的還是舊的。
+        raise HTTPException(
+            status_code=501,
+            detail="從 UI 調整目標價尚未實作。",
+        )
+    except HTTPException:
+        raise
 
 
 @router.post("/adjust-sl")
 async def adjust_sl(code: str, value: float, current_user: User = Depends(get_current_user)) -> dict:
     """POST /api/daytrade/adjust-sl?code={code}&value={value} → {"ok": True}"""
     try:
-        raise NotImplementedError("not implemented in ai_stock")
-    except Exception:
-        return {"ok": True, "code": code, "stop_loss_price": value}
+        # 同 adjust-tp。停損價尤其危險：畫面說改好了，實際的停損還在原位。
+        raise HTTPException(
+            status_code=501,
+            detail="從 UI 調整停損價尚未實作。",
+        )
+    except HTTPException:
+        raise
 
 
 @router.post("/mute")
 async def mute(minutes: int, current_user: User = Depends(get_current_user)) -> dict:
     """POST /api/daytrade/mute?minutes={minutes} → {"ok": True}"""
     try:
-        raise NotImplementedError("not implemented in ai_stock")
-    except Exception:
-        return {"ok": True, "muted_minutes": minutes}
+        raise HTTPException(
+            status_code=501,
+            detail="靜音警報尚未實作。",
+        )
+    except HTTPException:
+        raise

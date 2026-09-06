@@ -2,7 +2,7 @@
 predict.py — AI 預測 Router (Wave 2-C)
 
 每個 endpoint 嘗試呼叫真實 ai_stock 模組；若 import 失敗（缺 shioaji 等依賴），
-優雅降級回 mock 資料，並在 response header 加 X-Data-Source: mock。
+沒有資料時回 404、依賴不可用時回 503——不以假資料充數。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import os
 import sys
 from datetime import date, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 
 from ..deps import get_current_user
 from ..schemas.auth import User
@@ -51,213 +51,6 @@ _DB_PATH = os.path.join(_AI_STOCK_ROOT, "data", "research.db")
 # ── Mock 資料（fallback）────────────────────────────────────────────────────
 
 _TODAY = date.today().isoformat()
-
-_MOCK_PICKS = [
-    Pick(
-        code="2330",
-        name="台積電",
-        sector="半導體",
-        signal=Signal.BUY,
-        confidence=0.82,
-        target_price=1185,
-        stop_loss_price=1085,
-        last_price=1135,
-        change_pct=1.34,
-        spark=[1080, 1090, 1095, 1100, 1110, 1120, 1125, 1130, 1132, 1135],
-        reason="外資連 5 日買超，技術面突破季線，AI 信心高",
-        tags=["黃金交叉", "量比 1.8x", "外資買超"],
-        action="approved",
-        budget=200_000,
-        budget_ratio=0.2,
-        run_id=f"plan-{_TODAY}-0001",
-        created_at=f"{_TODAY}T08:30:00+08:00",
-    ),
-    Pick(
-        code="2454",
-        name="聯發科",
-        sector="半導體",
-        signal=Signal.BUY,
-        confidence=0.76,
-        target_price=1380,
-        stop_loss_price=1260,
-        last_price=1315,
-        change_pct=0.84,
-        spark=[1250, 1265, 1280, 1290, 1295, 1300, 1305, 1308, 1312, 1315],
-        reason="AI 晶片需求強勁，法人持續買超，RSI 回測支撐",
-        tags=["AI 題材", "法人買超", "RSI 回測"],
-        action="approved",
-        budget=160_000,
-        budget_ratio=0.16,
-        run_id=f"plan-{_TODAY}-0001",
-        created_at=f"{_TODAY}T08:30:00+08:00",
-    ),
-    Pick(
-        code="2382",
-        name="廣達",
-        sector="電腦硬體",
-        signal=Signal.BUY,
-        confidence=0.71,
-        target_price=295,
-        stop_loss_price=268,
-        last_price=280,
-        change_pct=2.19,
-        spark=[255, 260, 265, 268, 272, 275, 277, 279, 280, 280],
-        reason="AI 伺服器訂單能見度高，量能放大突破",
-        tags=["AI 伺服器", "量能放大"],
-        action="pending",
-        budget=140_000,
-        budget_ratio=0.14,
-        run_id=f"plan-{_TODAY}-0001",
-        created_at=f"{_TODAY}T08:30:00+08:00",
-    ),
-]
-
-_MOCK_RISK_CHECKS = [
-    RiskCheck(key="重複委託防護", sub="executor.is_duplicate_order()", status="pass", detail="無重複委託"),
-    RiskCheck(key="單股部位上限", sub="risk_guard.single_stock_ratio()", status="pass", detail="≤ 20%"),
-    RiskCheck(key="板塊集中度", sub="risk_guard.sector_ratio()", status="pass", detail="半導體 36% < 40%"),
-    RiskCheck(key="信心門檻", sub="risk_guard.confidence_threshold()", status="pass", detail="≥ 0.65"),
-    RiskCheck(key="黑名單篩查", sub="risk_guard.blacklist_check()", status="pass", detail="無黑名單股票"),
-    RiskCheck(key="每日損失上限", sub="risk_guard.daily_max_loss()", status="pass", detail="未觸及 -3%"),
-]
-
-_MOCK_TOP_N_RUN = TopNRun(
-    run_id=f"plan-{_TODAY}-0001",
-    date=_TODAY,
-    scanned=450,
-    analyzed=12,
-    buy_signals=8,
-    hold_signals=4,
-    approved=3,
-    rejected_by_risk=1,
-    picks=_MOCK_PICKS,
-    risk_checks=_MOCK_RISK_CHECKS,
-    sector_allocation=[
-        SectorAllocation(name="半導體", ratio=0.36, limit=0.4, value=360_000),
-        SectorAllocation(name="電腦硬體", ratio=0.14, limit=0.4, value=140_000),
-    ],
-    blacklist=["1234"],
-    cost={
-        "duration_ms": 18420,
-        "input_tokens": 12480,
-        "output_tokens": 3820,
-        "cost_usd": 0.048,
-        "model": "claude-haiku-4-5-20251001",
-    },
-    telegram_sent_at=f"{_TODAY}T08:31:45+08:00",
-)
-
-
-def _deep_analysis_with_live_price(code: str) -> DeepAnalysis:
-    """Mock DeepAnalysis 補 Shioaji 即時報價（失敗回 0）。"""
-    da = _mock_deep_analysis(code)
-    try:
-        from ..services.shioaji_service import get_live_prices
-        price = get_live_prices([code]).get(code, 0.0)
-        if price > 0:
-            da = da.model_copy(update={"last": price})
-    except Exception:
-        pass
-    return da
-
-
-def _mock_deep_analysis(code: str) -> DeepAnalysis:
-    name_map = {"2330": "台積電", "2454": "聯發科", "2382": "廣達"}
-    name = name_map.get(code, code)
-    return DeepAnalysis(
-        code=code,
-        name=name,
-        sector="半導體",
-        last=1135,
-        change=15,
-        change_pct=0.0134,
-        open=1120,
-        high=1142,
-        low=1118,
-        prev_close=1120,
-        volume_lots=28450,
-        signal=Signal.BUY,
-        confidence=0.82,
-        target_price=1185,
-        stop_loss_price=1085,
-        expected_return=0.044,
-        max_loss=-0.044,
-        risk_reward="1 : 1.33",
-        budget=200_000,
-        indicators=[
-            Indicator(key="MA5", value=1126.4, hint="上彎", weight=2.0, signal="bull"),
-            Indicator(key="MA20", value=1098.2, hint="多頭排列", weight=2.0, signal="bull"),
-            Indicator(key="RSI(14)", value=58.3, hint="強勢區", weight=1.0, signal="bull"),
-            Indicator(key="MACD", value=12.4, hint="正乖離擴大", weight=2.0, signal="bull"),
-            Indicator(key="布林上軌", value="上方", hint="強勢突破", weight=1.0, signal="bull"),
-            Indicator(key="KD", value="中軌", hint="鈍化整理", weight=0.0, signal="neutral"),
-        ],
-        total_score=8.0,
-        recommendation="強力買進",
-        scenarios=[
-            Scenario(name="基準情境", probability=0.55, target_price=1185, return_pct=0.044, description="維持強勢上漲趨勢"),
-            Scenario(name="樂觀情境", probability=0.25, target_price=1230, return_pct=0.083, description="外資加碼推升"),
-            Scenario(name="保守情境", probability=0.20, target_price=1095, return_pct=-0.035, description="獲利了結賣壓"),
-        ],
-        ai_conclusion=f"{name}技術面強勢，外資連續買超，AI 晶片需求持續，建議買進，目標價 1185，停損 1085。",
-        ticks=[
-            Tick(t="09:00", open=1120, high=1122, low=1118, close=1121, volume=1250),
-            Tick(t="09:30", open=1121, high=1128, low=1120, close=1126, volume=1480),
-            Tick(t="10:00", open=1126, high=1135, low=1125, close=1132, volume=1820),
-            Tick(t="10:30", open=1132, high=1142, low=1130, close=1135, volume=2100),
-        ],
-        model="claude-haiku-4-5-20251001",
-        generated_at=f"{_TODAY}T08:30:00+08:00",
-    )
-
-
-def _mock_reasoning_trace(code: str) -> ReasoningTrace:
-    run_id = f"plan-{_TODAY}-0001"
-    return ReasoningTrace(
-        run_id=run_id,
-        code=code,
-        total_duration_ms=18420,
-        steps=[
-            TraceStep(phase="INPUT", t="08:30:00", label="載入輸入資料", body=f"code={code}, date={_TODAY}", cost_ms=12.0),
-            TraceStep(phase="FETCH", t="08:30:01", label="抓取技術指標", body="MA5=1126.4, MA20=1098.2, RSI=58.3", cost_ms=340.0),
-            TraceStep(phase="EVAL", t="08:30:02", label="計算技術評分", body="total_score=8.0 (6 indicators)", cost_ms=28.0),
-            TraceStep(phase="PROMPT", t="08:30:02", label="組建 AI Prompt", body="system+user prompt 建構完成 (12480 tokens)", cost_ms=15.0),
-            TraceStep(phase="LLM", t="08:30:03", label="LLM 推理", body="claude-haiku-4-5-20251001 呼叫中...", cost_ms=14200.0, cost_usd=0.048),
-            TraceStep(phase="PARSE", t="08:30:17", label="解析回應", body="signal=buy, confidence=0.82", cost_ms=8.0),
-            TraceStep(phase="GUARD", t="08:30:17", label="風控驗證", body="6 checks all passed", cost_ms=45.0),
-            TraceStep(phase="OUTPUT", t="08:30:18", label="輸出結果", body="Pick 寫入 research_db", cost_ms=12.0),
-        ],
-        prompt={
-            "system": "你是台股 AI 量化分析師...",
-            "user": f"分析 {code} 當沖機會...",
-            "tokens_in": 12480,
-        },
-        response={
-            "raw": '{"signal":"buy","confidence":0.82,"target_price":1185,...}',
-            "parsed": {
-                "signal": "buy",
-                "confidence": 0.82,
-                "target_price": 1185,
-                "stop_loss_price": 1085,
-                "reason": "技術面強勢，外資買超，AI 晶片需求持續",
-            },
-            "tokens_out": 3820,
-        },
-        contributions=[
-            Contribution(key="技術指標總分", detail="+8 分", delta=0.35, kind="positive"),
-            Contribution(key="外資買超", detail="+5 日連買", delta=0.25, kind="positive"),
-            Contribution(key="AI 題材", detail="AI 晶片訂單強勁", delta=0.15, kind="positive"),
-            Contribution(key="基礎信心", detail="底線信心", delta=0.07, kind="base"),
-        ],
-        final_confidence=0.82,
-        self_check=[
-            SelfCheck(question="技術面是否支持買入?", answer="是，MA多頭排列，RSI強勢區", passed=True),
-            SelfCheck(question="風控是否通過?", answer="6項均通過", passed=True),
-            SelfCheck(question="信心是否達門檻?", answer="0.82 > 0.65", passed=True),
-        ],
-        decision_hash="sha256:a3f8b2c1d4e5f6a7b8c9d0e1f2a3b4c5",
-    )
-
 
 # ── 真實資料輔助函式 ────────────────────────────────────────────────────────
 
@@ -322,14 +115,18 @@ def _build_top_n_run_from_picks(picks: list[Pick], plan_date: str) -> TopNRun:
     return TopNRun(
         run_id=run_id,
         date=plan_date,
-        scanned=len(picks) * 10,
+        # daily_plan 沒有記掃描總數。原本寫 len(picks) * 10，是憑空乘出來的
+        # ——0 代表「不知道」，前端會顯示 "—"。
+        scanned=0,
         analyzed=len(picks),
         buy_signals=buy_count,
         hold_signals=hold_count,
         approved=approved_count,
         rejected_by_risk=0,
         picks=picks,
-        risk_checks=_MOCK_RISK_CHECKS,
+        # 原本連真實路徑都塞 _MOCK_RISK_CHECKS，於是「風控紀要」那張卡
+        # 永遠顯示六項全部通過——那六項根本沒有被執行過。
+        risk_checks=[],
         sector_allocation=sector_allocs,
         blacklist=[],
         cost={
@@ -378,15 +175,20 @@ async def today(
             _enrich_picks_with_live_prices(picks)
             result = _build_top_n_run_from_picks(picks, plan_date.isoformat())
         else:
-            log.info("No daily plan for %s in DB, using mock", plan_date)
+            raise HTTPException(
+                status_code=404,
+                detail=f"{plan_date.isoformat()} 尚無選股計畫。"
+                       "08:30 PremarketJob 產生後才會有資料；"
+                       "main.py 沒在跑的話今天不會產生。",
+            )
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning("today() DB failed: %s", e)
-
-    if result is None:
-        response.headers["X-Data-Source"] = "mock"
-        mock_picks = list(_MOCK_TOP_N_RUN.picks)
-        _enrich_picks_with_live_prices(mock_picks)
-        result = _MOCK_TOP_N_RUN.model_copy(update={"picks": mock_picks})
+        raise HTTPException(
+            status_code=503,
+            detail=f"讀取選股計畫失敗：{e}",
+        ) from e
 
     return result
 
@@ -410,12 +212,12 @@ async def get_run(
             if rows:
                 picks = _picks_from_db_rows(rows, run_id, date_str)
                 return _build_top_n_run_from_picks(picks, date_str)
-        response.headers["X-Data-Source"] = "mock"
-        return _MOCK_TOP_N_RUN
+        raise HTTPException(status_code=404, detail=f"找不到 run {run_id} 的選股計畫。")
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning("get_run(%s) using mock: %s", run_id, e)
-        response.headers["X-Data-Source"] = "mock"
-        return _MOCK_TOP_N_RUN
+        log.warning("get_run(%s) failed: %s", run_id, e)
+        raise HTTPException(status_code=503, detail=f"讀取 run {run_id} 失敗：{e}") from e
 
 
 @router.post("/run", response_model=TopNRun)
@@ -429,13 +231,18 @@ async def trigger_run(
         # PremarketJob 依賴 shioaji 等重依賴，大概率會失敗，但仍嘗試
         from morning_briefing import collect_market_data  # noqa: F401
 
-        log.info("PremarketJob dependencies available, but full run skipped in API context")
-        response.headers["X-Data-Source"] = "mock"
-        return _MOCK_TOP_N_RUN
+        # PremarketJob 需要 shioaji handle 與數十秒執行時間，不能在 request
+        # 週期內跑完。原本這裡回一份 mock，看起來像「重新分析完成了」。
+        raise HTTPException(
+            status_code=501,
+            detail="從 UI 觸發重新選股尚未實作。"
+                   "目前請等 08:30 排程，或在終端機執行 PremarketJob。",
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning("trigger_run() using mock: %s", e)
-        response.headers["X-Data-Source"] = "mock"
-        return _MOCK_TOP_N_RUN
+        log.warning("trigger_run() failed: %s", e)
+        raise HTTPException(status_code=503, detail=f"觸發選股失敗：{e}") from e
 
 
 @router.get("/{code}/reasoning", response_model=ReasoningTrace)
@@ -498,12 +305,16 @@ async def reasoning(
                 self_check=[],
                 decision_hash="",
             )
-        response.headers["X-Data-Source"] = "mock"
-        return _mock_reasoning_trace(code)
+        raise HTTPException(
+            status_code=404,
+            detail=f"{code} 沒有推理紀錄。只有經過 AI 深度分析的候選才會留下"
+                   "（每日技術評分前 8 名）。",
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning("reasoning(%s) using mock: %s", code, e)
-        response.headers["X-Data-Source"] = "mock"
-        return _mock_reasoning_trace(code)
+        log.warning("reasoning(%s) failed: %s", code, e)
+        raise HTTPException(status_code=503, detail=f"讀取 {code} 推理紀錄失敗：{e}") from e
 
 
 @router.get("/{code}", response_model=DeepAnalysis)
@@ -569,12 +380,16 @@ async def deep_analysis(
                 model="research_db",
                 generated_at=analysis.analyzed_at.isoformat(),
             )
-        response.headers["X-Data-Source"] = "mock"
-        return _deep_analysis_with_live_price(code)
+        raise HTTPException(
+            status_code=404,
+            detail=f"{code} 沒有深度分析紀錄。只有 08:30 技術評分前 8 名"
+                   "會做 AI 深度分析。",
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning("deep_analysis(%s) using mock: %s", code, e)
-        response.headers["X-Data-Source"] = "mock"
-        return _deep_analysis_with_live_price(code)
+        log.warning("deep_analysis(%s) failed: %s", code, e)
+        raise HTTPException(status_code=503, detail=f"讀取 {code} 深度分析失敗：{e}") from e
 
 
 @router.post("/{code}/rerun", response_model=DeepAnalysis)
@@ -588,13 +403,15 @@ async def rerun(
         # run_deep_analysis 需要 api（shioaji），幾乎確定失敗
         from deep_analyzer import run_deep_analysis as _run_deep  # noqa: F401
 
-        log.info("deep_analyzer importable but full rerun needs shioaji API handle, using mock")
-        response.headers["X-Data-Source"] = "mock"
-        return _mock_deep_analysis(code)
+        raise HTTPException(
+            status_code=501,
+            detail=f"從 UI 重新分析 {code} 尚未實作（需要 shioaji handle）。",
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning("rerun(%s) using mock: %s", code, e)
-        response.headers["X-Data-Source"] = "mock"
-        return _mock_deep_analysis(code)
+        log.warning("rerun(%s) failed: %s", code, e)
+        raise HTTPException(status_code=503, detail=f"重新分析 {code} 失敗：{e}") from e
 
 
 @router.post("/approve")
@@ -621,9 +438,9 @@ async def approve(
             save_daily_plan(plan_date, rows, _DB_PATH)
         return {"ok": True, "code": code, "action": "approved", "updated_in_db": updated}
     except Exception as e:
-        log.warning("approve(%s, %s) using mock: %s", run_id, code, e)
-        response.headers["X-Data-Source"] = "mock"
-        return {"ok": True, "code": code, "action": "approved"}
+        # 原本寫入失敗仍回 ok=True，畫面顯示「已批准」但資料庫沒這回事。
+        log.warning("approve(%s, %s) failed: %s", run_id, code, e)
+        raise HTTPException(status_code=503, detail=f"批准 {code} 失敗：{e}") from e
 
 
 @router.post("/reject")
@@ -643,9 +460,8 @@ async def reject(
         reject_pick_from_plan(plan_date, code, _DB_PATH)
         return {"ok": True, "code": code, "action": "rejected", "updated_in_db": True}
     except Exception as e:
-        log.warning("reject(%s, %s) using mock: %s", run_id, code, e)
-        response.headers["X-Data-Source"] = "mock"
-        return {"ok": True, "code": code, "action": "rejected"}
+        log.warning("reject(%s, %s) failed: %s", run_id, code, e)
+        raise HTTPException(status_code=503, detail=f"排除 {code} 失敗：{e}") from e
 
 
 @router.post("/approve-all")
@@ -668,12 +484,8 @@ async def approve_all(
         picks = _picks_from_db_rows(rows, run_id, date_str)
         return _build_top_n_run_from_picks(picks, date_str)
     except Exception as e:
-        log.warning("approve_all(%s) using mock: %s", run_id, e)
-        response.headers["X-Data-Source"] = "mock"
-        updated = _MOCK_TOP_N_RUN.model_copy(deep=True)
-        for p in updated.picks:
-            object.__setattr__(p, "action", "approved")
-        return updated
+        log.warning("approve_all(%s) failed: %s", run_id, e)
+        raise HTTPException(status_code=503, detail=f"批准全部失敗：{e}") from e
 
 
 @router.get("/run/{run_id}/reasoning", response_model=list[ReasoningTrace])
@@ -737,13 +549,15 @@ async def run_reasoning(
                                 decision_hash="",
                             )
                         )
-                    else:
-                        traces.append(_mock_reasoning_trace(code))
+                    # 沒有紀錄的個股就不放進來，不用假的補齊
             if traces:
                 return traces
-        response.headers["X-Data-Source"] = "mock"
-        return [_mock_reasoning_trace("2330"), _mock_reasoning_trace("2454")]
+        raise HTTPException(
+            status_code=404,
+            detail=f"run {run_id} 沒有任何推理紀錄。",
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning("run_reasoning(%s) using mock: %s", run_id, e)
-        response.headers["X-Data-Source"] = "mock"
-        return [_mock_reasoning_trace("2330"), _mock_reasoning_trace("2454")]
+        log.warning("run_reasoning(%s) failed: %s", run_id, e)
+        raise HTTPException(status_code=503, detail=f"讀取推理紀錄失敗：{e}") from e

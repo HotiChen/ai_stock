@@ -402,6 +402,8 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
         color: 'var(--muted)',
         overflow: 'hidden',
       }}>
+        {/* 沒有資料就顯示 "—"。原本 fallback 到寫死的 21,234.5 / 312.4 /
+            31.85 / 124MB / 12ms，整條狀態列在後端沒接上時全是假的。 */}
         {taiex ? (
           <StatusBarItem
             label="加權"
@@ -409,7 +411,7 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
             color={taiex.change_pct >= 0 ? 'var(--up)' : 'var(--down)'}
           />
         ) : (
-          <StatusBarItem label="加權" value="21,234.5 +0.42%" />
+          <StatusBarItem label="加權" value="—" />
         )}
         <StatusBarSep />
         {otc ? (
@@ -419,13 +421,13 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
             color={otc.change_pct >= 0 ? 'var(--up)' : 'var(--down)'}
           />
         ) : (
-          <StatusBarItem label="OTC" value="312.4 -0.12%" color="var(--down)" />
+          <StatusBarItem label="OTC" value="—" />
         )}
         <StatusBarSep />
         {usd ? (
           <StatusBarItem label="USD/TWD" value={usd.value.toFixed(2)} />
         ) : (
-          <StatusBarItem label="USD/TWD" value="31.85" />
+          <StatusBarItem label="USD/TWD" value="—" />
         )}
         <div style={{ flex: 1 }} />
         <StatusBarItem
@@ -436,12 +438,12 @@ export default function AppChrome({ children, title, eyebrow }: AppChromeProps) 
         <StatusBarSep />
         <StatusBarItem
           label="DB"
-          value={dbMB > 0 ? `${dbMB}MB` : '124MB'}
+          value={dbMB > 0 ? `${dbMB}MB` : '—'}
         />
         <StatusBarSep />
         <StatusBarItem
           label="LOAD"
-          value={loadMs > 0 ? `${loadMs}ms` : '12ms'}
+          value={loadMs > 0 ? `${loadMs}ms` : '—'}
         />
       </footer>
     </div>

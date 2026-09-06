@@ -50,42 +50,6 @@ if _AI_STOCK_DIR not in sys.path:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_MOCK_RISK_CHECKS = [
-    RiskCheck(key="重複委託防護", sub="executor.is_duplicate_order()", status="pass", detail="無重複委託"),
-    RiskCheck(key="單股部位上限", sub="risk_guard.single_stock_ratio()", status="pass", detail="≤ 20%"),
-    RiskCheck(key="板塊集中度", sub="risk_guard.sector_ratio()", status="pass", detail="半導體 36% < 40%"),
-    RiskCheck(key="信心門檻", sub="risk_guard.confidence_threshold()", status="pass", detail="≥ 0.65"),
-    RiskCheck(key="黑名單篩查", sub="risk_guard.blacklist_check()", status="pass", detail="無黑名單股票"),
-    RiskCheck(key="每日損失上限", sub="risk_guard.daily_max_loss()", status="pass", detail="未觸及 -3%"),
-]
-
-
-def _mock_ticket(code: str = "2330") -> OrderTicket:
-    return OrderTicket(
-        code=code,
-        name="台積電",
-        last_price=1135,
-        side=Side.BUY,
-        lot=LotType.COMMON,
-        price_type="LMT",
-        price=1135,
-        quantity=1,
-        amount=113_500,
-        target_price=1185,
-        stop_loss_price=1085,
-        source=OrderSource(
-            type="ai",
-            run_id="plan-2026-05-24-0001",
-            confidence=0.82,
-            reason="外資買超，技術面強勢",
-            model="claude-haiku-4-5-20251001",
-        ),
-        risk_checks=_MOCK_RISK_CHECKS,
-        mode=AppMode.SIMULATION,
-        dry_run_preview="place_order(code='2330', side=Side.BUY, price=1135, qty=1) [SIMULATION]",
-    )
-
-
 def _build_risk_checks_from_guard(code: str, capital: float) -> list[RiskCheck]:
     """Call risk_guard module to produce 6 RiskCheck items."""
     import risk_guard
@@ -212,8 +176,12 @@ async def preview(
             mode=mode,
             dry_run_preview=dry_preview,
         )
-    except Exception:
-        return _mock_ticket(code)
+    except Exception as e:
+        # 原本回一張寫死的委託單，含假的「風控檢查全部通過」。
+        raise HTTPException(
+            status_code=503,
+            detail=f"無法產生 {code} 的委託預覽：{e}",
+        ) from e
 
 
 def _execute_ticket(ticket: OrderTicket, order_id: str, tg_msg_id: str | None) -> OrderResult:

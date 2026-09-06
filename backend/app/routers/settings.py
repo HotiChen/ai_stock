@@ -155,35 +155,9 @@ def _build_real_settings() -> AppSettings | None:
 
 # ── 預設 mock（當 config 讀取失敗時使用）───────────────────────────────────
 
-_mock_settings = AppSettings(
-    budget=1_000_000,
-    order_hard_limit=200_000,
-    daily_max_loss_pct=0.03,
-    max_position_ratio=0.2,
-    max_sector_ratio=0.4,
-    entry_confidence_threshold=0.65,
-    default_stop_loss_pct=0.03,
-    model_premarket="claude-haiku-4-5-20251001",
-    model_dashboard="claude-haiku-4-5-20251001",
-    model_chat="claude-sonnet-4-6",
-    mode=AppMode.SIMULATION,
-    notify=NotifySettings(
-        telegram=TelegramChannel(enabled=False, chat_id="", levels=[AlertLevel.HIGH]),
-        email=EmailChannel(enabled=False, address="", levels=[AlertLevel.HIGH]),
-        desktop=DesktopChannel(enabled=True, levels=[AlertLevel.HIGH, AlertLevel.MED]),
-        ios_push=IosPushChannel(enabled=False, device_token="", levels=[AlertLevel.HIGH]),
-        slack=SlackChannel(enabled=False, webhook="", levels=[AlertLevel.HIGH]),
-    ),
-    blacklist=[],
-    theme="dark",
-    language="zh-TW",
-    api_keys=ApiKeys(anthropic="sk-***", shioaji="***", telegram="***"),
-    monitor_poll_seconds=30,
-    db_path="ai_stock/data/research.db",
-    version="0.1.0",
-)
-
-
+#: 使用者在 UI 改過的設定（只存在記憶體，重啟後回到 config.py 的值）。
+#: 這不是「已保存」——寫回 .env 尚未實作。
+_settings_override: AppSettings | None = None
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 
@@ -191,9 +165,18 @@ _mock_settings = AppSettings(
 async def get_settings(
     current_user: User = Depends(get_current_user),
 ) -> AppSettings:
-    """讀取真實 config.py 值；失敗時降級回 mock。"""
+    """讀取真實 config.py 值。
+
+    讀不到就回 503——原本降級回一組預設值，畫面顯示的設定與系統實際
+    在用的不一致，而且看不出來。
+    """
     real = _build_real_settings()
-    return real if real is not None else _mock_settings
+    if real is None:
+        raise HTTPException(
+            status_code=503,
+            detail="讀不到系統設定（config.py 是否可 import？）",
+        )
+    return _settings_override or real
 
 
 @router.patch("/", response_model=AppSettings)
@@ -201,15 +184,23 @@ async def patch_settings(
     patch: SettingsPatch,
     current_user: User = Depends(get_current_user),
 ) -> AppSettings:
-    """更新設定（Wave 4 前保留 mock，in-memory 修改）。"""
-    global _mock_settings
-    # 先嘗試讀真實設定，再覆蓋
-    base = _build_real_settings() or _mock_settings
+    """更新設定。
+
+    ⚠ 目前只改記憶體，不寫回 .env——重啟後會回到 config.py 的值。
+    這是已知限制，不是「設定已保存」。
+    """
+    global _settings_override
+    base = _build_real_settings()
+    if base is None:
+        raise HTTPException(
+            status_code=503,
+            detail="讀不到系統設定，無法更新",
+        )
     updated = base.model_copy(
         update={k: v for k, v in patch.model_dump(exclude_unset=True).items() if v is not None}
     )
-    _mock_settings = updated
-    return _mock_settings
+    _settings_override = updated
+    return _settings_override
 
 
 @router.post("/toggle-mode")
@@ -218,13 +209,14 @@ async def toggle_mode(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """切換模擬/真實模式（需 email 全文確認）。"""
-    global _mock_settings
+    global _settings_override
     if req.confirm_email != current_user.email:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="confirm_email does not match your account email",
         )
-    _mock_settings = _mock_settings.model_copy(update={"mode": req.target})
+    _settings_override = (_settings_override or _build_real_settings()).model_copy(
+        update={"mode": req.target})
     # 嘗試寫入 env（best-effort，Wave 4 完整實作）
     try:
         sim_val = "true" if req.target == AppMode.SIMULATION else "false"

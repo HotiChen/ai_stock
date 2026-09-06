@@ -1,10 +1,12 @@
 """chat.py — Wave 4-I upgrade.
 
 POST /api/chat   SSE streaming response using chat_agent.call_anthropic_chat
-                 or mock character-by-character fallback.
-GET  /api/chat/history  → ChatMessage[] from learning_db or mock.
+                 失敗時把錯誤訊息串回去，不回假答案。
+GET  /api/chat/history  → ChatMessage[] from learning_db（取不到回空陣列）。
 """
 from __future__ import annotations
+
+import logging
 
 import asyncio
 import json
@@ -14,6 +16,8 @@ import uuid
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends
+
+log = logging.getLogger(__name__)
 from fastapi.responses import StreamingResponse
 
 from ..deps import get_current_user
@@ -44,47 +48,6 @@ def _make_id() -> str:
 
 
 # ── Mock fallback ─────────────────────────────────────────────────────────────
-
-_MOCK_HISTORY: list[ChatMessage] = [
-    ChatMessage(
-        id="msg-hist-001",
-        role="user",
-        content="今天台積電走勢如何？",
-        ts="2026-05-24T10:00:00+08:00",
-    ),
-    ChatMessage(
-        id="msg-hist-002",
-        role="assistant",
-        content="台積電今日表現強勁，突破季線後量能放大，外資持續買超，AI 晶片需求動能未見衰退。",
-        ts="2026-05-24T10:00:03+08:00",
-        model="claude-sonnet-4-6",
-    ),
-]
-
-
-async def _mock_stream(req: ChatRequest):
-    """Character-by-character mock SSE when real agent fails."""
-    last_content = req.messages[-1].content if req.messages else ""
-    keyword = last_content[:10] if last_content else "目前持倉"
-    reply = (
-        f"根據目前持倉分析，建議關注 {keyword} 相關板塊。"
-        "技術面顯示均線多頭排列，RSI 未達超買區，外資買超動能持續，"
-        "可考慮分批建倉並設定 5% 停損保護資本。"
-    )
-    msg_id = _make_id()
-    ts = _now_iso()
-    for i, char in enumerate(reply):
-        chunk = ChatMessage(
-            id=f"{msg_id}-{i:04d}",
-            role="assistant",
-            content=char,
-            ts=ts,
-            model="mock",
-        )
-        yield f"data: {json.dumps(chunk.model_dump(), ensure_ascii=False)}\n\n"
-        await asyncio.sleep(0.03)
-    yield "data: [DONE]\n\n"
-
 
 # ── Real SSE stream ───────────────────────────────────────────────────────────
 
@@ -132,13 +95,19 @@ async def _real_stream(req: ChatRequest):
 
 
 async def _sse_generator(req: ChatRequest):
-    """Try real agent; on any error, fall back to mock stream."""
+    """真實 agent 失敗時把錯誤說出來。
+
+    原本降級到 _mock_stream，於是 AI 顧問會回一段寫好的假答案——
+    使用者以為 AI 讀過他的交易紀錄，實際上沒有。
+    """
     try:
         async for chunk in _real_stream(req):
             yield chunk
-    except Exception:
-        async for chunk in _mock_stream(req):
-            yield chunk
+    except Exception as e:
+        log.warning("chat stream failed: %s", e)
+        msg = f"AI 顧問目前不可用：{e}"
+        yield f"data: {json.dumps({'delta': msg}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
 
 
 # ── Real chat history ─────────────────────────────────────────────────────────
@@ -186,7 +155,7 @@ async def chat(
     POST /api/chat → SSE streaming ChatMessage chunks.
 
     try: chat_agent.call_anthropic_chat (in asyncio.to_thread)
-    except: mock character-by-character reply
+    except: 串回錯誤訊息
     """
     return StreamingResponse(
         _sse_generator(req),
@@ -205,10 +174,10 @@ async def chat_history(
     """
     GET /api/chat/history → ChatMessage[]
 
-    try: learning_db recent prediction log as pseudo history
-    except: mock history
+    取不到就回空陣列——原本回一段寫死的問答。
     """
     try:
         return _load_real_history(limit=20)
-    except Exception:
-        return _MOCK_HISTORY
+    except Exception as e:
+        log.warning("chat history failed: %s", e)
+        return []

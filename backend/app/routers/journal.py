@@ -5,10 +5,14 @@ Every endpoint always returns 200.
 """
 from __future__ import annotations
 
+import logging
+
 import os
 import sys
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+
+log = logging.getLogger(__name__)
 
 from ..deps import get_current_user
 from ..schemas.auth import User
@@ -25,47 +29,6 @@ if _AI_STOCK_DIR not in sys.path:
     sys.path.insert(0, _AI_STOCK_DIR)
 
 # ── Mock ──────────────────────────────────────────────────────────────────────
-
-_MOCK_ENTRIES = [
-    JournalEntry(
-        id=1,
-        date="2026-05-23",
-        code="2330",
-        name="台積電",
-        pnl=8900,
-        lesson="台積電突破季線後持有至目標價，策略執行良好。下次可考慮提前在突破點建倉。",
-        rule_updated=False,
-        tags=["突破策略", "台積電", "成功案例"],
-        related_trade_id=100,
-    ),
-    JournalEntry(
-        id=2,
-        date="2026-05-21",
-        code="2303",
-        name="聯電",
-        pnl=-3400,
-        lesson="聯電停損觸發，進場信心不足，次日反彈。應更嚴格確認信心門檻。",
-        rule_updated=True,
-        tags=["停損", "反省", "信心門檻"],
-    ),
-]
-
-_MOCK_CHAT_HISTORY = [
-    ChatMessage(
-        id="msg-001",
-        role="user",
-        content="今天台積電走勢如何？",
-        ts="2026-05-24T10:00:00+08:00",
-    ),
-    ChatMessage(
-        id="msg-002",
-        role="assistant",
-        content="台積電今日表現強勁，突破季線後量能放大，外資持續買超...",
-        ts="2026-05-24T10:00:03+08:00",
-        model="claude-sonnet-4-6",
-    ),
-]
-
 
 # ── Real data builder ─────────────────────────────────────────────────────────
 
@@ -115,12 +78,13 @@ async def list_journal(current_user: User = Depends(get_current_user)) -> list[J
     GET /api/journal → JournalEntry[]
 
     try: learning_db.recent_entries()
-    except: mock entries
+    取不到就回空陣列——原本回四筆寫死的檢討紀錄（含編造的操作心得）。
     """
     try:
         return _load_real_entries(limit=50)
-    except Exception:
-        return _MOCK_ENTRIES
+    except Exception as e:
+        log.warning("journal entries failed: %s", e)
+        return []
 
 
 @router.post("/", response_model=JournalEntry)
@@ -140,5 +104,9 @@ async def create_journal(
 
 @router.get("/chat/history", response_model=list[ChatMessage])
 async def chat_history(current_user: User = Depends(get_current_user)) -> list[ChatMessage]:
-    """GET /api/journal/chat/history → ChatMessage[]"""
-    return _MOCK_CHAT_HISTORY
+    """GET /api/journal/chat/history → ChatMessage[]
+
+    對話歷史尚未持久化，回空陣列。原本回一段寫死的問答，看起來像
+    AI 已經跟你談過這些交易。
+    """
+    return []
