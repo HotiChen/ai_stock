@@ -132,7 +132,7 @@ export default function ChartPage() {
   const [closingPos, setClosingPos] = useState(false);
 
   // WS live updates
-  const { data: wsData } = useWebSocket<ChartView>(`/ws/daytrade/${code}/chart`);
+  const { data: wsData, wsError } = useWebSocket<ChartView>(`/ws/daytrade/${code}/chart`);
   useEffect(() => {
     if (wsData) setChartData(wsData);
   }, [wsData]);
@@ -160,7 +160,10 @@ export default function ChartPage() {
   }, []);
 
   const state = queryState({
-    isLoading: loading, isError: !!loadError, error: loadError, isEmpty: !chartData,
+    isLoading: loading,
+    isError: !!loadError || (!chartData && !!wsError),
+    error: loadError ?? (wsError ? new Error(wsError) : undefined),
+    isEmpty: !chartData,
     what: `${code} 的 K 線`,
     emptyDetail: '需要當日 tick 資料；盤前或非交易日不會有。原本這裡畫的是程式產生的假 K 線。',
   });

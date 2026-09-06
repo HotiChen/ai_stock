@@ -1,13 +1,12 @@
 """ws/chart.py — Wave 2-D upgrade.
 
 WebSocket /ws/daytrade/{code}/chart: push ChartView with ticks every 5 s.
-Tries to use daytrading_analyzer for real data; falls back to mock tick stream.
+只推真實 tick。取不到就明說，不生成隨機走勢。
 """
 from __future__ import annotations
 
 import asyncio
 import os
-import random
 import sys
 from datetime import datetime, timedelta
 
@@ -28,38 +27,6 @@ if _AI_STOCK_DIR not in sys.path:
     sys.path.insert(0, _AI_STOCK_DIR)
 
 # ── Mock tick helpers ─────────────────────────────────────────────────────────
-
-_BASE_TICKS = [
-    Tick(t="09:00", open=1120, high=1122, low=1118, close=1121, volume=1250),
-    Tick(t="09:30", open=1121, high=1128, low=1120, close=1126, volume=1480),
-    Tick(t="10:00", open=1126, high=1135, low=1125, close=1132, volume=1820),
-    Tick(t="10:30", open=1132, high=1142, low=1130, close=1135, volume=2100),
-]
-
-
-def _next_tick(last_tick: Tick, idx: int) -> Tick:
-    """Generate the next mock tick based on the last one."""
-    base_time = datetime.strptime(last_tick.t, "%H:%M")
-    next_time = base_time + timedelta(minutes=5)
-    if next_time.hour >= 14:
-        next_time = datetime.strptime("09:00", "%H:%M")
-
-    last_close = last_tick.close
-    random.seed(idx)
-    delta = random.uniform(-8, 10)
-    new_close = round(last_close + delta, 0)
-    new_open = last_close
-    new_high = max(new_open, new_close) + random.uniform(0, 5)
-    new_low = min(new_open, new_close) - random.uniform(0, 5)
-    return Tick(
-        t=next_time.strftime("%H:%M"),
-        open=new_open,
-        high=round(new_high, 0),
-        low=round(new_low, 0),
-        close=new_close,
-        volume=random.randint(800, 2500),
-    )
-
 
 def _build_chart_view(code: str, ticks: list[Tick]) -> dict:
     closes = [t.close for t in ticks]
@@ -131,33 +98,28 @@ async def ws_chart(websocket: WebSocket, code: str) -> None:
         await websocket.close(code=4401)
         return
     await websocket.accept()
-    ticks = list(_BASE_TICKS)
-    tick_idx = len(ticks)
+    # 原本沒有真實 tick 時會用 _next_tick() 以 random.uniform(-8, 10) 生成
+    # 下一根 K 棒，每 5 秒推一次——畫面上是一條會動的、完全隨機的假走勢。
     try:
-        # Try to seed with real ticks
         real = _fetch_real_ticks(code)
-        if real:
-            ticks = real
-            tick_idx = len(ticks)
-
-        # Send initial chart view
-        await websocket.send_json(_build_chart_view(code, ticks))
+        if not real:
+            await websocket.send_json({
+                "error": "no_data",
+                "detail": f"取不到 {code} 的當日 tick。盤前或非交易日不會有。",
+            })
+            return
+        await websocket.send_json(_build_chart_view(code, real))
 
         while True:
             await asyncio.sleep(5)
-            # Try to refresh from real source each cycle
             real = _fetch_real_ticks(code)
-            if real:
-                ticks = real
-            else:
-                new_tick = _next_tick(ticks[-1], tick_idx)
-                ticks.append(new_tick)
-                tick_idx += 1
-                # Keep only last 60 ticks for memory
-                if len(ticks) > 60:
-                    ticks = ticks[-60:]
-
-            await websocket.send_json(_build_chart_view(code, ticks))
+            if not real:
+                await websocket.send_json({
+                    "error": "no_data",
+                    "detail": f"{code} 的 tick 串流中斷。",
+                })
+                continue
+            await websocket.send_json(_build_chart_view(code, real))
     except WebSocketDisconnect:
         pass
     except Exception:

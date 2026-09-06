@@ -12,6 +12,8 @@ single-execution guard live in services/order_confirm.py.
 """
 from __future__ import annotations
 
+import logging
+
 import os
 import sys
 import uuid
@@ -39,6 +41,8 @@ class ConfirmByCodeRequest(BaseModel):
 
 
 router = APIRouter(prefix="/api/order", tags=["order"])
+
+log = logging.getLogger(__name__)
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 
@@ -125,7 +129,7 @@ def _now_taipei_iso() -> str:
 
 @router.post("/preview", response_model=OrderTicket)
 async def preview(
-    code: str = "2330",
+    code: str,
     side: str = "buy",
     price: float = 0.0,
     quantity: int = 1,
@@ -150,7 +154,14 @@ async def preview(
         lot_str = calc_lot_type(capital * 0.05, price) if price > 0 else "common"
         lot = LotType.INTRADAY_ODD if lot_str == "intraday_odd" else LotType.COMMON
 
-        effective_price = price if price > 0 else 1135.0
+        # 原本沒給價格時預設 1135.0（台積電的 mock 價），於是任何一檔股票
+        # 的委託預覽金額都是照 1,135 算的。沒有價格就不能算金額。
+        if price <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{code} 未提供價格，無法產生委託預覽。",
+            )
+        effective_price = price
         amount = int(effective_price * quantity * (1000 if lot == LotType.COMMON else 1))
 
         dry_preview = (
@@ -499,21 +510,8 @@ async def today_trades(current_user: User = Depends(get_current_user)) -> list[T
                 sector="未知",
             ))
         return result
-    except Exception:
-        return [
-            Trade(
-                id=1,
-                time="09:05:32",
-                date=date.today().isoformat(),
-                code="2330",
-                name="台積電",
-                side=Side.BUY,
-                quantity=1,
-                price=1135,
-                amount=113_500,
-                lot=LotType.COMMON,
-                status="filled",
-                order_id="ord-mock-0001",
-                sector="半導體",
-            ),
-        ]
+    except Exception as e:
+        # 原本回一筆假的「台積電 1,135 已成交」。成交紀錄尤其不能編——
+        # 那是對帳的依據。
+        log.warning("trades list failed: %s", e)
+        return []

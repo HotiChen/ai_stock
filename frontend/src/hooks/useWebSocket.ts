@@ -1,7 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+/** 後端在取不到真實資料時推的 payload，而不是一份假快照。 */
+interface WsError {
+  error: string;
+  detail?: string;
+}
+
+function isWsError(v: unknown): v is WsError {
+  return !!v && typeof v === 'object' && 'error' in (v as Record<string, unknown>);
+}
+
 export function useWebSocket<T>(url: string, onMessage?: (data: T) => void) {
   const [data, setData] = useState<T | null>(null);
+  const [wsError, setWsError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -33,9 +44,17 @@ export function useWebSocket<T>(url: string, onMessage?: (data: T) => void) {
       ws.onmessage = (e: MessageEvent) => {
         if (!mountedRef.current) return;
         try {
-          const parsed = JSON.parse(e.data) as T;
-          setData(parsed);
-          onMessageRef.current?.(parsed);
+          const parsed: unknown = JSON.parse(e.data);
+          // 後端明說「沒有資料」時不要當成快照塞進去——原本 WS 每 30 秒
+          // 推一份寫死的假快照，會把 REST 那邊誠實的空狀態蓋掉。
+          if (isWsError(parsed)) {
+            setWsError(parsed.detail || parsed.error);
+            setData(null);
+            return;
+          }
+          setWsError(null);
+          setData(parsed as T);
+          onMessageRef.current?.(parsed as T);
         } catch {
           // ignore malformed JSON
         }
@@ -80,5 +99,5 @@ export function useWebSocket<T>(url: string, onMessage?: (data: T) => void) {
     };
   }, [connect]);
 
-  return { data, connected };
+  return { data, connected, wsError };
 }

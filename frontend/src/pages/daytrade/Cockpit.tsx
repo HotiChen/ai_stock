@@ -190,7 +190,7 @@ export default function Cockpit() {
   const [closingAll, setClosingAll] = useState(false);
 
   // WebSocket live feed
-  const { data: wsData } = useWebSocket<DaytradeLive>('/ws/daytrade');
+  const { data: wsData, wsError } = useWebSocket<DaytradeLive>('/ws/daytrade');
 
   // Merge WS data
   useEffect(() => {
@@ -218,7 +218,10 @@ export default function Cockpit() {
   }, []);
 
   const state = queryState({
-    isLoading: loading, isError: !!loadError, error: loadError, isEmpty: !liveData,
+    isLoading: loading,
+    isError: !!loadError || (!liveData && !!wsError),
+    error: loadError ?? (wsError ? new Error(wsError) : undefined),
+    isEmpty: !liveData,
     what: '當沖實況',
     emptyDetail: '09:10 進場後才會有持倉；盤後 main.py 停止推送時這裡也會是空的。',
   });
