@@ -3,95 +3,15 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import AppChrome from '../../components/AppChrome';
 import GuardRow from '../../components/GuardRow';
-import TelegramMsg from '../../components/TelegramMsg';
 import Eyebrow from '../../components/Eyebrow';
 import Pill from '../../components/Pill';
 import Button from '../../components/Button';
 import { api } from '../../api';
-import type { OrderTicket, OrderResult, Side, LotType, RiskCheck } from '../../types';
+import DataState from '../../components/DataState';
+import type { OrderTicket, OrderResult, Side, LotType } from '../../types';
 
 // ── Mock data ───────────────────────────────────────────────────
-const MOCK_CHECKS: RiskCheck[] = [
-  { key: '單筆上限', sub: '≤ NT$200,000', status: 'pass', detail: 'NT$113,500 ✓' },
-  { key: '資金充足', sub: '可用 NT$363,600', status: 'pass', detail: '使用率 31.2%' },
-  { key: '板塊集中度', sub: '半導體 ≤ 50%', status: 'warn', detail: '目前 48.5% (近限)' },
-  { key: '信心門檻', sub: '≥ 0.75', status: 'pass', detail: '0.86 ✓' },
-  { key: '黑名單', sub: '標的未列入', status: 'pass', detail: '未在黑名單' },
-  { key: '13:25 距離', sub: '≥ 30 分鐘', status: 'pass', detail: '剩餘 2h42m ✓' },
-];
-
-const MOCK_TICKET: OrderTicket = {
-  code: '2330',
-  name: '台積電',
-  last_price: 975,
-  side: 'buy',
-  lot: 'common',
-  price_type: 'LMT',
-  price: 975,
-  quantity: 1,
-  amount: 975000,
-  target_price: 1010,
-  stop_loss_price: 940,
-  source: {
-    type: 'ai',
-    run_id: 'RUN-20260525-0830',
-    confidence: 0.86,
-    reason: '突破 MA20 並伴隨量能放大，RSI 60 多頭格局，板塊資金持續流入',
-    model: 'claude-sonnet-4-6',
-  },
-  risk_checks: MOCK_CHECKS,
-  mode: 'simulation',
-  dry_run_preview: `api.place_order(
-  api_key   = "***",
-  contract  = contracts.Stocks["2330"],
-  order     = Order(
-    action         = Action.Buy,
-    price          = 975,
-    quantity       = 1,
-    price_type     = StockPriceType.LimitPrice,
-    order_type     = OrderType.ROD,
-    first_sell     = False,
-  )
-)
-# DRY RUN — 模擬模式不送真實委託
-# 預期回傳: {"order_id": "mock-xxx", "status": "pending"}`,
-};
-
 // ── Telegram mock messages ──────────────────────────────────────
-interface TgMsg {
-  role: 'bot' | 'user';
-  content: string;
-  time: string;
-  isWarning?: boolean;
-  buttons?: { label: string }[];
-}
-
-const MOCK_TG_MSGS: TgMsg[] = [
-  {
-    role: 'bot',
-    content: '📊 AI 盤前選股完成\n\n🎯 2330 台積電\n💰 進場：NT$975\n🎯 目標：NT$1,010 (+3.59%)\n🛡 停損：NT$940 (-3.59%)\n\n信心指數：0.86（高）\n理由：突破 MA20，量能放大',
-    time: '08:30:05',
-    buttons: [{ label: '✅ 批准' }, { label: '❌ 跳過' }, { label: '✏️ 調整' }],
-  },
-  {
-    role: 'user',
-    content: '✅ 批准',
-    time: '08:31:22',
-  },
-  {
-    role: 'bot',
-    content: '✅ 委託已送出\n\n成交：NT$975 × 1 張\n市值：NT$975,000\n訂單編號：mock-20260525-001',
-    time: '09:15:44',
-  },
-  {
-    role: 'bot',
-    content: '⚠️ 風險提醒\n\n2330 台積電 接近停損\n現價：NT$952（-2.36%）\n停損價：NT$940（距 -1.26%）\n\n建議操作：持倉觀察 / 手動平倉',
-    time: '10:42:15',
-    isWarning: true,
-    buttons: [{ label: '手動平倉' }, { label: '調整停損' }, { label: '忽略' }],
-  },
-];
-
 // ── Helpers ─────────────────────────────────────────────────────
 function fmtMoney(n: number) {
   return `NT$${n.toLocaleString('zh-TW')}`;
@@ -214,7 +134,9 @@ export default function Order() {
   const [sl, setSl] = useState(940);
 
   // Preview
-  const [ticket, setTicket] = useState<OrderTicket>(MOCK_TICKET);
+  // 原本預載一張寫死的委託單（含假的風控檢查結果）。沒有 preview
+  // 回來之前不該顯示任何「檢查通過」。
+  const [ticket, setTicket] = useState<OrderTicket | null>(null);
   const [loading, setLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -224,6 +146,7 @@ export default function Order() {
   // Modals
   const [showSubmit, setShowSubmit] = useState(false);
   const [_result, setResult] = useState<OrderResult | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Computed amount
   const amount = lot === 'common' ? price * qty * 1000 : price * qty;
@@ -257,16 +180,23 @@ export default function Order() {
       setStepStatus((prev) => prev.map((s, idx) => idx === i ? 'done' : s));
     }
     try {
+      if (!ticket) throw new Error('尚未取得委託預覽，無法送出');
       const r = await api.submitOrder(ticket);
       setResult(r);
-    } catch {
-      setResult({ order_id: 'mock-sim-001', status: 'submitted' });
+    } catch (e) {
+      // 原本這裡在送單失敗時偽造一個 order_id 並照樣導回駕駛艙，
+      // 畫面上完全看不出這張單根本沒送出去。
+      setSubmitError(e instanceof Error ? e.message : String(e));
+      setStepStatus(STEPS.map(() => 'idle'));
+      setShowSubmit(false);
+      return;
     }
     setShowSubmit(false);
     navigate('/daytrade');
   }, [ticket, navigate]);
 
-  const passCount = ticket.risk_checks.filter((c) => c.status === 'pass').length;
+  const checks = ticket?.risk_checks ?? [];
+  const passCount = checks.filter((c) => c.status === 'pass').length;
   const isBuy = side === 'buy';
 
   return (
@@ -294,10 +224,10 @@ export default function Order() {
             <div style={{ padding: '10px 12px', border: '1px solid var(--hair)', background: 'var(--surface-2)' }}>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
                 <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, fontSize: 16, color: 'var(--ink)' }}>{code}</span>
-                <span style={{ fontSize: 12, color: 'var(--muted)' }}>台積電</span>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>{ticket?.name ?? ''}</span>
               </div>
               <div style={{ fontFamily: 'var(--font-mono)', fontFeatureSettings: '"tnum" 1', fontSize: 18, fontWeight: 500, color: 'var(--ink)', marginTop: 2 }}>
-                {ticket.last_price.toLocaleString()}
+                {ticket ? ticket.last_price.toLocaleString() : '—'}
                 <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 6 }}>現價</span>
               </div>
             </div>
@@ -459,10 +389,10 @@ export default function Order() {
             </div>
 
             {/* AI 來源卡 */}
-            {ticket.source.type === 'ai' && (
+            {ticket?.source.type === 'ai' && (
               <div style={{ padding: '10px 12px', background: 'var(--gold-soft)', border: '1px solid var(--gold)' }}>
                 <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--gold)', marginBottom: 6, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                  AI 來源 · {ticket.source.model ?? '—'}
+                  AI 來源 · {ticket!.source.model ?? '—'}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                   <span style={{ fontSize: 11, color: 'var(--muted)' }}>信心</span>
@@ -470,11 +400,11 @@ export default function Order() {
                     fontFamily: 'var(--font-mono)', fontFeatureSettings: '"tnum" 1',
                     fontSize: 16, fontWeight: 500, color: 'var(--gold)',
                   }}>
-                    {((ticket.source.confidence ?? 0) * 100).toFixed(0)}%
+                    {((ticket!.source.confidence ?? 0) * 100).toFixed(0)}%
                   </span>
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--ink-2)', lineHeight: 1.5 }}>
-                  {ticket.source.reason}
+                  {ticket!.source.reason}
                 </div>
               </div>
             )}
@@ -486,12 +416,12 @@ export default function Order() {
           <div style={{ padding: '8px 14px', borderBottom: '1px solid var(--hair)', flexShrink: 0 }}>
             <Eyebrow label="風控檢查 · 即時" right={
               <Pill
-                color={passCount === ticket.risk_checks.length ? 'var(--down)' : 'var(--gold)'}
-                bg={passCount === ticket.risk_checks.length ? 'var(--down-soft)' : 'var(--gold-soft)'}
-                border={passCount === ticket.risk_checks.length ? 'var(--down)' : 'var(--gold)'}
+                color={passCount === checks.length ? 'var(--down)' : 'var(--gold)'}
+                bg={passCount === checks.length ? 'var(--down-soft)' : 'var(--gold-soft)'}
+                border={passCount === checks.length ? 'var(--down)' : 'var(--gold)'}
                 size={10}
               >
-                {passCount}/{ticket.risk_checks.length} 通過
+                {passCount}/{checks.length} 通過
                 {loading && ' ···'}
               </Pill>
             } />
@@ -499,7 +429,7 @@ export default function Order() {
 
           {/* GuardRows */}
           <div style={{ flexShrink: 0 }}>
-            {ticket.risk_checks.map((check, i) => (
+            {checks.map((check, i) => (
               <GuardRow key={i} check={check} index={i} />
             ))}
           </div>
@@ -524,7 +454,7 @@ export default function Order() {
               lineHeight: 1.6, borderRadius: 0,
               border: '1px solid var(--dark-hair)',
             }}>
-              {ticket.dry_run_preview}
+              {ticket?.dry_run_preview ?? '尚未取得委託預覽（後端 :1234 是否在執行？）'}
             </pre>
           </div>
         </div>
@@ -539,22 +469,19 @@ export default function Order() {
             } />
           </div>
 
-          {/* Mock Telegram chat */}
+          {/* Telegram 鏡像 */}
           <div style={{
             flex: 1, overflowY: 'auto',
             background: '#e6dfd1',
             padding: '8px 0',
           }}>
-            {MOCK_TG_MSGS.map((msg, i) => (
-              <TelegramMsg
-                key={i}
-                role={msg.role}
-                content={msg.content}
-                time={msg.time}
-                isWarning={msg.isWarning}
-                buttons={msg.buttons}
-              />
-            ))}
+            {/* 原本這裡是一段寫死的示範對話，看起來像 Telegram 真的問過你。
+                後端尚未提供這個鏡像的端點（spec/BACKEND_MAPPING 未定義）。 */}
+            <DataState
+              compact
+              title="Telegram 鏡像尚未接上後端"
+              detail="實際的二次確認仍會送到你的 Telegram；這裡只是鏡像顯示，還沒有資料來源。"
+            />
           </div>
 
           {/* Sticky bottom actions */}
@@ -599,14 +526,25 @@ export default function Order() {
               fontSize: 10, color: 'var(--muted-2)',
               lineHeight: 1.5, textAlign: 'center',
             }}>
-              ▴ 確認前將二次寄送 Telegram · {ticket.mode === 'simulation' ? '模擬模式不會動用真實資金' : '真實模式將送出交易所'}
+              ▴ 確認前將二次寄送 Telegram · {ticket ? (ticket.mode === 'simulation' ? '模擬模式不會動用真實資金' : '真實模式將送出交易所') : '尚未取得委託預覽'}
             </div>
           </div>
         </div>
       </div>
 
+      {submitError && (
+        <div style={{ padding: '0 16px 12px' }}>
+          <DataState
+            isError
+            compact
+            title="委託沒有送出"
+            detail={submitError}
+          />
+        </div>
+      )}
+
       {/* Submit modal */}
-      {showSubmit && (
+      {showSubmit && ticket && (
         <SubmitModal
           ticket={{ ...ticket, side, lot, price_type: priceType, price, quantity: qty, amount, target_price: tp, stop_loss_price: sl }}
           onClose={() => setShowSubmit(false)}

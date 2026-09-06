@@ -4,6 +4,7 @@ import AppChrome from '../components/AppChrome';
 import EquityCurve from '../components/EquityCurve';
 import MonthlyHeatmap from '../components/MonthlyHeatmap';
 import { api } from '../api';
+import DataState from '../components/DataState';
 import type { BacktestResult, BacktestParams } from '../types';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -49,33 +50,6 @@ interface PaperRecord {
 }
 
 // ── Backtest mock ─────────────────────────────────────────────────────────────
-
-const MOCK_RESULT: BacktestResult = {
-  id: 'BT-20260529-001',
-  range: { start: '2026-01-01', end: '2026-05-29' },
-  initial_capital: 1000000,
-  slippage: 0.1,
-  strategy: 'AI TopN v2.1',
-  trades: 147,
-  wins: 93,
-  losses: 54,
-  winrate: 0.633,
-  total_pnl: 287400,
-  total_pnl_pct: 0.2874,
-  avg_win: 5820,
-  avg_loss: -2340,
-  sharpe: 1.87,
-  max_dd: -0.082,
-  beat_index_pct: 0.154,
-  monthly_returns: [0.042, 0.071, -0.018, 0.089, 0.063, 0.031],
-  equity_curve: Array.from({ length: 30 }, (_, i) => ({
-    date: new Date(Date.now() - (29 - i) * 86400000).toISOString().slice(0, 10),
-    me: 1000000 + i * 9870 + Math.sin(i * 0.3) * 12000,
-    index: 1000000 + i * 4200 + Math.sin(i * 0.2) * 8000,
-  })),
-  trades_sample: [],
-  ai_conclusion: '策略在五個月內表現優於大盤 15.4%，Sharpe 值 1.87 顯示風險調整後報酬良好。主要優勢來自高信心篩選（≥0.75）和板塊輪動。建議調整：\n\n1. 提高最小信心門檻至 0.78\n2. 加入大盤環境過濾（TAIEX > -0.5%）\n3. 對高 β 股放寬停損至 3.5%',
-};
 
 const STRATEGIES = ['AI TopN v2.1', 'AI TopN v2.0', 'Momentum Only', 'Mean Reversion'];
 
@@ -356,12 +330,14 @@ function BacktestTab() {
     slippage: 0.1,
   });
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<BacktestResult>(MOCK_RESULT);
+  // 原本一進頁面就顯示一份寫死的回測結果（+報酬、勝率、Sharpe…），
+  // 看起來像你已經跑過回測。沒跑過就該是空的。
+  const [result, setResult] = useState<BacktestResult | null>(null);
   const [editing, setEditing] = useState(false);
 
-  const kpis = [
-    { label: '累計報酬', value: `+${(result.total_pnl_pct * 100).toFixed(2)}%`, color: 'var(--up)' },
-    { label: 'vs 大盤', value: `+${(result.beat_index_pct * 100).toFixed(2)}%`, color: 'var(--up)' },
+  const kpis = result === null ? [] : [
+    { label: '累計報酬', value: `${result.total_pnl_pct >= 0 ? '+' : ''}${(result.total_pnl_pct * 100).toFixed(2)}%`, color: result.total_pnl_pct >= 0 ? 'var(--up)' : 'var(--down)' },
+    { label: 'vs 大盤', value: `${result.beat_index_pct >= 0 ? '+' : ''}${(result.beat_index_pct * 100).toFixed(2)}%`, color: result.beat_index_pct >= 0 ? 'var(--up)' : 'var(--down)' },
     { label: '勝率', value: `${(result.winrate * 100).toFixed(1)}%`, color: 'var(--fg)' },
     { label: 'Sharpe', value: result.sharpe.toFixed(2), color: 'var(--fg)' },
     { label: '最大回撤', value: `${(result.max_dd * 100).toFixed(1)}%`, color: 'var(--down)' },
@@ -386,7 +362,7 @@ function BacktestTab() {
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Params bar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '10px 16px', borderBottom: '1px solid var(--border)', background: 'var(--surface)', flexWrap: 'wrap', flexShrink: 0 }}>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>{result.id}</span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>{result?.id ?? '尚未執行回測'}</span>
         <span style={{ fontSize: 11, color: 'var(--muted)' }}>{params.start} ~ {params.end}</span>
         {STRATEGIES.map(s => (
           <button key={s} onClick={() => setParams(p => ({ ...p, strategy: s }))}
@@ -441,16 +417,21 @@ function BacktestTab() {
         <div style={{ flex: '1.6', background: 'var(--bg)', padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div>
             <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono)', marginBottom: 8 }}>EQUITY CURVE · 策略 vs 大盤</div>
-            <EquityCurve data={result.equity_curve} />
+            {result
+              ? <EquityCurve data={result.equity_curve} />
+              : <DataState compact title="尚未執行回測"
+                  detail="設定上方參數後按「執行回測」。原本這裡預載了一份寫死的結果，看起來像你已經跑過。" />}
           </div>
           <div>
             <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono)', marginBottom: 8 }}>MONTHLY RETURNS · 月度報酬</div>
-            <MonthlyHeatmap returns={result.monthly_returns} />
+            {result
+              ? <MonthlyHeatmap returns={result.monthly_returns} />
+              : <DataState compact title="尚無月度報酬" />}
           </div>
           <div style={{ display: 'flex', gap: 24, paddingTop: 8 }}>
-            <div style={{ fontSize: 11, color: 'var(--muted)' }}>總交易 <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--fg)' }}>{result.trades}</span></div>
-            <div style={{ fontSize: 11, color: 'var(--muted)' }}>獲利 <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--up)' }}>{result.wins}</span></div>
-            <div style={{ fontSize: 11, color: 'var(--muted)' }}>虧損 <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--down)' }}>{result.losses}</span></div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>總交易 <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--fg)' }}>{result?.trades ?? '—'}</span></div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>獲利 <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--up)' }}>{result?.wins ?? '—'}</span></div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>虧損 <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--down)' }}>{result?.losses ?? '—'}</span></div>
           </div>
         </div>
         <div style={{ flex: 1, background: 'var(--bg)', display: 'flex', flexDirection: 'column', gap: 1 }}>
@@ -484,7 +465,7 @@ function BacktestTab() {
           </div>
           <div style={{ background: '#0d1117', padding: 16, margin: '0 1px 1px', borderRadius: 2 }}>
             <div style={{ fontSize: 9, color: '#666', fontFamily: 'var(--font-mono)', letterSpacing: 1, marginBottom: 8 }}>AI CONCLUSION</div>
-            <p style={{ fontSize: 12, color: '#ccc', lineHeight: 1.7, margin: 0, whiteSpace: 'pre-line' }}>{result.ai_conclusion}</p>
+            <p style={{ fontSize: 12, color: '#ccc', lineHeight: 1.7, margin: 0, whiteSpace: 'pre-line' }}>{result?.ai_conclusion ?? '執行回測後，這裡會顯示 AI 對這組參數的結論。'}</p>
           </div>
         </div>
       </div>

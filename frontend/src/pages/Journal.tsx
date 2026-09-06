@@ -3,23 +3,8 @@ import { useState, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import AppChrome from '../components/AppChrome';
 import { api } from '../api';
+import { queryState } from '../components/DataState';
 import type { JournalEntry, ChatMessage } from '../types';
-
-const MOCK_ENTRIES: JournalEntry[] = [
-  { id: 1, date: '2026-05-28', code: '2330', name: '台積電', pnl: 8400, lesson: '突破頸線後量能明顯放大，進場時機恰當。應在成交量達均量 1.5 倍以上才考慮追多，本次執行符合規則。', rule_updated: true, tags: ['突破', '量能', '成功'], related_trade_id: 101 },
-  { id: 2, date: '2026-05-28', code: '2454', name: '聯發科', pnl: -3200, lesson: '過早停損後股價反彈，停損位設置太緊（2.5%）。AI 信心 0.71 屬中段，應適度放寬停損至 3.5% 或不進場。', rule_updated: true, tags: ['停損', '信心門檻', '檢討'], related_trade_id: 102 },
-  { id: 3, date: '2026-05-27', code: '2382', name: '廣達', pnl: 5600, lesson: 'AI 預測信心 0.81，板塊順風，進出場紀律良好。此類高信心 + 板塊強勢組合應優先分配預算。', rule_updated: false, tags: ['高信心', '板塊', '成功'], related_trade_id: 103 },
-  { id: 4, date: '2026-05-27', code: '2317', name: '鴻海', pnl: -1800, lesson: '開盤跳空高開後回測，沒有等確認即追買，屬於衝動進場。應等 5 分 K 收盤確認支撐後才進場。', rule_updated: true, tags: ['追買', '衝動', '檢討'], related_trade_id: 104 },
-  { id: 5, date: '2026-05-26', code: '2308', name: '台達電', pnl: 12300, lesson: '持有至目標價後分批出場，實現預期報酬率 4.2%。遵守紀律、不貪的典範，AI TP 設置準確。', rule_updated: false, tags: ['目標價', '紀律', '成功'], related_trade_id: 105 },
-  { id: 6, date: '2026-05-26', code: '2303', name: '聯電', pnl: -900, lesson: '大盤 TAIEX 下跌 0.8% 但仍進場，未遵守大盤環境過濾規則。需加強市場環境判斷，大盤弱勢時降低交易頻率。', rule_updated: true, tags: ['大盤', '環境', '檢討'], related_trade_id: 106 },
-];
-
-const MOCK_CHAT: ChatMessage[] = [
-  { id: '1', role: 'user', content: '這週的交易有什麼需要改進的地方？', ts: '2026-05-29T09:15:00' },
-  { id: '2', role: 'assistant', content: '根據本週日誌，我觀察到三個模式：\n\n**1. 停損位設置過緊**：聯發科案例顯示 2.5% 停損在波動較大的個股上容易被洗出。建議對高波動股（β > 1.2）放寬至 3.5%。\n\n**2. 大盤過濾不夠嚴格**：聯電交易在大盤下跌 0.8% 時仍進場，這類交易整體勝率偏低。建議加入大盤 > -0.5% 的篩選條件。\n\n**3. 高信心 + 強板塊的組合表現優異**：廣達和台達電都在這個條件下獲利，應增加此類組合的預算比例。', ts: '2026-05-29T09:15:30', model: 'claude-sonnet-4-6' },
-  { id: '3', role: 'user', content: '如何調整停損規則？', ts: '2026-05-29T09:16:00' },
-  { id: '4', role: 'assistant', content: '建議的停損調整方案：\n\n**基礎停損**：維持 3% 作為預設值\n\n**動態調整**：\n- 信心 ≥ 0.80：可放寬至 3.5%（更多空間讓趨勢發展）\n- 信心 0.65–0.79：維持 3%\n- 信心 < 0.65：收緊至 2.5%（低信心時快速止損）\n\n**板塊加成**：板塊整體強勢時（板塊 change_pct > +1%），可額外放寬 0.5%\n\n這樣的動態停損已寫入 rules.py v47 建議清單，等待您確認後生效。', ts: '2026-05-29T09:16:45', model: 'claude-sonnet-4-6' },
-];
 
 function JournalCard({ entry }: { entry: JournalEntry }) {
   const isProfit = entry.pnl >= 0;
@@ -84,13 +69,15 @@ function ChatBubble({ msg }: { msg: ChatMessage }) {
 }
 
 export default function Journal() {
-  const { data: entries = MOCK_ENTRIES } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['journal'],
     queryFn: () => api.getJournal(),
     retry: false,
   });
+  const entries: JournalEntry[] = data ?? [];
 
-  const [messages, setMessages] = useState<ChatMessage[]>(MOCK_CHAT);
+  // 對話從空的開始。原本預載一段假的問答，看起來像 AI 已經跟你聊過。
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -99,10 +86,16 @@ export default function Journal() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const totalTrades = 147;
-  const winRate = 63.3;
-  const rulesVersion = 47;
-  const monthPnl = 89420;
+  // 這四個原本是寫死的（147 / 63.3 / v47 / 89420），沒有任何資料來源。
+  // 能從 entries 精確算出來的就算，算不出來的顯示 "—"——標籤也一併改成
+  // 實際在算的東西，不要用「整體勝率」這種名字去講「日誌裡那幾筆的勝率」。
+  const settled = entries.filter(e => e.pnl !== 0);
+  const wins = settled.filter(e => e.pnl > 0).length;
+  const winRate = settled.length ? (wins / settled.length) * 100 : null;
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const monthPnl = entries
+    .filter(e => (e.date ?? '').startsWith(thisMonth))
+    .reduce((sum, e) => sum + (e.pnl ?? 0), 0);
 
   async function sendMessage() {
     if (!input.trim() || streaming) return;
@@ -152,10 +145,10 @@ export default function Journal() {
       {/* Summary strip */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, background: 'var(--border)', borderBottom: '1px solid var(--border)', marginBottom: 16 }}>
         {[
-          { label: '累計交易', value: totalTrades, unit: '筆', mono: true },
-          { label: '整體勝率', value: winRate.toFixed(1), unit: '%', mono: true },
-          { label: '學習規則版本', value: `v${rulesVersion}`, unit: 'rules.py', mono: true },
-          { label: '本月學習摘要', value: `+${monthPnl.toLocaleString()}`, unit: 'NTD', mono: true },
+          { label: '日誌筆數', value: entries.length, unit: '筆', mono: true },
+          { label: '日誌勝率', value: winRate === null ? '—' : winRate.toFixed(1), unit: winRate === null ? '' : '%', mono: true },
+          { label: '學習規則版本', value: '—', unit: '尚無 API', mono: true },
+          { label: '本月日誌損益', value: monthPnl === 0 ? '—' : `${monthPnl > 0 ? '+' : ''}${monthPnl.toLocaleString()}`, unit: 'NTD', mono: true },
         ].map(kpi => (
           <div key={kpi.label} style={{ background: 'var(--bg)', padding: '12px 16px' }}>
             <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 4 }}>{kpi.label}</div>
@@ -174,7 +167,13 @@ export default function Journal() {
               匯出 CSV
             </button>
           </div>
-          {entries.map(entry => <JournalCard key={entry.id} entry={entry} />)}
+          {entries.length === 0
+            ? (queryState({
+                isLoading, isError, error, isEmpty: true, compact: true,
+                what: '學習日誌',
+                emptyDetail: '每日 13:35 收盤複盤後會寫入當日檢討。',
+              }))
+            : entries.map(entry => <JournalCard key={entry.id} entry={entry} />)}
         </div>
 
         {/* Right: AI advisor chat */}
@@ -185,6 +184,12 @@ export default function Journal() {
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {messages.length === 0 && (
+              <div style={{ fontSize: 12, color: 'var(--muted)', padding: '24px 8px', textAlign: 'center', lineHeight: 1.7 }}>
+                問 AI 顧問任何關於你的交易紀錄的問題。<br />
+                例如「這週為什麼在 2454 賠錢？」
+              </div>
+            )}
             {messages.map(msg => <ChatBubble key={msg.id} msg={msg} />)}
             {streaming && (
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>

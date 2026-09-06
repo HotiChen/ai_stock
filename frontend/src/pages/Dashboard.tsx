@@ -10,101 +10,10 @@ import ConfidenceTick from '../components/ConfidenceTick';
 import AlertRow from '../components/AlertRow';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { api } from '../api';
+import DataState from '../components/DataState';
 import type { DaytradeLive, TopNRun, Alert, Pick } from '../types';
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
-
-const MOCK_SPARK_PNL = [320, 580, 410, 760, 840, 720, 950, 1100, 1080, 1234];
-
-const MOCK_CHART_TAIEX: number[] = [
-  21050, 21080, 21120, 21090, 21140, 21180, 21220, 21200,
-  21235, 21210, 21240, 21230, 21250, 21235, 21240,
-];
-const MOCK_CHART_PORTFOLIO: number[] = [
-  100000, 100420, 100820, 100640, 101100, 101440, 101820, 101580,
-  102100, 101900, 102400, 102200, 102500, 102340, 102480,
-];
-
-const MOCK_PICKS: Pick[] = [
-  {
-    code: '2330', name: '台積電', sector: '半導體',
-    signal: 'buy', confidence: 0.86,
-    target_price: 1185, stop_loss_price: 1050, last_price: 1135, change_pct: 1.34,
-    spark: [1090, 1105, 1098, 1115, 1120, 1110, 1128, 1135],
-    reason: 'AI 訊號強力看多，外資連買三日', tags: ['黃金交叉', '量比 1.8x'],
-    action: 'approved', budget: 113500, budget_ratio: 0.15,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-  {
-    code: '2454', name: '聯發科', sector: '半導體',
-    signal: 'buy', confidence: 0.81,
-    target_price: 1350, stop_loss_price: 1200, last_price: 1270, change_pct: 0.95,
-    spark: [1240, 1248, 1255, 1250, 1260, 1265, 1268, 1270],
-    reason: 'KD 黃金交叉，MACD 翻正，外資買超', tags: ['KD 交叉', 'MACD 翻正'],
-    action: 'approved', budget: 101600, budget_ratio: 0.13,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-  {
-    code: '2382', name: '廣達', sector: 'AI 伺服器',
-    signal: 'buy', confidence: 0.78,
-    target_price: 320, stop_loss_price: 270, last_price: 295, change_pct: 2.07,
-    spark: [275, 280, 285, 278, 290, 288, 292, 295],
-    reason: 'AI 伺服器需求強勁，上升通道完整', tags: ['上升通道', 'AI 概念'],
-    action: 'pending', budget: 59000, budget_ratio: 0.08,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-  {
-    code: '2317', name: '鴻海', sector: '電子製造',
-    signal: 'buy', confidence: 0.72,
-    target_price: 230, stop_loss_price: 195, last_price: 210, change_pct: -0.47,
-    spark: [212, 210, 208, 211, 210, 209, 210, 210],
-    reason: '跌深反彈訊號，殖利率支撐', tags: ['殖利率支撐', 'RSI 超賣'],
-    action: 'observe', budget: 42000, budget_ratio: 0.06,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-  {
-    code: '2308', name: '台達電', sector: '電源管理',
-    signal: 'buy', confidence: 0.76,
-    target_price: 390, stop_loss_price: 340, last_price: 362, change_pct: 0.83,
-    spark: [355, 358, 356, 360, 362, 359, 361, 362],
-    reason: '電動車 + AI 電源雙驅動，量增有撐', tags: ['電動車', '量比 1.4x'],
-    action: 'approved', budget: 72400, budget_ratio: 0.10,
-    run_id: 'plan-2026-05-24', created_at: '2026-05-24T08:30:00Z',
-  },
-];
-
-const MOCK_ALERTS: Alert[] = [
-  {
-    id: 'a1', time: '10:41:55', level: 'high',
-    code: '2330', name: '台積電', text: '接近目標價 1185，建議觀察出場時機',
-    kind: 'target_hit', resolved: false, source: 'monitor', telegram_sent: true,
-  },
-  {
-    id: 'a2', time: '10:38:12', level: 'med',
-    code: '2454', name: '聯發科', text: '成交量異常放大 2.1x，確認趨勢強度',
-    kind: 'note', resolved: false, source: 'monitor', telegram_sent: false,
-  },
-  {
-    id: 'a3', time: '10:25:30', level: 'high',
-    code: '2382', name: '廣達', text: '突破前高 292，AI 訊號轉強',
-    kind: 'stop_warn', resolved: false, source: 'ai', telegram_sent: true,
-  },
-  {
-    id: 'a4', time: '10:15:44', level: 'low',
-    code: '2317', name: '鴻海', text: 'RSI 回至 50，中性訊號，觀察',
-    kind: 'note', resolved: true, source: 'monitor', telegram_sent: false,
-  },
-  {
-    id: 'a5', time: '09:55:08', level: 'med',
-    code: '2308', name: '台達電', text: '跳空開盤，確認缺口支撐有效',
-    kind: 'note', resolved: false, source: 'ai', telegram_sent: false,
-  },
-  {
-    id: 'a6', time: '09:32:20', level: 'high',
-    code: '2330', name: '台積電', text: '開盤強勢突破，AI 信心升至 0.88',
-    kind: 'tp', resolved: true, source: 'ai', telegram_sent: true,
-  },
-];
 
 // ─── ChartData types ──────────────────────────────────────────────────────────
 
@@ -338,19 +247,6 @@ function getSecondsToForceClose(now: Date): number {
   return Math.max(0, Math.floor((close.getTime() - now.getTime()) / 1000));
 }
 
-function generateMockLabels(range: TimeRange): string[] {
-  if (range === '1D') {
-    return ['09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
-            '12:00', '12:30', '13:00', '13:30', '13:30'];
-  }
-  if (range === '5D') {
-    return ['週一', '週一', '週二', '週二', '週三', '週三',
-            '週四', '週四', '週五', '週五', '週五'];
-  }
-  return ['5/1', '5/5', '5/8', '5/12', '5/15', '5/19',
-          '5/22', '5/24', '5/26', '5/28', '5/31'];
-}
-
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -385,43 +281,38 @@ export default function Dashboard() {
       .finally(() => setTopNLoading(false));
   }, []);
 
-  const picks: Pick[] = topN?.picks?.slice(0, 5) ?? MOCK_PICKS;
-  const alerts: Alert[] = liveData?.alerts?.slice(0, 6) ?? MOCK_ALERTS;
+  const picks: Pick[] = topN?.picks?.slice(0, 5) ?? [];
+  const alerts: Alert[] = liveData?.alerts?.slice(0, 6) ?? [];
 
-  // KPI data from live or mock
-  const pnl = liveData?.net_pnl ?? 12340;
-  const pnlPct = liveData
-    ? liveData.net_pnl / (liveData.risk?.budget ?? 1200000) * 100
-    : 0.74;
-  const freeCash = liveData?.risk?.free ?? 363600;
-  const budget = liveData?.risk?.budget ?? 1200000;
-  const cashRatioPct = (freeCash / budget * 100).toFixed(1);
-  const tradeCount = liveData ? liveData.positions.length + liveData.closed_count : 8;
-  const buySide = liveData?.positions?.filter(p => p.side === 'buy').length ?? 6;
-  const sellSide = liveData?.positions?.filter(p => p.side === 'sell').length ?? 2;
+  // 這些原本在沒有即時資料時 fallback 到寫死的數字（+12,340 損益、
+  // 363,600 現金、8 筆交易…）。畫面因此永遠「看起來正常」，而且沒有任何
+  // 方法能從畫面上分辨哪個是真的。沒有資料就顯示 "—"。
+  const DASH = '—';
+  const pnl = liveData?.net_pnl ?? null;
+  const budget = liveData?.risk?.budget ?? null;
+  const pnlPct = pnl !== null && budget ? (pnl / budget) * 100 : null;
+  const freeCash = liveData?.risk?.free ?? null;
+  const cashRatioPct = freeCash !== null && budget
+    ? ((freeCash / budget) * 100).toFixed(1) : null;
+  const tradeCount = liveData ? liveData.positions.length + liveData.closed_count : null;
+  const buySide = liveData?.positions?.filter(p => p.side === 'buy').length ?? null;
+  const sellSide = liveData?.positions?.filter(p => p.side === 'sell').length ?? null;
 
   const avgConfidence = picks.length > 0
     ? picks.reduce((acc, p) => acc + p.confidence, 0) / picks.length
-    : 0.74;
+    : null;
   const highConfCount = picks.filter(p => p.confidence >= 0.75).length;
 
   const countdownSec = liveData?.countdown_seconds ?? getSecondsToForceClose(now);
   const countdownStr = formatCountdownHMS(countdownSec);
   const isArmed = countdownSec > 0 && countdownSec < 7200; // within 2 hours
 
-  // Chart data
-  const chartData: ChartData = {
-    taiex: MOCK_CHART_TAIEX,
-    portfolio: MOCK_CHART_PORTFOLIO,
-    labels: generateMockLabels(timeRange),
-    markers: [
-      { index: 2, kind: 'B' },
-      { index: 8, kind: 'TP' },
-    ],
-  };
+  // 走勢圖原本畫的是兩條寫死的曲線。後端還沒有這個端點（spec/BACKEND_MAPPING
+  // 未定義 /api/dashboard/chart），畫假線比不畫更糟——不畫至少誠實。
+  const chartData: ChartData | null = null;
 
-  // KPI sparkline
-  const kpiSpark = MOCK_SPARK_PNL;
+  // KPI 迷你走勢圖同理：原本是寫死的 [320, 580, 410, …]
+  const kpiSpark: number[] = [];
 
   return (
     <AppChrome title="Dashboard 總覽" eyebrow="02">
@@ -443,24 +334,24 @@ export default function Dashboard() {
             <Kpi
               label="今日損益"
               value={
-                <span style={{ color: pnl >= 0 ? 'var(--up)' : 'var(--down)' }}>
-                  {pnl >= 0 ? '+' : ''}{fmt(pnl)}
+                <span style={{ color: pnl === null ? 'var(--muted)' : pnl >= 0 ? 'var(--up)' : 'var(--down)' }}>
+                  {pnl === null ? DASH : `${pnl >= 0 ? '+' : ''}${fmt(pnl)}`}
                 </span>
               }
               sub={
                 <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <Pill
-                    color={pnlPct >= 0 ? 'var(--up)' : 'var(--down)'}
-                    bg={pnlPct >= 0 ? 'var(--up-soft)' : 'var(--down-soft)'}
-                    border={pnlPct >= 0 ? 'var(--up)' : 'var(--down)'}
+                    color={(pnlPct ?? 0) >= 0 ? 'var(--up)' : 'var(--down)'}
+                    bg={(pnlPct ?? 0) >= 0 ? 'var(--up-soft)' : 'var(--down-soft)'}
+                    border={(pnlPct ?? 0) >= 0 ? 'var(--up)' : 'var(--down)'}
                     size={10}
                   >
-                    {fmtPct(pnlPct)}
+                    {pnlPct === null ? DASH : fmtPct(pnlPct)}
                   </Pill>
                 </span>
               }
               spark={kpiSpark}
-              valueColor={pnl >= 0 ? 'var(--up)' : 'var(--down)'}
+              valueColor={pnl === null ? 'var(--muted)' : pnl >= 0 ? 'var(--up)' : 'var(--down)'}
             />
           </div>
 
@@ -470,10 +361,10 @@ export default function Dashboard() {
               label="可用資金"
               value={
                 <span style={{ fontFamily: 'var(--font-mono)', fontFeatureSettings: '"tnum" 1' }}>
-                  NT$ {freeCash.toLocaleString('en-US')}
+                  {freeCash === null ? DASH : `NT$ ${freeCash.toLocaleString('en-US')}`}
                 </span>
               }
-              sub={`${cashRatioPct}% 現金部位`}
+              sub={cashRatioPct === null ? '等待即時資料' : `${cashRatioPct}% 現金部位`}
             />
           </div>
 
@@ -481,8 +372,8 @@ export default function Dashboard() {
           <div style={{ borderRight: '1px solid var(--hair)' }}>
             <Kpi
               label="今日已執行"
-              value={`${tradeCount} 筆`}
-              sub={`買 ${buySide} / 賣 ${sellSide}`}
+              value={tradeCount === null ? DASH : `${tradeCount} 筆`}
+              sub={buySide === null ? '等待即時資料' : `買 ${buySide} / 賣 ${sellSide}`}
             />
           </div>
 
@@ -492,10 +383,10 @@ export default function Dashboard() {
               label="AI 信心均值"
               value={
                 <span style={{ fontFamily: 'var(--font-mono)', fontFeatureSettings: '"tnum" 1' }}>
-                  {avgConfidence.toFixed(2)}
+                  {avgConfidence === null ? DASH : avgConfidence.toFixed(2)}
                 </span>
               }
-              sub={`≥ 0.75 共 ${highConfCount} 檔`}
+              sub={avgConfidence === null ? '尚無今日選股' : `≥ 0.75 共 ${highConfCount} 檔`}
             />
           </div>
 
@@ -600,7 +491,10 @@ export default function Dashboard() {
               padding: '12px 8px 8px',
               overflow: 'hidden',
             }}>
-              <DashChart data={chartData} />
+              {chartData
+                ? <DashChart data={chartData} />
+                : <DataState compact title="走勢圖尚未接上後端"
+                    detail="後端還沒有這個端點。原本這裡畫的是兩條寫死的曲線，與你的實際損益無關。" />}
             </div>
           </div>
 

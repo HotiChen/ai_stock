@@ -8,125 +8,8 @@ import Sparkline from '../../components/Sparkline';
 import Button from '../../components/Button';
 import Card from '../../components/Card';
 import { api } from '../../api';
+import { queryState } from '../../components/DataState';
 import type { TopNRun, Pick, RiskCheck, SectorAllocation } from '../../types';
-
-// ── Mock data ──────────────────────────────────────────────────────────────────
-const MOCK_RUN: TopNRun = {
-  run_id: 'PRE-20260525-001',
-  date: '2026-05-25',
-  scanned: 1823,
-  analyzed: 47,
-  buy_signals: 8,
-  hold_signals: 6,
-  approved: 6,
-  rejected_by_risk: 2,
-  picks: [
-    {
-      code: '2330', name: '台積電', sector: '半導體', signal: 'buy',
-      confidence: 0.91, target_price: 1020, stop_loss_price: 940,
-      last_price: 975, change_pct: 1.56,
-      spark: [920, 935, 918, 945, 960, 952, 968, 975, 980, 975],
-      reason: '法人連買5日，突破前高壓力，RSI回測支撐',
-      tags: ['法人', '突破', 'RSI支撐'],
-      action: 'approved', budget: 142000, budget_ratio: 0.24,
-      run_id: 'PRE-20260525-001', created_at: '2026-05-25T08:30:00Z',
-    },
-    {
-      code: '2454', name: '聯發科', sector: 'IC設計', signal: 'buy',
-      confidence: 0.87, target_price: 1350, stop_loss_price: 1210,
-      last_price: 1265, change_pct: 2.10,
-      spark: [1180, 1200, 1195, 1220, 1240, 1230, 1255, 1265, 1270, 1265],
-      reason: 'AI晶片需求爆發，本季EPS上修，MACD金叉',
-      tags: ['EPS上修', 'MACD金叉', 'AI概念'],
-      action: 'approved', budget: 126000, budget_ratio: 0.21,
-      run_id: 'PRE-20260525-001', created_at: '2026-05-25T08:30:00Z',
-    },
-    {
-      code: '2382', name: '廣達', sector: '伺服器', signal: 'buy',
-      confidence: 0.83, target_price: 255, stop_loss_price: 218,
-      last_price: 235, change_pct: 0.85,
-      spark: [210, 215, 212, 220, 228, 225, 232, 235, 238, 235],
-      reason: 'AI伺服器出貨量創新高，外資持續回補',
-      tags: ['伺服器', '外資回補'],
-      action: 'pending', budget: 94000, budget_ratio: 0.16,
-      run_id: 'PRE-20260525-001', created_at: '2026-05-25T08:30:00Z',
-    },
-    {
-      code: '2317', name: '鴻海', sector: '電子製造', signal: 'buy',
-      confidence: 0.78, target_price: 215, stop_loss_price: 192,
-      last_price: 202, change_pct: -0.49,
-      spark: [198, 205, 200, 208, 210, 205, 203, 200, 202, 202],
-      reason: '電動車訂單增溫，股價修正後具低接價值',
-      tags: ['電動車', '低接'],
-      action: 'pending', budget: 80800, budget_ratio: 0.14,
-      run_id: 'PRE-20260525-001', created_at: '2026-05-25T08:30:00Z',
-    },
-    {
-      code: '3711', name: '日月光投控', sector: '封裝測試', signal: 'buy',
-      confidence: 0.76, target_price: 142, stop_loss_price: 128,
-      last_price: 134, change_pct: 1.20,
-      spark: [125, 128, 127, 130, 132, 131, 133, 134, 135, 134],
-      reason: 'CoWoS封裝需求強勁，毛利率持續改善',
-      tags: ['CoWoS', '毛利改善'],
-      action: 'pending', budget: 53600, budget_ratio: 0.09,
-      run_id: 'PRE-20260525-001', created_at: '2026-05-25T08:30:00Z',
-    },
-    {
-      code: '2357', name: '華碩', sector: '電腦周邊', signal: 'hold',
-      confidence: 0.62, target_price: 560, stop_loss_price: 500,
-      last_price: 528, change_pct: -0.75,
-      spark: [540, 535, 530, 525, 520, 518, 522, 528, 525, 528],
-      reason: '筆電出貨增溫但競爭激烈，觀望為宜',
-      tags: ['筆電', '觀望'],
-      action: 'observe', budget: 52800, budget_ratio: 0.09,
-      run_id: 'PRE-20260525-001', created_at: '2026-05-25T08:30:00Z',
-    },
-    {
-      code: '2303', name: '聯電', sector: '半導體', signal: 'hold',
-      confidence: 0.58, target_price: 52, stop_loss_price: 46,
-      last_price: 49, change_pct: -0.20,
-      spark: [50, 49, 48, 49, 50, 49, 48, 49, 49, 49],
-      reason: '成熟製程需求趨緩，暫不追高',
-      tags: ['成熟製程', '趨緩'],
-      action: 'observe', budget: 0, budget_ratio: 0,
-      run_id: 'PRE-20260525-001', created_at: '2026-05-25T08:30:00Z',
-    },
-    {
-      code: '2412', name: '中華電', sector: '電信', signal: 'hold',
-      confidence: 0.55, target_price: 120, stop_loss_price: 109,
-      last_price: 114, change_pct: 0.09,
-      spark: [113, 114, 113, 114, 115, 114, 114, 113, 114, 114],
-      reason: '防禦性部位，5G進展緩慢',
-      tags: ['防禦', '5G'],
-      action: 'observe', budget: 0, budget_ratio: 0,
-      run_id: 'PRE-20260525-001', created_at: '2026-05-25T08:30:00Z',
-    },
-  ],
-  risk_checks: [
-    { key: '板塊集中度', sub: '半導體 38%', status: 'warn', detail: '半導體合計38%，接近40%上限' },
-    { key: '單筆部位', sub: '≤ 25%', status: 'pass', detail: '所有持倉均在25%以下' },
-    { key: '日內虧損上限', sub: '< -3%', status: 'pass', detail: '累計損益 +0.74%' },
-    { key: 'AI信心門檻', sub: '≥ 0.75', status: 'pass', detail: '6/8 檔超過門檻' },
-    { key: '黑名單過濾', sub: '0 衝突', status: 'pass', detail: '無黑名單標的' },
-    { key: 'Telegram 確認', sub: '已送出', status: 'pass', detail: '08:32:14 已送達' },
-  ],
-  sector_allocation: [
-    { name: '半導體', ratio: 0.38, limit: 0.40, value: 228000 },
-    { name: 'IC設計', ratio: 0.21, limit: 0.30, value: 126000 },
-    { name: '伺服器', ratio: 0.16, limit: 0.30, value: 96000 },
-    { name: '電子製造', ratio: 0.14, limit: 0.25, value: 84000 },
-    { name: '封裝測試', ratio: 0.09, limit: 0.20, value: 54000 },
-  ],
-  blacklist: ['2890', '2881'],
-  cost: {
-    duration_ms: 18240,
-    input_tokens: 12480,
-    output_tokens: 3840,
-    cost_usd: 0.0846,
-    model: 'claude-sonnet-4-6',
-  },
-  telegram_sent_at: '2026-05-25T08:32:14Z',
-};
 
 // ── Sub-tab ────────────────────────────────────────────────────────────────────
 const TABS = ['今日推薦', '深度分析', '推理過程', '多模型比較', '預測 vs 實際'];
@@ -368,13 +251,14 @@ export default function TopN() {
   const [activeTab, setActiveTab] = useState(0);
   const [run, setRun] = useState<TopNRun | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [rerunning, setRerunning] = useState(false);
   const [showRerunConfirm, setShowRerunConfirm] = useState(false);
 
   useEffect(() => {
     api.getTopN()
       .then(setRun)
-      .catch(() => setRun(MOCK_RUN))
+      .catch(setLoadError)
       .finally(() => setLoading(false));
   }, []);
 
@@ -401,17 +285,17 @@ export default function TopN() {
       .finally(() => setRerunning(false));
   }
 
-  if (loading) {
-    return (
-      <AppChrome title="AI 預測 · Top N" eyebrow="03.1">
-        <div style={{ padding: 20, color: 'var(--muted)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>
-          載入中…
-        </div>
-      </AppChrome>
-    );
-  }
+  const state = queryState({
+    isLoading: loading,
+    isError: !!loadError,
+    error: loadError,
+    isEmpty: !run || run.picks.length === 0,
+    what: '今日選股',
+    emptyDetail: '08:30 盤前選股完成後才會有候選；也可能是今天所有候選都被過濾掉了。',
+  });
+  if (state) return <AppChrome title="AI 預測 · Top N" eyebrow="03.1">{state}</AppChrome>;
 
-  const data = run ?? MOCK_RUN;
+  const data = run!;
   const buyCount = data.picks.filter((p) => p.signal === 'buy').length;
 
   return (

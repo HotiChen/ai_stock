@@ -8,62 +8,10 @@ import Eyebrow from '../../components/Eyebrow';
 import Button from '../../components/Button';
 import ConfidenceBar from '../../components/ConfidenceBar';
 import { api } from '../../api';
+import { queryState } from '../../components/DataState';
 import type { DeepAnalysis as DeepAnalysisType, Indicator, Scenario } from '../../types';
 
 // ── Mock data ──────────────────────────────────────────────────────────────────
-function mockDeepAnalysis(code: string): DeepAnalysisType {
-  return {
-    code,
-    name: code === '2330' ? '台積電' : code === '2454' ? '聯發科' : code === '2382' ? '廣達' : '股票' + code,
-    sector: '半導體',
-    last: 975,
-    change: 15,
-    change_pct: 1.56,
-    open: 960,
-    high: 982,
-    low: 955,
-    prev_close: 960,
-    volume_lots: 38421,
-    signal: 'buy',
-    confidence: 0.86,
-    target_price: 1020,
-    stop_loss_price: 940,
-    expected_return: 4.62,
-    max_loss: -3.59,
-    risk_reward: '1:1.29',
-    budget: 142000,
-    indicators: [
-      { key: 'RSI(14)', value: 62.4, hint: '回測支撐區', weight: 1.5, signal: 'bull' },
-      { key: 'MACD', value: '金叉', hint: '上穿訊號線', weight: 1.2, signal: 'bull' },
-      { key: 'MA20', value: '多頭排列', hint: '價格在均線上', weight: 1.0, signal: 'bull' },
-      { key: '法人動向', value: '連買5日', hint: '外資+投信', weight: 1.8, signal: 'bull' },
-      { key: '成交量', value: '+28%', hint: '量增價漲', weight: 1.0, signal: 'bull' },
-      { key: '布林通道', value: '中軌上', hint: '向上空間充足', weight: 0.8, signal: 'bull' },
-      { key: 'KD', value: '62/58', hint: 'K在D上方', weight: 0.9, signal: 'neutral' },
-      { key: '板塊動能', value: '+1.8%', hint: '半導體強勢', weight: 1.0, signal: 'bull' },
-      { key: '籌碼集中', value: '高', hint: '大股東近增持', weight: 0.7, signal: 'bull' },
-    ],
-    total_score: 15,
-    recommendation: '強力買進',
-    scenarios: [
-      { name: '基準情境', probability: 0.55, target_price: 1020, return_pct: 4.62, description: '維持法人買盤，AI晶片訂單年底前無緩跡象' },
-      { name: '樂觀情境', probability: 0.25, target_price: 1080, return_pct: 10.77, description: 'N3/N2良率超預期，CoWoS擴產帶動EPS大幅上修' },
-      { name: '保守情境', probability: 0.20, target_price: 960, return_pct: -1.54, description: '地緣政治風險升高，外資縮手觀望' },
-    ],
-    ai_conclusion: '台積電技術面呈現強勢突破格局，法人籌碼面持續看多，基本面有N3製程良率改善與CoWoS產能擴張兩大催化劑。短期目標1020元，對應本益比約22倍仍屬合理區間。建議以現價分兩批買進，第一批60%，剩餘40%待回測960元支撐後加碼。停損設於940元（-3.59%），紀律執行。',
-    ticks: Array.from({ length: 20 }, (_, i) => ({
-      t: `Day${i + 1}`,
-      open: 920 + i * 3 + Math.sin(i) * 8,
-      high: 930 + i * 3 + Math.abs(Math.sin(i)) * 12,
-      low: 910 + i * 3 - Math.abs(Math.cos(i)) * 8,
-      close: 925 + i * 3 + Math.sin(i * 0.5) * 10,
-      volume: 30000 + Math.floor(Math.random() * 20000),
-    })),
-    model: 'claude-sonnet-4-6',
-    generated_at: '2026-05-25T08:30:00Z',
-  };
-}
-
 // ── Indicator row ──────────────────────────────────────────────────────────────
 function IndicatorRow({ ind, last }: { ind: Indicator; last: boolean }) {
   const sigColor = ind.signal === 'bull' ? 'var(--up)' : ind.signal === 'bear' ? 'var(--down)' : 'var(--muted)';
@@ -228,6 +176,7 @@ export default function DeepAnalysis() {
   const navigate = useNavigate();
   const [data, setData] = useState<DeepAnalysisType | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [approving, setApproving] = useState(false);
   const [approved, setApproved] = useState(false);
 
@@ -235,7 +184,7 @@ export default function DeepAnalysis() {
     if (!code) return;
     api.getDeepAnalysis(code)
       .then(setData)
-      .catch(() => setData(mockDeepAnalysis(code)))
+      .catch(setLoadError)
       .finally(() => setLoading(false));
   }, [code]);
 
@@ -254,15 +203,14 @@ export default function DeepAnalysis() {
     navigate('/predict');
   }
 
-  if (loading) {
-    return (
-      <AppChrome title={`深度分析 · ${code}`} eyebrow="03.2">
-        <div style={{ padding: 20, color: 'var(--muted)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>載入中…</div>
-      </AppChrome>
-    );
-  }
+  const state = queryState({
+    isLoading: loading, isError: !!loadError, error: loadError, isEmpty: !data,
+    what: `${code ?? ''} 的深度分析`,
+    emptyDetail: '只有 08:30 技術評分前 8 名會做 AI 深度分析。',
+  });
+  if (state) return <AppChrome title={`深度分析 · ${code}`} eyebrow="03.2">{state}</AppChrome>;
 
-  const d = data ?? mockDeepAnalysis(code ?? '2330');
+  const d = data!;
   const totalScore = d.indicators.reduce((sum, ind) => {
     if (ind.signal === 'bull') return sum + ind.weight;
     if (ind.signal === 'bear') return sum - ind.weight;

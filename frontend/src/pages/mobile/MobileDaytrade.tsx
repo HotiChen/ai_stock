@@ -1,29 +1,8 @@
 // 07.2 手機 · 當沖實況 (iPhone 402×874)
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api';
-import type { DaytradeLive, Position } from '../../types';
-
-const MOCK_LIVE: DaytradeLive = {
-  countdown_seconds: 2127,
-  force_close_at: '13:25:00',
-  monitoring_count: 3,
-  closed_count: 2,
-  unrealized_pnl: 9840,
-  realized_pnl: 2500,
-  net_pnl: 12340,
-  net_value: 1012340,
-  positions: [
-    { code: '2330', name: '台積電', sector: '半導體', side: 'buy', entry_price: 1042, last_price: 1068, quantity: 1, lot: 'common', cost: 104200, market_value: 106800, pnl: 2600, pnl_pct: 0.025, target_price: 1120, stop_loss_price: 1030, distance_to_tp_pct: 0.049, distance_to_sl_pct: 0.036, thread_state: 'monitoring', confidence: 0.89, opened_at: '09:12:00' },
-    { code: '2382', name: '廣達', sector: 'AI伺服器', side: 'buy', entry_price: 295, last_price: 305, quantity: 2, lot: 'common', cost: 59000, market_value: 61000, pnl: 2000, pnl_pct: 0.034, target_price: 320, stop_loss_price: 290, distance_to_tp_pct: 0.049, distance_to_sl_pct: 0.016, thread_state: 'monitoring', confidence: 0.81, opened_at: '09:18:00' },
-    { code: '2308', name: '台達電', sector: 'AI伺服器', side: 'buy', entry_price: 382, last_price: 391, quantity: 1, lot: 'common', cost: 38200, market_value: 39100, pnl: 900, pnl_pct: 0.024, target_price: 405, stop_loss_price: 375, distance_to_tp_pct: 0.036, distance_to_sl_pct: 0.041, thread_state: 'monitoring', confidence: 0.77, opened_at: '09:24:00' },
-    { code: '2454', name: '聯發科', sector: '半導體', side: 'buy', entry_price: 1240, last_price: 1218, quantity: 1, lot: 'common', cost: 124000, market_value: 121800, pnl: -2200, pnl_pct: -0.018, target_price: 1320, stop_loss_price: 1210, distance_to_tp_pct: 0.084, distance_to_sl_pct: 0.007, thread_state: 'monitoring', confidence: 0.71, opened_at: '09:35:00' },
-    { code: '2317', name: '鴻海', sector: '電子零件', side: 'buy', entry_price: 155, last_price: 151.5, quantity: 2, lot: 'intraday_odd', cost: 31000, market_value: 30300, pnl: -700, pnl_pct: -0.023, target_price: 165, stop_loss_price: 148, distance_to_tp_pct: 0.09, distance_to_sl_pct: 0.023, thread_state: 'monitoring', confidence: 0.65, opened_at: '10:02:00' },
-  ],
-  alerts: [],
-  threads: [],
-  risk: { budget: 1000000, used: 421000, free: 579000, utilization: 0.421, intraday_pnl: 12340, intraday_pnl_pct: 0.0123, daily_max_dd_limit: -50000, sector_allocation: [], blacklist: [], single_max: { value: 200000, ratio: 0.2, limit: 0.3, ok: true } },
-  next_poll_in_seconds: 28,
-};
+import { queryState } from '../../components/DataState';
+import type { Position } from '../../types';
 
 function SparklineSVG({ points, color }: { points: number[]; color: string }) {
   if (points.length < 2) return null;
@@ -109,12 +88,26 @@ function CountdownBanner({ seconds }: { seconds: number }) {
 }
 
 export default function MobileDaytrade() {
-  const { data: live = MOCK_LIVE } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['daytrade-live'],
     queryFn: () => api.getDaytradeLive(),
     refetchInterval: 30000,
     retry: false,
   });
+
+  const state = queryState({
+    isLoading, isError, error, isEmpty: !data,
+    what: '當沖實況',
+    emptyDetail: '09:10 進場後才會有持倉；盤後 main.py 也可能已停止推送。',
+  });
+  if (state) {
+    return (
+      <div style={{ maxWidth: 402, margin: '0 auto', background: 'var(--bg)', minHeight: '100dvh', padding: 16 }}>
+        {state}
+      </div>
+    );
+  }
+  const live = data!;
 
   const netValue = live.net_value;
   const sparkPoints = [netValue * 0.998, netValue * 0.999, netValue * 1.001, netValue * 1.002, netValue * 1.0123];

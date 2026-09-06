@@ -8,90 +8,10 @@ import Button from '../../components/Button';
 import KChart, { markColor } from '../../components/KChart';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { api } from '../../api';
-import type { ChartView, AIMark, Tick } from '../../types';
+import { queryState } from '../../components/DataState';
+import type { ChartView } from '../../types';
 
 // ── Mock data ───────────────────────────────────────────────────
-function buildMockTicks(): Tick[] {
-  const base = 960;
-  const ticks: Tick[] = [];
-  let open = base;
-  for (let i = 0; i < 48; i++) {
-    const close = open + (Math.random() - 0.48) * 15;
-    const high = Math.max(open, close) + Math.random() * 6;
-    const low = Math.min(open, close) - Math.random() * 6;
-    const h = Math.floor(9 + i / 8);
-    const m = (i % 8) * 5;
-    ticks.push({
-      t: `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`,
-      open: +open.toFixed(1),
-      high: +high.toFixed(1),
-      low: +low.toFixed(1),
-      close: +close.toFixed(1),
-      volume: Math.floor(100 + Math.random() * 500),
-    });
-    open = close;
-  }
-  return ticks;
-}
-
-const MOCK_TICKS = buildMockTicks();
-
-function buildMA(ticks: Tick[], period: number): number[] {
-  return ticks.map((_, i) => {
-    if (i < period - 1) return NaN;
-    const slice = ticks.slice(i - period + 1, i + 1);
-    return slice.reduce((s, t) => s + t.close, 0) / period;
-  });
-}
-
-function buildRSI(ticks: Tick[], period = 14): number[] {
-  const rsi: number[] = new Array(ticks.length).fill(NaN);
-  if (ticks.length < period + 1) return rsi;
-  let gains = 0, losses = 0;
-  for (let i = 1; i <= period; i++) {
-    const diff = ticks[i].close - ticks[i - 1].close;
-    if (diff >= 0) gains += diff; else losses -= diff;
-  }
-  let avgGain = gains / period, avgLoss = losses / period;
-  rsi[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  for (let i = period + 1; i < ticks.length; i++) {
-    const diff = ticks[i].close - ticks[i - 1].close;
-    avgGain = (avgGain * (period - 1) + (diff >= 0 ? diff : 0)) / period;
-    avgLoss = (avgLoss * (period - 1) + (diff < 0 ? -diff : 0)) / period;
-    rsi[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  }
-  return rsi;
-}
-
-const MOCK_MARKS: AIMark[] = [
-  { index: 2,  time: '09:10', kind: 'buy',  label: 'BUY',  confidence: 0.86, reasoning: '突破 MA20，成交量放大' },
-  { index: 12, time: '10:00', kind: 'add',  label: 'ADD',  confidence: 0.78, reasoning: '拉回 MA20 支撐確認' },
-  { index: 24, time: '11:00', kind: 'warn', label: 'WARN', confidence: 0.65, reasoning: 'RSI 進入超買，注意回調' },
-  { index: 36, time: '12:00', kind: 'tp',   label: 'TP',   confidence: 0.90, reasoning: '接近目標價，可考慮減碼' },
-  { index: 42, time: '12:30', kind: 'note', label: 'NOTE', confidence: 0.72, reasoning: '大盤轉弱，持續觀察' },
-];
-
-function buildMockChart(code: string): ChartView {
-  const ticks = MOCK_TICKS;
-  const ma20 = buildMA(ticks, 20);
-  const ma5 = buildMA(ticks, 5);
-  return {
-    code,
-    ticks,
-    ma20,
-    ma5,
-    bollinger: { upper: ma20.map((v) => v + 20), mid: ma20, lower: ma20.map((v) => v - 20) },
-    rsi: buildRSI(ticks),
-    ai_marks: MOCK_MARKS,
-    next_action_suggestion: {
-      kind: 'hold',
-      text: '目前價格在 MA20 上方，RSI 71.4 接近超買區間。建議持倉觀察，若 RSI > 75 可考慮減碼 50%。',
-      confidence: 0.78,
-      suggested_value: undefined,
-    },
-  };
-}
-
 // ── Legend ──────────────────────────────────────────────────────
 function ChartLegend({ ma20Valid: _ma20Valid }: { ma20Valid: boolean }) {
   return (
@@ -203,7 +123,9 @@ export default function ChartPage() {
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(700);
-  const [chartData, setChartData] = useState<ChartView>(buildMockChart(code));
+  const [chartData, setChartData] = useState<ChartView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [selectedMarkIdx, setSelectedMarkIdx] = useState<number | null>(null);
   const [adjustModal, setAdjustModal] = useState<'tp' | 'sl' | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
@@ -217,8 +139,12 @@ export default function ChartPage() {
 
   // Initial fetch
   useEffect(() => {
-    api.getChartData(code).then(setChartData).catch(() => {/* use mock */});
-    setChartData(buildMockChart(code));
+    setLoading(true);
+    setLoadError(null);
+    api.getChartData(code)
+      .then(setChartData)
+      .catch(setLoadError)
+      .finally(() => setLoading(false));
   }, [code]);
 
   // Measure container width
@@ -233,7 +159,15 @@ export default function ChartPage() {
     return () => ro.disconnect();
   }, []);
 
-  const ticks = chartData.ticks;
+  const state = queryState({
+    isLoading: loading, isError: !!loadError, error: loadError, isEmpty: !chartData,
+    what: `${code} 的 K 線`,
+    emptyDetail: '需要當日 tick 資料；盤前或非交易日不會有。原本這裡畫的是程式產生的假 K 線。',
+  });
+  if (state) return <AppChrome title={`K 線 · ${code}`} eyebrow="04.2">{state}</AppChrome>;
+
+  const chart = chartData!;
+  const ticks = chart.ticks;
   const last = ticks[ticks.length - 1];
   const first = ticks[0];
   const lastClose = last?.close ?? 0;
@@ -253,7 +187,7 @@ export default function ChartPage() {
   const distSl = ((lastClose - stopLossPrice) / lastClose) * 100;
 
   void (selectedMarkIdx !== null
-    ? chartData.ai_marks.find((m) => m.index === selectedMarkIdx)
+    ? chart.ai_marks.find((m) => m.index === selectedMarkIdx)
     : null);
 
   const handleAdjustTp = useCallback(async (value: number) => {
@@ -355,14 +289,14 @@ export default function ChartPage() {
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* Left: chart */}
         <div ref={containerRef} style={{ flex: 1, overflow: 'auto', background: 'var(--surface)', borderRight: '1px solid var(--hair)' }}>
-          <ChartLegend ma20Valid={chartData.ma20.some((v) => !isNaN(v))} />
+          <ChartLegend ma20Valid={chart.ma20.some((v) => !isNaN(v))} />
           <KChart
             ticks={ticks}
-            ma20={chartData.ma20}
-            rsi={chartData.rsi}
+            ma20={chart.ma20}
+            rsi={chart.rsi}
             targetPrice={targetPrice}
             stopLossPrice={stopLossPrice}
-            aiMarks={chartData.ai_marks}
+            aiMarks={chart.ai_marks}
             selectedMarkIndex={selectedMarkIdx}
             onSelectMark={setSelectedMarkIdx}
             width={chartWidth}
@@ -375,13 +309,13 @@ export default function ChartPage() {
           <div style={{ borderBottom: '1px solid var(--hair)', padding: '8px 12px', flexShrink: 0 }}>
             <Eyebrow label="AI 進出場標記" right={
               <Pill color="var(--muted)" bg="transparent" border="var(--hair)" size={10}>
-                {chartData.ai_marks.length} 個
+                {chart.ai_marks.length} 個
               </Pill>
             } />
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto' }}>
-            {chartData.ai_marks.map((mark) => {
+            {chart.ai_marks.map((mark) => {
               const color = markColor[mark.kind] ?? 'var(--muted)';
               const isSelected = selectedMarkIdx === mark.index;
               return (
@@ -441,7 +375,7 @@ export default function ChartPage() {
           </div>
 
           {/* Next action suggestion */}
-          {chartData.next_action_suggestion && (
+          {chart.next_action_suggestion && (
             <div style={{
               borderTop: '1px solid var(--hair)',
               borderLeft: '3px solid var(--up)',
@@ -453,14 +387,14 @@ export default function ChartPage() {
                 建議下一步
               </div>
               <div style={{ fontSize: 12, color: 'var(--ink)', lineHeight: 1.6, marginBottom: 8 }}>
-                {chartData.next_action_suggestion.text}
+                {chart.next_action_suggestion.text}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                 <Pill
-                  color={chartData.next_action_suggestion.confidence >= 0.75 ? 'var(--up)' : 'var(--gold)'}
+                  color={chart.next_action_suggestion.confidence >= 0.75 ? 'var(--up)' : 'var(--gold)'}
                   bg="transparent" border="var(--hair)" size={10}
                 >
-                  AI 信心 {(chartData.next_action_suggestion.confidence * 100).toFixed(0)}%
+                  AI 信心 {(chart.next_action_suggestion.confidence * 100).toFixed(0)}%
                 </Pill>
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
@@ -468,7 +402,7 @@ export default function ChartPage() {
                   size="small"
                   variant="primary"
                   onClick={() => {
-                    const s = chartData.next_action_suggestion;
+                    const s = chart.next_action_suggestion;
                     if (!s) return;
                     if (s.kind === 'adjust_tp' && s.suggested_value) api.adjustTp(code, s.suggested_value);
                     if (s.kind === 'adjust_sl' && s.suggested_value) api.adjustSl(code, s.suggested_value);
