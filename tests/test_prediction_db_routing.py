@@ -47,7 +47,7 @@ def _patches(cfg):
         patch("daytrading_report._get_stock_universe", return_value=[_pick()]),
         patch("daytrading_report._fetch_historical_win_rate", return_value=None),
         patch("daytrading_report._fetch_market", return_value=market),
-        patch("daytrading_report._fetch_chip_data", return_value={}),
+        patch("daytrading_report._fetch_chip_data", return_value=({}, None)),
         patch("daytrading_report._get_indicators", return_value=indicators),
         patch("stock_query._assess_day_trading", return_value=_assessment()),
         patch("daytrading_config.load_daytrading_config", return_value=cfg),

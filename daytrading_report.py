@@ -89,14 +89,23 @@ _MAX_CHIP_PICKS = 10   # 查連續買超天數的上限，避免 TWSE rate limit
 _MIN_DT_SCORE   = 4    # 進入 qualified 的最低技術評分門檻
 
 
-def _fetch_chip_data(today_str: str) -> dict:
-    """抓今日全市場三大法人資料，失敗回空 dict。"""
+def _fetch_chip_data(today_str: str) -> tuple[dict, str | None]:
+    """抓**最近一個有資料的交易日**的全市場三大法人資料。
+
+    原本直接抓 today_str，但 TWSE 的 T86 是收盤後（約 15:00–16:00）才公布——
+    08:30 的盤前選股問「今天」永遠拿到空的。於是每一檔的 chip 都是 None，
+    LLM 看到「籌碼黑盒」，2026-09-01 到 09-09 五個交易日 90 檔預測
+    action=long **0 檔**，理由清一色是「沒有法人確認，訊號不夠清晰」。
+
+    回 (資料, 實際日期)。日期為 None 代表往前找了 10 天都沒有——
+    那是真的異常，不是「今天沒有法人買賣超」。
+    """
     try:
-        from chip_data import fetch_institutional_investors
-        return fetch_institutional_investors(today_str)
+        from chip_data import fetch_latest_institutional
+        return fetch_latest_institutional(today_str)
     except Exception as e:
-        log.warning("fetch_institutional_investors failed: %s", e)
-        return {}
+        log.warning("fetch_latest_institutional failed: %s", e)
+        return {}, None
 
 
 def _fetch_market() -> dict:
@@ -330,11 +339,20 @@ def build_daytrading_report(
     # 2. 大盤方向（一次）
     market = _fetch_market()
 
-    # 3. 三大法人（今日全市場，一次）
-    chip_today = _fetch_chip_data(today_str)
+    # 3. 三大法人（最近一個有資料的交易日，一次）
+    chip_today, chip_as_of = _fetch_chip_data(today_str)
+    if chip_as_of is None:
+        log.error(
+            "三大法人資料完全抓不到（往前找了 10 天）。"
+            "每一檔都會變成『籌碼黑盒』，AI 幾乎必然全部 skip——"
+            "這正是 2026-09 連續五個交易日 0 檔 long 的成因。"
+        )
+    elif chip_as_of != today_str.replace("-", ""):
+        log.info("三大法人使用 %s 的資料（T86 收盤後才公布，08:30 沒有當日資料）",
+                 chip_as_of)
 
     # 4. 連續買超快取（各日期共用，避免重複打 TWSE API）
-    _date_cache: dict = {today_str: chip_today}
+    _date_cache: dict = {chip_as_of: chip_today} if chip_as_of else {}
 
     def _cached_fetcher(date_str: str) -> dict:
         if date_str not in _date_cache:
@@ -373,14 +391,18 @@ def build_daytrading_report(
         else:
             indicator_failures = 0
 
-        # 法人籌碼：今日單日資料 + 連續買超天數（上限 _MAX_CHIP_PICKS 支）
+        # 法人籌碼：最近交易日的單日資料 + 連續買超天數（上限 _MAX_CHIP_PICKS 支）
         chip = chip_today.get(code)
+        if chip is not None:
+            # 讓下游（含 LLM prompt）看得到這是哪一天的籌碼。
+            # 「昨天的法人買超」和「今天的」是不同的資訊。
+            chip = {**chip, "as_of": chip_as_of}
         if chip is not None and i < _MAX_CHIP_PICKS:
             try:
                 from chip_data import get_continuous_buy_days
                 cont = get_continuous_buy_days(
                     code,
-                    end_date=today_str,
+                    end_date=chip_as_of or today_str,
                     data_fetcher=_cached_fetcher,
                     days=5,
                 )

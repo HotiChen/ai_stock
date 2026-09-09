@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 from datetime import datetime, timedelta
@@ -18,6 +19,8 @@ import requests
 
 _REQUEST_TIMEOUT = 10       # TWSE API 連線/讀取 timeout（秒）
 _RATE_LIMIT_SLEEP = 0.3     # 連續請求之間的最小間隔（秒）
+
+log = logging.getLogger(__name__)
 
 TWSE_API_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
 
@@ -94,6 +97,49 @@ def _prev_trading_dates(end_date: str, days: int) -> list[str]:
         dates.append((dt - timedelta(days=i)).strftime("%Y%m%d"))
     return dates
 
+
+
+#: 往前找最近一個有資料的交易日，最多找幾個日曆日。
+#: 台股最長連假約 9 天（農曆年），10 天足夠涵蓋。
+DEFAULT_CHIP_LOOKBACK_DAYS = 10
+
+
+def fetch_latest_institutional(
+    end_date: str | None = None,
+    max_lookback: int = DEFAULT_CHIP_LOOKBACK_DAYS,
+    fetch=None,
+) -> tuple[dict, str | None]:
+    """從 end_date 往前找**最近一個有三大法人資料的交易日**。
+
+    為什麼需要這個函式
+    ------------------
+    TWSE 的 T86 是收盤後（約 15:00–16:00）才公布。08:30 的盤前選股若直接問
+    「今天」的資料，端點回 stat != OK，fetch_institutional_investors 照設計
+    回 {}，於是每一檔的 chip 都是 None——LLM 看到的是「籌碼黑盒」。
+
+    2026-09-01 到 09-09 五個交易日、90 檔預測，action=long **0 檔**，
+    落庫的理由清一色是「沒有法人確認，訊號不夠清晰」。整條資料鏈是通的，
+    只是每天都在問一個七小時後才會有答案的問題。
+
+    回傳
+    ----
+    (資料, 實際日期)。找不到時回 ({}, None)——**None 是重點**：
+    呼叫端才能分辨「今天真的沒有法人買賣超」和「根本沒查到」。
+    直接回一個空 dict 會讓上游誤以為是前者，那正是原本的失敗形狀。
+    """
+    fetch = fetch or fetch_institutional_investors
+    end_date = end_date or datetime.now().strftime("%Y%m%d")
+
+    for date_str in _prev_trading_dates(end_date, max_lookback):
+        try:
+            data = fetch(date_str)
+        except Exception as e:
+            # 單日失敗（逾時、限流）不該中斷整個回溯
+            log.warning("三大法人 %s 抓取失敗，往前一天：%s", date_str, e)
+            continue
+        if data:
+            return data, date_str
+    return {}, None
 
 def get_continuous_buy_days(
     code: str,

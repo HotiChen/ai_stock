@@ -49,7 +49,7 @@ class TestBuildDaytradingReport:
         with patch("daytrading_report._get_stock_universe", return_value=picks), \
              patch("daytrading_report._fetch_historical_win_rate", return_value=hist_win_rate), \
              patch("daytrading_report._fetch_market", return_value=market), \
-             patch("daytrading_report._fetch_chip_data", return_value=chip_today), \
+             patch("daytrading_report._fetch_chip_data", return_value=(chip_today, "20260904")), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("chip_data.get_continuous_buy_days", side_effect=_mock_cont), \
              patch("stock_query._assess_day_trading", return_value=assessment):
@@ -143,7 +143,7 @@ class TestBuildDaytradingReport:
                    return_value=[_make_pick()]), \
              patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
              patch("daytrading_report._fetch_market", return_value=market), \
-             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._fetch_chip_data", return_value=({}, None)), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("stock_query._assess_day_trading", return_value=assessment), \
              patch("daytrading_report.run_daytrading_analysis",
@@ -167,7 +167,7 @@ class TestDataSufficiencyGating:
         with patch("daytrading_report._get_stock_universe", return_value=picks), \
              patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
              patch("daytrading_report._fetch_market", return_value=market), \
-             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._fetch_chip_data", return_value=({}, None)), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("stock_query._assess_day_trading", return_value=assessment):
             return build_daytrading_report(api=None, db_path=":memory:")
@@ -207,7 +207,7 @@ class TestDataSufficiencyGating:
              patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
              patch("daytrading_report._fetch_market",
                    return_value={"index_change_pct": 0.0, "futures_premium_pct": 0.0}), \
-             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._fetch_chip_data", return_value=({}, None)), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("stock_query._assess_day_trading", return_value=assessment), \
              patch("daytrading_report.run_daytrading_analysis") as mock_ai:
@@ -224,7 +224,7 @@ class TestDataSufficiencyGating:
              patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
              patch("daytrading_report._fetch_market",
                    return_value={"index_change_pct": 0.0, "futures_premium_pct": 0.0}), \
-             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._fetch_chip_data", return_value=({}, None)), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("stock_query._assess_day_trading", return_value=assessment), \
              patch("daytrading_report.run_daytrading_analysis") as mock_ai:
@@ -346,7 +346,7 @@ class TestSaveWatchingPositions:
              patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
              patch("daytrading_report._fetch_market",
                    return_value={"index_change_pct": 0.0, "futures_premium_pct": 0.0}), \
-             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._fetch_chip_data", return_value=({}, None)), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("stock_query._assess_day_trading", return_value=assessment), \
              patch("daytrading_report.run_daytrading_analysis", side_effect=_fake_ai), \
@@ -444,7 +444,7 @@ class TestAdvisorModeWiring:
         with patch("daytrading_report._get_stock_universe", return_value=picks), \
              patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
              patch("daytrading_report._fetch_market", return_value=market), \
-             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._fetch_chip_data", return_value=({}, None)), \
              patch("daytrading_report._get_indicators", return_value=indicators), \
              patch("stock_query._assess_day_trading", return_value=assessment), \
              patch("daytrading_config.load_daytrading_config", return_value=cfg), \
@@ -562,7 +562,7 @@ class TestAiDecisionLogWiring:
             patch("daytrading_report._get_stock_universe", return_value=picks),
             patch("daytrading_report._fetch_historical_win_rate", return_value=None),
             patch("daytrading_report._fetch_market", return_value=market),
-            patch("daytrading_report._fetch_chip_data", return_value={}),
+            patch("daytrading_report._fetch_chip_data", return_value=({}, None)),
             patch("daytrading_report._get_indicators", return_value=indicators),
             patch("stock_query._assess_day_trading", return_value=assessment),
             patch("daytrading_config.load_daytrading_config", return_value=cfg),

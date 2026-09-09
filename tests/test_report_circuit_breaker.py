@@ -31,7 +31,7 @@ class TestIndicatorCircuitBreaker:
              patch.object(dr, "_fetch_market",
                           return_value={"index_change_pct": 0.0,
                                         "futures_premium_pct": 0.0}), \
-             patch.object(dr, "_fetch_chip_data", return_value={}), \
+             patch.object(dr, "_fetch_chip_data", return_value=({}, None)), \
              patch.object(dr, "_fetch_historical_win_rate", return_value=None), \
              patch.object(dr, "_get_indicators", side_effect=_get_ind):
             msg = dr.build_daytrading_report(api=None, review_db_path=":memory:")

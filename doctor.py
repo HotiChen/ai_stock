@@ -406,6 +406,37 @@ def check_db_schema(review_db: str | None = None) -> CheckResult:
     return CheckResult("資料庫 schema", OK, "欄位齊全")
 
 
+def check_chip_data() -> CheckResult:
+    """三大法人資料抓不抓得到、是哪一天的。
+
+    TWSE 的 T86 收盤後（約 15:00–16:00）才公布，所以 08:30 拿到的必然是
+    前一個交易日的。抓不到的話 LLM 會對每一檔都看到「籌碼黑盒」，
+    幾乎必然全部 skip——2026-09-01 到 09-09 五個交易日、90 檔預測、
+    action=long 0 檔，就是這樣來的。
+
+    症狀是「AI 每天都說跳過」，看起來像策略保守而不像故障，
+    所以必須在這裡主動檢查。
+    """
+    try:
+        import chip_data
+    except Exception as e:
+        return CheckResult("三大法人資料", WARN, "模組不可用", str(e))
+
+    try:
+        data, as_of = chip_data.fetch_latest_institutional()
+    except Exception as e:
+        return CheckResult("三大法人資料", FAIL, "查詢異常", str(e))
+
+    if as_of is None:
+        return CheckResult(
+            "三大法人資料", FAIL,
+            "往前找 10 天都抓不到",
+            "每一檔都會是「籌碼黑盒」，AI 幾乎必然全部 skip（action=long 0 檔）。"
+            "檢查對外網路與 www.twse.com.tw 是否可達。",
+        )
+    return CheckResult("三大法人資料", OK, f"{as_of} 的資料，{len(data)} 檔")
+
+
 def check_trading_restrictions() -> CheckResult:
     """處置股／注意股清單今天抓不抓得到。
 
@@ -586,6 +617,7 @@ _CHECKS = (
     ("check_market_data", ("api",)),
     ("check_quota", ("api",)),
     ("check_db_schema", ()),
+    ("check_chip_data", ()),
     ("check_trading_restrictions", ()),
     ("check_open_positions", ()),
     ("check_processes", ()),

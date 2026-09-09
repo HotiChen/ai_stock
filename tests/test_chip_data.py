@@ -537,3 +537,125 @@ class TestRequestTimeout:
             # 3 日查詢，前 2 次後應各 sleep 一次（第一次不 sleep）
             assert mock_sleep.call_count >= 2, \
                 f"days=3 應至少 sleep 2 次，實際 {mock_sleep.call_count} 次"
+
+
+# ── fetch_latest_institutional ────────────────────────────────────────────────
+
+class TestFetchLatestInstitutional:
+    """★ 2026-09-09 發現的根因：08:30 去問 TWSE 要「今天」的三大法人資料。
+
+    TWSE 的 T86 是**收盤後**（約 15:00–16:00）才公布。08:30 那個時間點
+    今天的資料根本不存在，端點回 stat != OK，fetch_institutional_investors
+    照設計回 {}，於是 chip_today.get(code) 對每一檔都是 None。
+
+    後果：LLM 在 8:30 看到的每一檔都「沒有法人資料」。實際落庫的 ai_summary
+    長這樣——
+
+        「籌碼黑盒、大盤-0.66%空頭氣氛、RSI 69.88超買，量雖然4.7倍
+          但沒有法人確認，訊號不夠清晰——跳過。」
+
+    2026-09-01 到 09-09 共五個交易日、90 檔預測，action=long **0 檔**。
+    使用者以為是資料鏈斷了，實際上資料鏈是通的，只是每天都在問一個
+    七小時後才會有答案的問題。
+
+    正確行為：往前找最近一個有資料的交易日，並回報那是哪一天——
+    「昨天的籌碼」和「今天的籌碼」是不同的資訊，呼叫端有權知道。
+    """
+
+    def _fetcher(self, available: dict):
+        """available: {日期字串: 資料}。沒列到的日期回 {}（模擬非交易日／未公布）。"""
+        calls = []
+
+        def fetch(date_str):
+            calls.append(date_str)
+            return available.get(date_str, {})
+
+        fetch.calls = calls
+        return fetch
+
+    def test_falls_back_to_previous_day(self):
+        from chip_data import fetch_latest_institutional
+        f = self._fetcher({"20260908": {"2330": {"foreign_net": 1000}}})
+        data, as_of = fetch_latest_institutional("20260909", fetch=f)
+        assert "2330" in data
+        assert as_of == "20260908"
+
+    def test_today_wins_when_available(self):
+        """收盤後執行（或回填）時今天的資料就有了，不該再往前找。"""
+        from chip_data import fetch_latest_institutional
+        f = self._fetcher({"20260909": {"2330": {}}, "20260908": {"2454": {}}})
+        data, as_of = fetch_latest_institutional("20260909", fetch=f)
+        assert as_of == "20260909"
+        assert f.calls == ["20260909"]
+
+    def test_skips_weekend_and_holiday_gaps(self):
+        """週末與連假整段沒有資料，要能一路往前走到有的那天。"""
+        from chip_data import fetch_latest_institutional
+        f = self._fetcher({"20260904": {"2330": {}}})
+        data, as_of = fetch_latest_institutional("20260907", fetch=f)
+        assert as_of == "20260904"
+        assert f.calls == ["20260907", "20260906", "20260905", "20260904"]
+
+    def test_gives_up_after_max_lookback(self):
+        """★ 找不到就是找不到，不能回一個看起來正常的空 dict 讓上游誤以為
+        「今天沒有法人買賣超」——那正是原本的失敗形狀。"""
+        from chip_data import fetch_latest_institutional
+        f = self._fetcher({})
+        data, as_of = fetch_latest_institutional("20260909", max_lookback=3, fetch=f)
+        assert data == {}
+        assert as_of is None
+        assert len(f.calls) == 3
+
+    def test_fetcher_exception_does_not_abort_the_walk(self):
+        from chip_data import fetch_latest_institutional
+
+        def fetch(date_str):
+            if date_str == "20260909":
+                raise RuntimeError("TWSE 逾時")
+            return {"2330": {}} if date_str == "20260908" else {}
+
+        data, as_of = fetch_latest_institutional("20260909", fetch=fetch)
+        assert as_of == "20260908"
+
+    def test_defaults_to_today(self):
+        import datetime as _dt
+        from chip_data import fetch_latest_institutional
+        f = self._fetcher({})
+        fetch_latest_institutional(max_lookback=1, fetch=f)
+        assert f.calls == [_dt.date.today().strftime("%Y%m%d")]
+
+
+class TestPremarketUsesLatestNotToday:
+    """★ 結構測試：8:30 的選股不得直接問「今天」的三大法人。
+
+    這是 2026-09 連續五個交易日 0 檔 long 的成因。改回去就會再發生一次，
+    而且症狀是「AI 每天都說跳過」——看起來像策略保守，不像故障。
+    """
+
+    def test_fetch_chip_data_uses_the_lookback_helper(self):
+        import inspect
+
+        import daytrading_report as dr
+        src = inspect.getsource(dr._fetch_chip_data)
+        assert "fetch_latest_institutional" in src
+        assert "fetch_institutional_investors" not in src
+
+    def test_fetch_chip_data_returns_the_as_of_date(self):
+        """呼叫端必須知道籌碼是哪一天的——不然沒辦法分辨
+        「今天沒有法人買賣超」和「根本沒查到」。"""
+        from unittest.mock import patch
+
+        import daytrading_report as dr
+        with patch("chip_data.fetch_latest_institutional",
+                   return_value=({"2330": {}}, "20260908")):
+            data, as_of = dr._fetch_chip_data("20260909")
+        assert as_of == "20260908"
+
+    def test_failure_reports_none_not_empty_dict_only(self):
+        from unittest.mock import patch
+
+        import daytrading_report as dr
+        with patch("chip_data.fetch_latest_institutional",
+                   side_effect=RuntimeError("boom")):
+            data, as_of = dr._fetch_chip_data("20260909")
+        assert data == {} and as_of is None

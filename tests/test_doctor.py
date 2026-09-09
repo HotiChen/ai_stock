@@ -564,3 +564,33 @@ class TestOpenPositionQuantityUnits:
     def test_missing_price_still_reports_quantity(self, tmp_path):
         r = doctor.check_open_positions(self._db(tmp_path, 2, "common", 0))
         assert "2 張" in r.detail
+
+
+class TestCheckChipData:
+    """★ 「AI 每天都說跳過」看起來像策略保守，不像故障——所以要主動檢查。"""
+
+    def test_ok_reports_the_date(self):
+        import chip_data
+        with patch.object(chip_data, "fetch_latest_institutional",
+                          return_value=({"2330": {}}, "20260908")):
+            r = doctor.check_chip_data()
+        assert r.status == doctor.OK
+        assert "20260908" in r.message
+
+    def test_fails_when_nothing_found(self):
+        import chip_data
+        with patch.object(chip_data, "fetch_latest_institutional",
+                          return_value=({}, None)):
+            r = doctor.check_chip_data()
+        assert r.status == doctor.FAIL
+        assert "籌碼黑盒" in r.detail
+
+    def test_never_raises(self):
+        import chip_data
+        with patch.object(chip_data, "fetch_latest_institutional",
+                          side_effect=RuntimeError("x")):
+            assert doctor.check_chip_data().status in (
+                doctor.OK, doctor.WARN, doctor.FAIL)
+
+    def test_registered(self):
+        assert "check_chip_data" in [n for n, _ in doctor._CHECKS]

@@ -499,7 +499,7 @@ class TestDaytradingReportWithAI:
              patch("daytrading_report._fetch_historical_win_rate", return_value=None), \
              patch("daytrading_report._fetch_market",
                    return_value={"index_change_pct": 0.5, "futures_premium_pct": 0.0}), \
-             patch("daytrading_report._fetch_chip_data", return_value={}), \
+             patch("daytrading_report._fetch_chip_data", return_value=({}, None)), \
              patch("daytrading_report._get_indicators", return_value=None), \
              patch("stock_query._fetch_annual_trend",
                    return_value={"error": "skip", "monthly_closes": []}), \
